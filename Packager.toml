@@ -1,0 +1,49 @@
+# cargo-packager config — installers for macOS, Windows, and Linux.
+# https://github.com/crabnebula-dev/cargo-packager
+#
+#   cargo install cargo-packager --locked
+#   cargo packager --release --formats nsis,dmg,deb   # on the matching OS
+
+name = "mailbox"
+product-name = "Mailbox"
+identifier = "com.ailiak.Mailbox"
+version = "0.1.0"
+description = "Calm Linux email client — mail stays local, work goes to Ailiak"
+publisher = "Ailiak"
+homepage = "https://ailiak.com"
+category = "Email"
+license-file = "LICENSE"
+out-dir = "dist"
+
+before-packaging-command = "cargo build -p mailbox-gui --release"
+
+icons = [
+  "crates/mailbox-gui/assets/img/ailiak-icon-32.png",
+  "crates/mailbox-gui/assets/img/ailiak-icon-128.png",
+  "crates/mailbox-gui/assets/img/ailiak-icon-256.png",
+  "crates/mailbox-gui/assets/img/ailiak-icon-512.png",
+  "crates/mailbox-gui/assets/img/mailbox.ico",
+]
+
+# Resolved under target/release/ after before-packaging-command.
+[[binaries]]
+path = "mailbox"
+main = true
+
+# --- Windows: NSIS setup.exe and/or WiX MSI ---
+[windows]
+allow-downgrades = true
+
+[nsis]
+install-mode = "currentUser"
+display-language-selector = false
+
+# --- macOS: .app inside a .dmg ---
+[macos]
+minimum-system-version = "11.0"
+
+# --- Linux: .deb + AppImage (in addition to scripts/install-linux-icon.sh) ---
+[deb]
+depends = []
+section = "mail"
+priority = "optional"

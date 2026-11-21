@@ -1,0 +1,8 @@
+/target/
+/dist/
+**/*.rs.bk
+.DS_Store
+*.swp
+.env
+.env.*
+!.env.example

@@ -1,0 +1,27 @@
+# Copy to $XDG_CONFIG_HOME/mailbox/config.toml
+# Passwords and Ailiak tokens live in the OS keyring — never here.
+
+[ui]
+use_demo_data = true
+# system (default) | light | dark
+theme = "system"
+
+# Gmail (Settings → Use Gmail defaults, or uncomment):
+# [[accounts]]
+# id = "gmail"
+# name = "Gmail"
+# email = "you@gmail.com"
+# imap_host = "imap.gmail.com"
+# imap_port = 993
+# imap_tls = true
+# smtp_host = "smtp.gmail.com"
+# smtp_port = 587
+# smtp_tls = true
+# username = "you@gmail.com"
+# Password: Google Account → Security → App passwords → store via Mailbox Settings
+
+[ailiak]
+enabled = false
+base_url = "https://api.ailiak.com"
+default_for_date = "today"
+hashtag = "mail"

@@ -1,0 +1,16 @@
+[package]
+name = "mailbox-ailiak"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Optional Ailiak Agent API / MCP bridge for Mailbox"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+mailbox-core.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
