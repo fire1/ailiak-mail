@@ -1,8 +1,23 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Local, Utc};
 use serde::{Deserialize, Serialize};
 
 pub type AccountId = String;
 pub type MessageId = String;
+
+/// Message-list section header for a UTC timestamp (local calendar day).
+/// Returns uppercase labels: `TODAY`, `YESTERDAY`, or e.g. `MON 12 NOV`.
+pub fn date_group_label(dt: DateTime<Utc>) -> String {
+    let local = dt.with_timezone(&Local);
+    let today = Local::now().date_naive();
+    let d = local.date_naive();
+    if d == today {
+        "TODAY".into()
+    } else if d == today - Duration::days(1) {
+        "YESTERDAY".into()
+    } else {
+        local.format("%a %d %b").to_string().to_uppercase()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Folder {
@@ -38,6 +53,20 @@ pub fn sort_folders(folders: &mut [Folder]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn date_group_today_yesterday_and_other() {
+        let now = Utc::now();
+        assert_eq!(date_group_label(now), "TODAY");
+        assert_eq!(date_group_label(now - Duration::days(1)), "YESTERDAY");
+        let older = Utc.with_ymd_and_hms(2020, 1, 15, 12, 0, 0).unwrap();
+        let label = date_group_label(older);
+        assert!(!label.is_empty());
+        assert_eq!(label, label.to_uppercase());
+        assert_ne!(label, "TODAY");
+        assert_ne!(label, "YESTERDAY");
+    }
 
     #[test]
     fn folder_order_inbox_sent_archive_trash() {

@@ -47,7 +47,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mailbox-${{ matrix.os }}
+          name: ailiakmail-${{ matrix.os }}
           path: |
             dist/*
           if-no-files-found: warn

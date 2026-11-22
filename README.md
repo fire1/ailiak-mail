@@ -1,13 +1,15 @@
-# Mailbox
+# AiliakMail
 
 **Calm email client for desktop** — Rust + egui. Mail stays local; optional [Ailiak](https://ailiak.com) Desk bridge turns messages into tasks.
 
-[![Release](https://github.com/fire1/mailbox/actions/workflows/release.yml/badge.svg)](https://github.com/fire1/mailbox/actions/workflows/release.yml)
+[![Release](https://github.com/fire1/ailiakmail/actions/workflows/release.yml/badge.svg)](https://github.com/fire1/ailiakmail/actions/workflows/release.yml)
 
 ## Features
 
 - **IMAP sync** (Gmail App Password ready) with local SQLite cache  
+- **POP3** for older mail servers (POP3S :995 or plain :110; mail left on server)  
 - **Folders** — Inbox → Sent → Archive → Trash, Lucide-style icons, collapsible rail  
+- **Multi-account** — avatar strip + folders in one nav column  
 - **Todo** — convert a message into an Ailiak Desk task (slash commands supported)  
 - **Calendar** — Desk day view from Ailiak  
 - **Themes** — system / light / dark, pastel mint UI  
@@ -16,8 +18,8 @@
 ## Quick start
 
 ```bash
-git clone https://github.com/fire1/mailbox.git
-cd mailbox
+git clone https://github.com/fire1/ailiakmail.git
+cd ailiakmail
 
 # Debian/Ubuntu deps for egui
 sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
@@ -29,9 +31,9 @@ cargo run -p mailbox-gui
 Or build a release binary for your OS:
 
 ```bash
-./bin/build-linux.sh      # on Linux  → dist/mailbox-linux-x86_64
-./bin/build-macos.sh      # on macOS  → dist/mailbox-macos-*
-./bin/build-windows.sh    # on Windows → dist/mailbox-windows-x86_64.exe
+./bin/build-linux.sh      # on Linux  → dist/ailiakmail-linux-x86_64
+./bin/build-macos.sh      # on macOS  → dist/ailiakmail-macos-*
+./bin/build-windows.sh    # on Windows → dist/ailiakmail-windows-x86_64.exe
 ./bin/build-all.sh        # whatever this host can build
 ```
 
@@ -51,8 +53,17 @@ Cross-compiling a full egui GUI to another OS is unreliable; for release artifac
 ## Gmail
 
 1. Google Account → **Security** → 2FA → **App password**  
-2. Mailbox → **Settings** → **Use Gmail defaults** → your address  
+2. AiliakMail → **Settings** → **Use Gmail defaults** → your address  
 3. Paste app password → **Save** → **Test IMAP** → **Sync** (`g`)
+
+## POP3 (older servers)
+
+1. Settings → **Use POP3 defaults** (or set Protocol → POP3)  
+2. Enter host, port (`995` + TLS, or `110` plain), username, password  
+3. **Save** → **Test POP3** → **Sync** (`g`)  
+4. Inbox only — mail stays on the server (no DELE)
+
+See [`config/config.example.toml`](config/config.example.toml) for a TOML sketch.
 
 ## Ailiak
 
@@ -78,9 +89,32 @@ Details: [`packaging/README.md`](packaging/README.md)
 
 | Crate | Role |
 |-------|------|
-| `mailbox-core` | Config, SQLite cache, IMAP sync, secrets |
+| `mailbox-core` | Config, SQLite cache, IMAP/POP3 sync, secrets |
 | `mailbox-ailiak` | Ailiak MCP client (`create_task`, Desk calendar, slash parse) |
-| `mailbox-gui` | egui app (`mailbox` binary) |
+| `mailbox-gui` | egui app (`ailiakmail` binary) |
+| `mailbox-mcp` | stdio MCP server (`ailiakmail-mcp` binary) |
+
+## MCP (agents)
+
+Expose the local AiliakMail SQLite cache to Cursor / other MCP clients:
+
+```bash
+cargo build -p mailbox-mcp --release
+```
+
+Cursor `mcp.json` (stdio):
+
+```json
+{
+  "mcpServers": {
+    "ailiakmail": {
+      "command": "/absolute/path/to/target/release/ailiakmail-mcp"
+    }
+  }
+}
+```
+
+Tools: `list_accounts`, `list_folders`, `list_messages`, `search_messages`, `get_message`, `mark_seen`, `sync_folder`.
 
 ## Docs
 
@@ -92,8 +126,9 @@ Details: [`packaging/README.md`](packaging/README.md)
 
 ## Paths
 
-- Config: `$XDG_CONFIG_HOME/mailbox/config.toml` (see `config/config.example.toml`)  
-- Data: `$XDG_DATA_HOME/mailbox/mail.db`
+- Config: `$XDG_CONFIG_HOME/ailiakmail/config.toml` (legacy `mailbox/` still used if present)  
+- Data: `$XDG_DATA_HOME/ailiakmail/mail.db`  
+- See also [`config/config.example.toml`](config/config.example.toml)
 
 ## License
 

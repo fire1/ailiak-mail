@@ -3,13 +3,81 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use egui::{
-    Color32, FontData, FontDefinitions, FontFamily, FontId, Rounding, Stroke, Style, TextStyle,
+    Color32, FontData, FontDefinitions, FontFamily, FontId, Id, Rounding, Stroke, Style, TextStyle,
     Theme, ThemePreference, Visuals,
 };
 use mailbox_core::config::ThemeMode;
 
-/// Soft mint accent (pastel take on Ailiak teal).
-pub const ACCENT: Color32 = Color32::from_rgb(0x5a, 0xaf, 0x9a);
+/// Ailiak.com Studio accent options (`src/utils/mood.ts`).
+#[derive(Clone, Copy)]
+pub struct AccentOption {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub color: Color32,
+}
+
+pub const ACCENT_OPTIONS: &[AccentOption] = &[
+    AccentOption {
+        id: "teal",
+        label: "Ailiak",
+        color: Color32::from_rgb(0x16, 0x9f, 0x84),
+    },
+    AccentOption {
+        id: "cyan",
+        label: "Cyan",
+        color: Color32::from_rgb(0x49, 0x91, 0xa3),
+    },
+    AccentOption {
+        id: "gold",
+        label: "Gold",
+        color: Color32::from_rgb(0xc6, 0x98, 0x33),
+    },
+    AccentOption {
+        id: "peach",
+        label: "Peach",
+        color: Color32::from_rgb(0xb7, 0x8e, 0x6c),
+    },
+    AccentOption {
+        id: "lavender",
+        label: "Lavender",
+        color: Color32::from_rgb(0x9c, 0x5d, 0xc6),
+    },
+    AccentOption {
+        id: "leaf",
+        label: "Leaf",
+        color: Color32::from_rgb(0x6a, 0xad, 0x3e),
+    },
+    AccentOption {
+        id: "sky",
+        label: "Sky",
+        color: Color32::from_rgb(0x48, 0x70, 0xbf),
+    },
+    AccentOption {
+        id: "pink",
+        label: "Pink",
+        color: Color32::from_rgb(0xc4, 0x5b, 0x7a),
+    },
+    AccentOption {
+        id: "stone",
+        label: "Stone",
+        color: Color32::from_rgb(0x6b, 0x72, 0x6f),
+    },
+    AccentOption {
+        id: "cobalt",
+        label: "Cobalt",
+        color: Color32::from_rgb(0x2e, 0x5c, 0xcb),
+    },
+];
+
+pub const DEFAULT_ACCENT_ID: &str = "teal";
+
+pub fn resolve_accent(id: &str) -> AccentOption {
+    ACCENT_OPTIONS
+        .iter()
+        .copied()
+        .find(|a| a.id == id)
+        .unwrap_or(ACCENT_OPTIONS[0])
+}
 
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -24,29 +92,41 @@ pub struct Palette {
     pub chip: Color32,
 }
 
-fn light_palette() -> Palette {
-    // Pastel mint / sage — calm, airy, still Ailiak-adjacent.
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |x: u8, y: u8| -> u8 { ((x as f32) * (1.0 - t) + (y as f32) * t).round() as u8 };
+    Color32::from_rgb(lerp(a.r(), b.r()), lerp(a.g(), b.g()), lerp(a.b(), b.b()))
+}
+
+fn lighten(c: Color32, t: f32) -> Color32 {
+    mix(c, Color32::WHITE, t)
+}
+
+fn light_palette(accent: Color32) -> Palette {
+    let panel = Color32::from_rgb(0xf0, 0xf1, 0xf2);
     Palette {
-        accent: ACCENT,
-        mute: Color32::from_rgb(0x8a, 0x96, 0x91),
-        unread: Color32::from_rgb(0x3d, 0x9a, 0x82),
-        panel: Color32::from_rgb(0xea, 0xf3, 0xef),
-        select: Color32::from_rgb(0xc8, 0xe8, 0xdc),
-        ink: Color32::from_rgb(0x3a, 0x45, 0x41),
-        paper: Color32::from_rgb(0xfb, 0xfc, 0xf9),
-        faint: Color32::from_rgb(0xe0, 0xeb, 0xe6),
-        chip: Color32::from_rgb(0xd4, 0xe8, 0xdf),
+        accent,
+        mute: Color32::from_rgb(0x8e, 0x93, 0x91),
+        unread: accent,
+        panel,
+        select: mix(panel, accent, 0.16),
+        ink: Color32::from_rgb(0x3a, 0x42, 0x40),
+        paper: Color32::from_rgb(0xf7, 0xf7, 0xf8),
+        faint: Color32::from_rgb(0xe8, 0xe9, 0xea),
+        chip: Color32::from_rgb(0xe4, 0xe6, 0xe7),
     }
 }
 
-fn dark_palette() -> Palette {
-    // Soft slate with pastel mint — no harsh blacks.
+fn dark_palette(accent: Color32) -> Palette {
+    // Slightly lighter accent on dark chrome for contrast (same ids as the site).
+    let accent = lighten(accent, 0.18);
+    let panel = Color32::from_rgb(0x3a, 0x42, 0x44);
     Palette {
-        accent: Color32::from_rgb(0x7d, 0xce, 0xb8),
+        accent,
         mute: Color32::from_rgb(0x9a, 0xa8, 0xa2),
-        unread: Color32::from_rgb(0x9a, 0xdf, 0xc8),
-        panel: Color32::from_rgb(0x3a, 0x42, 0x44),
-        select: Color32::from_rgb(0x3f, 0x5a, 0x52),
+        unread: lighten(accent, 0.12),
+        panel,
+        select: mix(panel, accent, 0.28),
         ink: Color32::from_rgb(0xe8, 0xee, 0xeb),
         paper: Color32::from_rgb(0x32, 0x38, 0x3a),
         faint: Color32::from_rgb(0x2c, 0x32, 0x34),
@@ -54,9 +134,46 @@ fn dark_palette() -> Palette {
     }
 }
 
+fn accent_cache_id() -> Id {
+    Id::new("ailiakmail_accent_color")
+}
+
+fn store_accent(ctx: &egui::Context, accent: Color32) {
+    ctx.data_mut(|d| d.insert_temp(accent_cache_id(), accent));
+}
+
+fn cached_accent(ctx: &egui::Context) -> Color32 {
+    ctx.data(|d| d.get_temp::<Color32>(accent_cache_id()))
+        .unwrap_or_else(|| resolve_accent(DEFAULT_ACCENT_ID).color)
+}
+
+/// Roboto Mono — left rail + titles (existing AiliakMail chrome).
+pub fn nav_family() -> FontFamily {
+    FontFamily::Name("RobotoMono".into())
+}
+
+pub fn nav_font(size: f32) -> FontId {
+    FontId::new(size, nav_family())
+}
+
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
+    // Content (Talanoa uses Lato as --app-font-family).
+    fonts.font_data.insert(
+        "Lato".into(),
+        FontData::from_static(include_bytes!("../assets/fonts/Lato-Regular.ttf")),
+    );
+    fonts.font_data.insert(
+        "LatoMedium".into(),
+        FontData::from_static(include_bytes!("../assets/fonts/Lato-Medium.ttf")),
+    );
+    fonts.font_data.insert(
+        "LatoSemibold".into(),
+        FontData::from_static(include_bytes!("../assets/fonts/Lato-Semibold.ttf")),
+    );
+
+    // Nav / titles.
     fonts.font_data.insert(
         "RobotoMono".into(),
         FontData::from_static(include_bytes!("../assets/fonts/RobotoMono-Regular.ttf")),
@@ -70,55 +187,84 @@ fn install_fonts(ctx: &egui::Context) {
         FontData::from_static(include_bytes!("../assets/fonts/RobotoMono-SemiBold.ttf")),
     );
 
-    fonts
-        .families
-        .entry(FontFamily::Proportional)
-        .or_default()
-        .splice(
-            0..0,
-            [
-                "RobotoMonoMedium".to_owned(),
-                "RobotoMono".to_owned(),
-                "RobotoMonoSemiBold".to_owned(),
-            ],
-        );
+    // Prepend custom faces; keep egui defaults as fallbacks (they own ◻ / ? replacement glyphs).
+    fonts.families.entry(FontFamily::Proportional).or_default().splice(
+        0..0,
+        [
+            "Lato".to_owned(),
+            "LatoMedium".to_owned(),
+            "LatoSemibold".to_owned(),
+        ],
+    );
+    fonts.families.entry(FontFamily::Monospace).or_default().splice(
+        0..0,
+        ["RobotoMono".to_owned(), "RobotoMonoMedium".to_owned()],
+    );
+    {
+        let mut mono = vec![
+            "RobotoMonoMedium".to_owned(),
+            "RobotoMono".to_owned(),
+            "RobotoMonoSemiBold".to_owned(),
+        ];
+        // Fall back to default proportional stack for missing glyphs.
+        if let Some(prop) = fonts.families.get(&FontFamily::Proportional) {
+            mono.extend(prop.iter().cloned());
+        }
+        fonts
+            .families
+            .insert(FontFamily::Name("RobotoMono".into()), mono);
+    }
 
-    fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default()
-        .splice(
-            0..0,
-            ["RobotoMono".to_owned(), "RobotoMonoMedium".to_owned()],
-        );
+    // Phosphor icon glyphs — dedicated family; fall back so tofu never panics the atlas.
+    fonts.font_data.insert(
+        "phosphor".into(),
+        egui_phosphor::Variant::Regular.font_data(),
+    );
+    {
+        let mut phosphor = vec!["phosphor".to_owned()];
+        if let Some(prop) = fonts.families.get(&FontFamily::Proportional) {
+            phosphor.extend(prop.iter().cloned());
+        }
+        fonts
+            .families
+            .insert(FontFamily::Name("Phosphor".into()), phosphor);
+    }
 
     ctx.set_fonts(fonts);
 }
 
+/// Icon font family (Phosphor Regular).
+pub fn icon_family() -> FontFamily {
+    FontFamily::Name("Phosphor".into())
+}
+
+pub fn icon_font(size: f32) -> FontId {
+    FontId::new(size, icon_family())
+}
+
 fn base_style() -> Style {
     let mut style = Style::default();
-    style.spacing.item_spacing = egui::vec2(10.0, 7.0);
-    style.spacing.window_margin = egui::Margin::same(14.0);
-    style.spacing.button_padding = egui::vec2(14.0, 8.0);
-    style.text_styles.insert(
-        TextStyle::Heading,
-        FontId::new(20.0, FontFamily::Proportional),
-    );
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.window_margin = egui::Margin::same(12.0);
+    style.spacing.button_padding = egui::vec2(10.0, 6.0);
+    // Titles keep Roboto Mono; body/content use Lato (integer px sizes stay sharp).
+    style
+        .text_styles
+        .insert(TextStyle::Heading, nav_font(16.0));
     style
         .text_styles
         .insert(TextStyle::Body, FontId::new(15.0, FontFamily::Proportional));
     style.text_styles.insert(
         TextStyle::Button,
-        FontId::new(14.5, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Small,
         FontId::new(13.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
-        TextStyle::Monospace,
-        FontId::new(14.5, FontFamily::Monospace),
+        TextStyle::Small,
+        FontId::new(12.0, FontFamily::Proportional),
     );
+    style
+        .text_styles
+        .insert(TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace));
     style
 }
 
@@ -155,15 +301,15 @@ fn paint_visuals(mut visuals: Visuals, p: Palette) -> Visuals {
     visuals
 }
 
-fn light_style() -> Style {
+fn light_style(accent: Color32) -> Style {
     let mut style = base_style();
-    style.visuals = paint_visuals(Visuals::light(), light_palette());
+    style.visuals = paint_visuals(Visuals::light(), light_palette(accent));
     style
 }
 
-fn dark_style() -> Style {
+fn dark_style(accent: Color32) -> Style {
     let mut style = base_style();
-    style.visuals = paint_visuals(Visuals::dark(), dark_palette());
+    style.visuals = paint_visuals(Visuals::dark(), dark_palette(accent));
     style
 }
 
@@ -241,13 +387,20 @@ pub fn resolve_theme_ctx(ctx: &egui::Context, mode: ThemeMode) -> Theme {
     }
 }
 
-pub fn install(ctx: &egui::Context, mode: ThemeMode) {
+pub fn install(ctx: &egui::Context, mode: ThemeMode, accent_id: &str) {
     install_fonts(ctx);
-    ctx.set_style_of(Theme::Light, light_style());
-    ctx.set_style_of(Theme::Dark, dark_style());
     ctx.options_mut(|opt| {
         opt.fallback_theme = Theme::Light;
     });
+    apply_appearance(ctx, mode, accent_id);
+}
+
+/// Rebuild light/dark styles for the chosen accent and apply theme preference.
+pub fn apply_appearance(ctx: &egui::Context, mode: ThemeMode, accent_id: &str) {
+    let accent = resolve_accent(accent_id).color;
+    store_accent(ctx, accent);
+    ctx.set_style_of(Theme::Light, light_style(accent));
+    ctx.set_style_of(Theme::Dark, dark_style(accent));
     apply_preference(ctx, mode);
 }
 
@@ -284,15 +437,24 @@ pub fn resolved_label(mode: ThemeMode) -> String {
 }
 
 pub fn palette(ctx: &egui::Context) -> Palette {
+    let accent = cached_accent(ctx);
     if ctx.style().visuals.dark_mode {
-        dark_palette()
+        dark_palette(accent)
     } else {
-        light_palette()
+        light_palette(accent)
     }
 }
 
 pub fn accent(ctx: &egui::Context) -> Color32 {
-    palette(ctx).accent
+    if ctx.style().visuals.dark_mode {
+        dark_palette(cached_accent(ctx)).accent
+    } else {
+        cached_accent(ctx)
+    }
+}
+
+pub fn ink(ctx: &egui::Context) -> Color32 {
+    palette(ctx).ink
 }
 
 pub fn mute(ctx: &egui::Context) -> Color32 {

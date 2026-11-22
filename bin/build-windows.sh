@@ -35,7 +35,7 @@ if [[ "$HOST" == "windows" ]]; then
   ensure_target "$TARGET"
   echo "→ cargo build -p mailbox-gui --release --target $TARGET"
   cargo build -p mailbox-gui --release --target "$TARGET"
-  copy_bin "target/${TARGET}/release/mailbox" "mailbox-windows-x86_64"
+  copy_bin "target/${TARGET}/release/ailiakmail" "ailiakmail-windows-x86_64"
 elif [[ "$CROSS" -eq 1 ]]; then
   TARGET="x86_64-pc-windows-gnu"
   echo "→ experimental cross-compile to $TARGET"
@@ -54,7 +54,7 @@ elif [[ "$CROSS" -eq 1 ]]; then
     echo "  • Building on a Windows machine: ./bin/build-windows.sh" >&2
     exit 1
   fi
-  copy_bin "target/${TARGET}/release/mailbox" "mailbox-windows-x86_64"
+  copy_bin "target/${TARGET}/release/ailiakmail" "ailiakmail-windows-x86_64"
 else
   echo "error: Windows build should run on Windows (host=$HOST)." >&2
   echo "       Options:" >&2

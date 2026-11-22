@@ -1,6 +1,7 @@
-//! Lucide-inspired stroke icons (24×24 viewBox, thin stroke), painted with egui.
+//! Phosphor glyph icons (font AA via egui text), tinted by paint color.
 
-use egui::{pos2, Color32, Pos2, Response, Sense, Shape, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, FontId, Pos2, Response, Sense, Ui, Vec2};
+use egui_phosphor::regular as ph;
 
 use crate::theme;
 
@@ -28,128 +29,106 @@ impl FolderIcon {
             Self::Folder
         }
     }
-}
 
-/// Draw a Lucide-style icon into `rect` (square).
-pub fn paint(ui: &Ui, rect: egui::Rect, kind: FolderIcon, color: Color32) {
-    let stroke = Stroke::new(1.1, color);
-    let s = rect.width().min(rect.height());
-    let c = rect.center();
-    // Map 24×24 Lucide coords → rect
-    let p = |x: f32, y: f32| {
-        pos2(
-            c.x + (x - 12.0) * (s / 24.0),
-            c.y + (y - 12.0) * (s / 24.0),
-        )
-    };
-    let painter = ui.painter();
-
-    match kind {
-        FolderIcon::Inbox => {
-            // polyline 22,12 → 16,12 → 14,15 → 10,15 → 8,12 → 2,12
-            painter.add(Shape::line(
-                vec![p(22.0, 12.0), p(16.0, 12.0), p(14.0, 15.0), p(10.0, 15.0), p(8.0, 12.0), p(2.0, 12.0)],
-                stroke,
-            ));
-            // tray outline
-            painter.add(Shape::closed_line(
-                vec![
-                    p(5.45, 5.11),
-                    p(2.0, 12.0),
-                    p(2.0, 18.0),
-                    p(4.0, 20.0),
-                    p(20.0, 20.0),
-                    p(22.0, 18.0),
-                    p(22.0, 12.0),
-                    p(18.55, 5.11),
-                    p(16.76, 4.0),
-                    p(7.24, 4.0),
-                ],
-                stroke,
-            ));
-        }
-        FolderIcon::Sent => {
-            // paper-plane (send)
-            painter.add(Shape::closed_line(
-                vec![
-                    p(22.0, 2.0),
-                    p(14.5, 21.7),
-                    p(11.0, 13.0),
-                    p(2.15, 9.5),
-                ],
-                stroke,
-            ));
-            painter.line_segment([p(22.0, 2.0), p(11.0, 13.0)], stroke);
-        }
-        FolderIcon::Archive => {
-            // lid rect
-            painter.rect_stroke(
-                egui::Rect::from_min_max(p(2.0, 3.0), p(22.0, 8.0)),
-                1.0,
-                stroke,
-            );
-            // body
-            painter.add(Shape::line(
-                vec![p(4.0, 8.0), p(4.0, 19.0), p(6.0, 21.0), p(18.0, 21.0), p(20.0, 19.0), p(20.0, 8.0)],
-                stroke,
-            ));
-            painter.line_segment([p(10.0, 12.0), p(14.0, 12.0)], stroke);
-        }
-        FolderIcon::Trash => {
-            painter.line_segment([p(3.0, 6.0), p(21.0, 6.0)], stroke);
-            painter.add(Shape::line(
-                vec![p(8.0, 6.0), p(8.0, 4.0), p(10.0, 2.0), p(14.0, 2.0), p(16.0, 4.0), p(16.0, 6.0)],
-                stroke,
-            ));
-            painter.add(Shape::line(
-                vec![p(19.0, 6.0), p(19.0, 20.0), p(17.0, 22.0), p(7.0, 22.0), p(5.0, 20.0), p(5.0, 6.0)],
-                stroke,
-            ));
-            painter.line_segment([p(10.0, 11.0), p(10.0, 17.0)], stroke);
-            painter.line_segment([p(14.0, 11.0), p(14.0, 17.0)], stroke);
-        }
-        FolderIcon::Folder => {
-            painter.add(Shape::closed_line(
-                vec![
-                    p(3.0, 7.0),
-                    p(3.0, 5.0),
-                    p(5.0, 3.0),
-                    p(10.0, 3.0),
-                    p(12.0, 5.0),
-                    p(21.0, 5.0),
-                    p(21.0, 19.0),
-                    p(3.0, 19.0),
-                ],
-                stroke,
-            ));
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Inbox => ph::TRAY,
+            Self::Sent => ph::PAPER_PLANE_TILT,
+            Self::Archive => ph::ARCHIVE,
+            Self::Trash => ph::TRASH,
+            Self::Folder => ph::FOLDER,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum ToolbarIcon {
+    Sync,
+    Calendar,
+}
+
+impl ToolbarIcon {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Sync => ph::ARROWS_CLOCKWISE,
+            Self::Calendar => ph::CALENDAR_BLANK,
+        }
+    }
+}
+
+fn paint_glyph(ui: &Ui, rect: egui::Rect, glyph: &str, color: Color32) {
+    let size = rect.width().min(rect.height());
+    let pos = ui.painter().round_pos_to_pixels(rect.center());
+    ui.painter().text(
+        pos,
+        Align2::CENTER_CENTER,
+        glyph,
+        theme::icon_font(size),
+        color,
+    );
+}
+
+/// Draw a folder icon into `rect` (square).
+pub fn paint(ui: &Ui, rect: egui::Rect, kind: FolderIcon, color: Color32) {
+    paint_glyph(ui, rect, kind.glyph(), color);
+}
+
+pub fn paint_search(ui: &Ui, rect: egui::Rect, color: Color32) {
+    paint_glyph(ui, rect, ph::MAGNIFYING_GLASS, color);
+}
+
+/// Top-bar Sync / Calendar: glyph + label.
+pub fn toolbar_button(ui: &mut Ui, kind: ToolbarIcon, label: &str, tip: &str) -> Response {
+    let mute = theme::mute(ui.ctx());
+    let ink = ui.visuals().text_color();
+    let pad = egui::vec2(8.0, 4.0);
+    let icon = 14.0;
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        FontId::new(13.0, egui::FontFamily::Proportional),
+        ink,
+    );
+    let size = egui::vec2(
+        pad.x * 2.0 + icon + ui.spacing().icon_spacing + galley.size().x,
+        (pad.y * 2.0 + icon.max(galley.size().y)).max(24.0),
+    );
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if response.is_pointer_button_down_on() {
+        theme::select(ui.ctx())
+    } else if response.hovered() {
+        theme::chip(ui.ctx())
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 6.0, fill);
+    }
+    let icon_rect = egui::Rect::from_center_size(
+        ui.painter().round_pos_to_pixels(Pos2::new(
+            rect.left() + pad.x + icon * 0.5,
+            rect.center().y,
+        )),
+        Vec2::splat(icon),
+    );
+    paint_glyph(ui, icon_rect, kind.glyph(), mute);
+    ui.painter().galley(
+        ui.painter().round_pos_to_pixels(Pos2::new(
+            icon_rect.right() + ui.spacing().icon_spacing,
+            rect.center().y - galley.size().y * 0.5,
+        )),
+        galley,
+        ink,
+    );
+    response.on_hover_text(tip)
 }
 
 pub fn paint_panel_toggle(ui: &Ui, rect: egui::Rect, collapsed: bool, color: Color32) {
-    let stroke = Stroke::new(1.1, color);
-    let s = rect.width().min(rect.height());
-    let c = rect.center();
-    let p = |x: f32, y: f32| {
-        pos2(
-            c.x + (x - 12.0) * (s / 24.0),
-            c.y + (y - 12.0) * (s / 24.0),
-        )
-    };
-    let painter = ui.painter();
-    painter.rect_stroke(
-        egui::Rect::from_min_max(p(3.0, 3.0), p(21.0, 21.0)),
-        2.0,
-        stroke,
-    );
-    painter.line_segment([p(9.0, 3.0), p(9.0, 21.0)], stroke);
-    if collapsed {
-        // panel-left-open chevron →
-        painter.add(Shape::line(vec![p(14.0, 9.0), p(17.0, 12.0), p(14.0, 15.0)], stroke));
+    let glyph = if collapsed {
+        ph::SIDEBAR
     } else {
-        // panel-left-close chevron ←
-        painter.add(Shape::line(vec![p(16.0, 15.0), p(13.0, 12.0), p(16.0, 9.0)], stroke));
-    }
+        ph::SIDEBAR_SIMPLE
+    };
+    paint_glyph(ui, rect, glyph, color);
 }
 
 /// Icon-only or icon+label nav button spanning the full column width.
@@ -162,7 +141,7 @@ pub fn folder_nav_button(
 ) -> Response {
     let accent = theme::accent(ui.ctx());
     let mute = theme::mute(ui.ctx());
-    let height = 34.0;
+    let height = 28.0;
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
 
@@ -173,39 +152,33 @@ pub fn folder_nav_button(
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, 8.0, fill);
+    ui.painter().rect_filled(rect, 6.0, fill);
 
     let icon_color = if selected { accent } else { mute };
-    let icon_size = 18.0;
+    let icon_size = 15.0;
+    let icon_center = if collapsed {
+        rect.center()
+    } else {
+        Pos2::new(rect.left() + 10.0 + icon_size * 0.5, rect.center().y)
+    };
     let icon_rect = egui::Rect::from_center_size(
-        if collapsed {
-            rect.center()
-        } else {
-            Pos2::new(rect.left() + 10.0 + icon_size * 0.5, rect.center().y)
-        },
+        ui.painter().round_pos_to_pixels(icon_center),
         Vec2::splat(icon_size),
     );
     paint(ui, icon_rect, kind, icon_color);
 
     if !collapsed {
-        let text_pos = Pos2::new(rect.left() + 34.0, rect.center().y);
-        let font = egui::FontId::proportional(13.5);
+        let text_pos = ui
+            .painter()
+            .round_pos_to_pixels(Pos2::new(rect.left() + 30.0, rect.center().y));
+        let font = theme::nav_font(12.0);
         let color = if selected {
             accent
         } else {
-            ui.visuals().widgets.inactive.fg_stroke.color
+            ui.visuals().text_color()
         };
-        ui.painter().text(
-            text_pos,
-            egui::Align2::LEFT_CENTER,
-            label,
-            font,
-            if selected {
-                color
-            } else {
-                ui.visuals().text_color()
-            },
-        );
+        ui.painter()
+            .text(text_pos, Align2::LEFT_CENTER, label, font, color);
     }
 
     if collapsed {
@@ -228,4 +201,103 @@ pub fn collapse_button(ui: &mut Ui, collapsed: bool, color: Color32) -> Response
     } else {
         "Collapse to icons"
     })
+}
+
+/// Circular “+” control for adding an account.
+pub fn plus_account_button(ui: &mut Ui, size: f32) -> Response {
+    let mute = theme::mute(ui.ctx());
+    let accent = theme::accent(ui.ctx());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let color = if response.hovered() { accent } else { mute };
+    paint_glyph(ui, rect.shrink(size * 0.12), ph::PLUS_CIRCLE, color);
+    response.on_hover_text("Add account")
+}
+
+/// Same row chrome as [`folder_nav_button`]: full-width, icon (+ label when expanded).
+fn nav_action_row(
+    ui: &mut Ui,
+    collapsed: bool,
+    enabled: bool,
+    label: &str,
+    hover: &str,
+    glyph: &'static str,
+) -> Response {
+    let accent = theme::accent(ui.ctx());
+    let mute = theme::mute(ui.ctx());
+    let height = 28.0;
+    let width = ui.available_width();
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), sense);
+
+    let fill = if !enabled {
+        Color32::TRANSPARENT
+    } else if response.hovered() {
+        theme::chip(ui.ctx())
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 6.0, fill);
+
+    let icon_color = if !enabled {
+        mute.linear_multiply(0.45)
+    } else if response.hovered() {
+        accent
+    } else {
+        mute
+    };
+    let icon_size = 15.0;
+    let icon_center = if collapsed {
+        rect.center()
+    } else {
+        Pos2::new(rect.left() + 10.0 + icon_size * 0.5, rect.center().y)
+    };
+    let icon_rect = egui::Rect::from_center_size(
+        ui.painter().round_pos_to_pixels(icon_center),
+        Vec2::splat(icon_size),
+    );
+    paint_glyph(ui, icon_rect, glyph, icon_color);
+
+    if !collapsed {
+        let text_pos = ui
+            .painter()
+            .round_pos_to_pixels(Pos2::new(rect.left() + 30.0, rect.center().y));
+        let font = theme::nav_font(12.0);
+        let text_color = if enabled {
+            ui.visuals().text_color()
+        } else {
+            mute.linear_multiply(0.55)
+        };
+        ui.painter()
+            .text(text_pos, Align2::LEFT_CENTER, label, font, text_color);
+    }
+
+    let tip = if enabled { hover } else { "Open a message first" };
+    if collapsed || !enabled {
+        response.on_hover_text(tip)
+    } else {
+        response.on_hover_text(hover)
+    }
+}
+
+pub fn todo_nav_button(ui: &mut Ui, enabled: bool, collapsed: bool) -> Response {
+    nav_action_row(
+        ui,
+        collapsed,
+        enabled,
+        "Todo",
+        "Todo — mail → Ailiak Desk (a)",
+        ph::CHECK_SQUARE,
+    )
+}
+
+pub fn settings_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
+    nav_action_row(ui, collapsed, true, "Settings", "Settings (,)", ph::GEAR)
+}
+
+pub fn help_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
+    nav_action_row(ui, collapsed, true, "Help", "Help (?)", ph::QUESTION)
 }

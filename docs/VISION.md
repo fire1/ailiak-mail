@@ -1,4 +1,4 @@
-# Mailbox — product vision
+# AiliakMail — product vision
 
 **One-liner:** Read mail as calm conversation threads; turn anything into an Ailiak Desk task in one motion — with day, slash commands, and control, without making Ailiak a second inbox.
 

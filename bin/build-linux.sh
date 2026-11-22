@@ -34,10 +34,10 @@ ensure_target "$TARGET"
 echo "→ cargo build -p mailbox-gui --release --target $TARGET"
 cargo build -p mailbox-gui --release --target "$TARGET"
 
-BIN="target/${TARGET}/release/mailbox"
+BIN="target/${TARGET}/release/ailiakmail"
 # Fallback if cargo put it in target/release (no explicit target dir layout quirk)
-[[ -f "$BIN" ]] || BIN="target/release/mailbox"
-copy_bin "$BIN" "mailbox-linux-x86_64"
+[[ -f "$BIN" ]] || BIN="target/release/ailiakmail"
+copy_bin "$BIN" "ailiakmail-linux-x86_64"
 
 if [[ "$PACKAGE" -eq 1 ]]; then
   if ! command -v cargo-packager >/dev/null 2>&1; then
@@ -50,5 +50,5 @@ if [[ "$PACKAGE" -eq 1 ]]; then
 fi
 
 echo
-echo "Done. Run:  $DIST/mailbox-linux-x86_64"
+echo "Done. Run:  $DIST/ailiakmail-linux-x86_64"
 echo "Dock icon:  ./scripts/install-linux-icon.sh"

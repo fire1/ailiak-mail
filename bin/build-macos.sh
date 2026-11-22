@@ -49,16 +49,16 @@ if [[ "$UNIVERSAL" -eq 1 ]]; then
   build_one aarch64-apple-darwin
   build_one x86_64-apple-darwin
   need_cmd lipo
-  OUT="$DIST/mailbox-macos-universal"
+  OUT="$DIST/ailiakmail-macos-universal"
   lipo -create \
     -output "$OUT" \
-    "target/aarch64-apple-darwin/release/mailbox" \
-    "target/x86_64-apple-darwin/release/mailbox"
+    "target/aarch64-apple-darwin/release/ailiakmail" \
+    "target/x86_64-apple-darwin/release/ailiakmail"
   chmod 755 "$OUT"
   echo "✓ $OUT"
 else
   build_one "$NATIVE_TARGET"
-  copy_bin "target/${NATIVE_TARGET}/release/mailbox" "mailbox-macos-${NATIVE_TARGET}"
+  copy_bin "target/${NATIVE_TARGET}/release/ailiakmail" "ailiakmail-macos-${NATIVE_TARGET}"
 fi
 
 if [[ "$PACKAGE" -eq 1 ]]; then

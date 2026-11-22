@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IMG="$ROOT/crates/mailbox-gui/assets/img"
-NAME="com.ailiak.Mailbox"
+NAME="com.ailiak.AiliakMail"
 ICON_BASE="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
 APP_BASE="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
@@ -23,19 +23,19 @@ for size in 16 24 32 48 64 128 256 512; do
 done
 
 # Prefer a freshly built release binary if present, else debug.
-if [[ -x "$ROOT/target/release/mailbox" ]]; then
-  install -m 755 "$ROOT/target/release/mailbox" "$BIN_DIR/mailbox"
-  echo "installed binary → $BIN_DIR/mailbox (release)"
-elif [[ -x "$ROOT/target/debug/mailbox" ]]; then
-  install -m 755 "$ROOT/target/debug/mailbox" "$BIN_DIR/mailbox"
-  echo "installed binary → $BIN_DIR/mailbox (debug)"
+if [[ -x "$ROOT/target/release/ailiakmail" ]]; then
+  install -m 755 "$ROOT/target/release/ailiakmail" "$BIN_DIR/ailiakmail"
+  echo "installed binary → $BIN_DIR/ailiakmail (release)"
+elif [[ -x "$ROOT/target/debug/ailiakmail" ]]; then
+  install -m 755 "$ROOT/target/debug/ailiakmail" "$BIN_DIR/ailiakmail"
+  echo "installed binary → $BIN_DIR/ailiakmail (debug)"
 else
-  echo "warning: no built mailbox binary found; desktop Exec=mailbox must be on PATH" >&2
+  echo "warning: no built ailiakmail binary found; desktop Exec=ailiakmail must be on PATH" >&2
 fi
 
 desktop_out="$APP_BASE/${NAME}.desktop"
-sed "s|^Exec=mailbox|Exec=$BIN_DIR/mailbox|" \
-  "$ROOT/packaging/com.ailiak.Mailbox.desktop" >"$desktop_out"
+sed "s|^Exec=ailiakmail|Exec=$BIN_DIR/ailiakmail|" \
+  "$ROOT/packaging/com.ailiak.AiliakMail.desktop" >"$desktop_out"
 chmod 644 "$desktop_out"
 echo "installed desktop entry → $desktop_out"
 

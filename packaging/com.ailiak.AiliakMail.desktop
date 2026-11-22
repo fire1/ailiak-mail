@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=AiliakMail
+GenericName=Email Client
+Comment=Calm email client — mail stays local, work goes to Ailiak
+Exec=ailiakmail
+Icon=com.ailiak.AiliakMail
+Terminal=false
+Categories=Network;Email;Office;
+StartupNotify=true
+# Must match ViewportBuilder::with_app_id / window WM class
+StartupWMClass=com.ailiak.AiliakMail
+Keywords=email;mail;imap;ailiak;ailiakmail;

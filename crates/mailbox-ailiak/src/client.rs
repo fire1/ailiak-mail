@@ -31,7 +31,7 @@ pub struct AiliakClient {
 impl AiliakClient {
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Result<Self> {
         let http = Client::builder()
-            .user_agent(concat!("mailbox/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("ailiakmail/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .context("build HTTP client")?;
@@ -90,7 +90,7 @@ impl AiliakClient {
             json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": { "name": "mailbox", "version": env!("CARGO_PKG_VERSION") },
+                "clientInfo": { "name": "ailiakmail", "version": env!("CARGO_PKG_VERSION") },
             }),
         )?;
         // notifications/initialized — fire and forget (no response expected)

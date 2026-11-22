@@ -48,7 +48,7 @@ messages to Ailiak as Desk tasks — without turning Ailiak into a second inbox.
 Tips:\n\
   • Browse folders on the left\n\
   • Open a message to read plain text\n\
-  • Settings → configure IMAP or Ailiak\n\
+  • Settings → configure IMAP, POP3, or Ailiak\n\
   • Send to Ailiak creates a Desk task from the open message\n\n\
 — Mailbox\n"
                 .into(),

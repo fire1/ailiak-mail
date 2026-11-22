@@ -53,6 +53,6 @@ copy_bin() {
   fi
 }
 
-echo "Mailbox build — repo: $ROOT"
+echo "AiliakMail build — repo: $ROOT"
 echo "Output:            $DIST"
 echo

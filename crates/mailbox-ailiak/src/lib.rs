@@ -1,6 +1,6 @@
 //! Thin bridge: selected mail → Ailiak Desk tasks via MCP over HTTPS.
 //!
-//! Mail stays in Mailbox; Ailiak stays the calm desk.
+//! Mail stays in AiliakMail; Ailiak stays the calm desk.
 
 mod client;
 mod compose;

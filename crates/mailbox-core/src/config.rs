@@ -16,11 +16,40 @@ pub struct AppConfig {
     pub ui: UiConfig,
 }
 
+/// Incoming mail protocol. Existing configs without this field default to IMAP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MailProtocol {
+    #[default]
+    Imap,
+    Pop3,
+}
+
+impl MailProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Imap => "imap",
+            Self::Pop3 => "pop3",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Imap => "IMAP",
+            Self::Pop3 => "POP3",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailAccountConfig {
     pub id: String,
     pub name: String,
     pub email: String,
+    /// `imap` (default) or `pop3`. Older servers often only speak POP3.
+    #[serde(default)]
+    pub protocol: MailProtocol,
+    /// Incoming server host (IMAP or POP3 — field name kept for config compatibility).
     pub imap_host: String,
     #[serde(default = "default_imap_port")]
     pub imap_port: u16,
@@ -43,6 +72,7 @@ impl MailAccountConfig {
             id: "gmail".into(),
             name: "Gmail".into(),
             email: email.clone(),
+            protocol: MailProtocol::Imap,
             imap_host: "imap.gmail.com".into(),
             imap_port: 993,
             imap_tls: true,
@@ -53,10 +83,55 @@ impl MailAccountConfig {
         }
     }
 
+    /// Generic POP3S defaults (port 995, TLS). Host left blank for the user to fill.
+    pub fn pop3_template(email: impl Into<String>) -> Self {
+        let email = email.into();
+        Self {
+            id: "pop3".into(),
+            name: "POP3".into(),
+            email: email.clone(),
+            protocol: MailProtocol::Pop3,
+            imap_host: String::new(),
+            imap_port: 995,
+            imap_tls: true,
+            smtp_host: String::new(),
+            smtp_port: 587,
+            smtp_tls: true,
+            username: email,
+        }
+    }
+
     pub fn is_gmail(&self) -> bool {
-        self.imap_host.eq_ignore_ascii_case("imap.gmail.com")
-            || self.email.to_lowercase().ends_with("@gmail.com")
-            || self.email.to_lowercase().ends_with("@googlemail.com")
+        self.protocol == MailProtocol::Imap
+            && (self.imap_host.eq_ignore_ascii_case("imap.gmail.com")
+                || self.email.to_lowercase().ends_with("@gmail.com")
+                || self.email.to_lowercase().ends_with("@googlemail.com"))
+    }
+
+    pub fn is_pop3(&self) -> bool {
+        self.protocol == MailProtocol::Pop3
+    }
+
+    pub fn mail_host(&self) -> &str {
+        &self.imap_host
+    }
+
+    pub fn mail_port(&self) -> u16 {
+        self.imap_port
+    }
+
+    pub fn mail_tls(&self) -> bool {
+        self.imap_tls
+    }
+
+    /// Apply typical ports when switching protocol / TLS.
+    pub fn apply_protocol_defaults(&mut self) {
+        match (self.protocol, self.imap_tls) {
+            (MailProtocol::Imap, true) => self.imap_port = 993,
+            (MailProtocol::Imap, false) => self.imap_port = 143,
+            (MailProtocol::Pop3, true) => self.imap_port = 995,
+            (MailProtocol::Pop3, false) => self.imap_port = 110,
+        }
     }
 }
 
@@ -130,10 +205,17 @@ pub struct UiConfig {
     /// `system` (default) follows the OS; or force `light` / `dark`.
     #[serde(default)]
     pub theme: ThemeMode,
+    /// Accent id from Ailiak.com mood options (`teal`, `cyan`, …).
+    #[serde(default = "default_accent")]
+    pub accent: String,
 }
 
 fn default_demo() -> bool {
     true
+}
+
+fn default_accent() -> String {
+    "teal".into()
 }
 
 impl Default for UiConfig {
@@ -141,6 +223,7 @@ impl Default for UiConfig {
         Self {
             use_demo_data: true,
             theme: ThemeMode::System,
+            accent: default_accent(),
         }
     }
 }
@@ -176,5 +259,55 @@ impl AppConfig {
 
     pub fn primary_account(&self) -> Option<&MailAccountConfig> {
         self.accounts.first()
+    }
+
+    pub fn account_by_id(&self, id: &str) -> Option<&MailAccountConfig> {
+        self.accounts.iter().find(|a| a.id == id)
+    }
+
+    /// Insert or replace an account keyed by `id`.
+    pub fn upsert_account(&mut self, account: MailAccountConfig) {
+        if let Some(pos) = self.accounts.iter().position(|a| a.id == account.id) {
+            self.accounts[pos] = account;
+        } else {
+            self.accounts.push(account);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(id: &str, email: &str) -> MailAccountConfig {
+        MailAccountConfig {
+            id: id.into(),
+            name: email.into(),
+            email: email.into(),
+            protocol: MailProtocol::Imap,
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 587,
+            smtp_tls: true,
+            username: email.into(),
+        }
+    }
+
+    #[test]
+    fn upsert_account_inserts_and_replaces() {
+        let mut cfg = AppConfig::default();
+        cfg.upsert_account(sample("a1", "one@example.com"));
+        assert_eq!(cfg.accounts.len(), 1);
+        cfg.upsert_account(sample("a2", "two@example.com"));
+        assert_eq!(cfg.accounts.len(), 2);
+        cfg.upsert_account(MailAccountConfig {
+            name: "One renamed".into(),
+            ..sample("a1", "one@example.com")
+        });
+        assert_eq!(cfg.accounts.len(), 2);
+        assert_eq!(cfg.account_by_id("a1").unwrap().name, "One renamed");
+        assert_eq!(cfg.primary_account().unwrap().id, "a1");
     }
 }

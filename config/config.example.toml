@@ -5,12 +5,15 @@
 use_demo_data = true
 # system (default) | light | dark
 theme = "system"
+# Accent from Ailiak.com: teal (default), cyan, gold, peach, lavender, leaf, sky, pink, stone, cobalt
+accent = "teal"
 
 # Gmail (Settings → Use Gmail defaults, or uncomment):
 # [[accounts]]
 # id = "gmail"
 # name = "Gmail"
 # email = "you@gmail.com"
+# protocol = "imap"
 # imap_host = "imap.gmail.com"
 # imap_port = 993
 # imap_tls = true
@@ -19,6 +22,20 @@ theme = "system"
 # smtp_tls = true
 # username = "you@gmail.com"
 # Password: Google Account → Security → App passwords → store via Mailbox Settings
+
+# Older POP3 server (Settings → Use POP3 defaults):
+# [[accounts]]
+# id = "pop3"
+# name = "Work POP3"
+# email = "you@example.com"
+# protocol = "pop3"
+# imap_host = "mail.example.com"   # POP3 host (field name kept for compatibility)
+# imap_port = 995                  # 995 = POP3S (TLS); 110 = plain
+# imap_tls = true
+# smtp_host = "mail.example.com"
+# smtp_port = 587
+# smtp_tls = true
+# username = "you@example.com"
 
 [ailiak]
 enabled = false

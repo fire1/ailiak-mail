@@ -4,6 +4,7 @@ members = [
     "crates/mailbox-core",
     "crates/mailbox-ailiak",
     "crates/mailbox-gui",
+    "crates/mailbox-mcp",
 ]
 default-members = ["crates/mailbox-gui"]
 
@@ -11,8 +12,8 @@ default-members = ["crates/mailbox-gui"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-authors = ["Mailbox contributors"]
-repository = "https://github.com/example/mailbox"
+authors = ["AiliakMail contributors"]
+repository = "https://github.com/fire1/ailiakmail"
 
 [workspace.dependencies]
 mailbox-core = { path = "crates/mailbox-core" }

@@ -3,7 +3,7 @@ name = "mailbox-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Accounts, config, store, and mail models for Mailbox"
+description = "Accounts, config, store, and mail models for AiliakMail"
 
 [dependencies]
 anyhow.workspace = true

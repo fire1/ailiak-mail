@@ -13,12 +13,34 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn resolve() -> Result<Self> {
-        let dirs = ProjectDirs::from("com", "mailbox", "mailbox")
+        let dirs = ProjectDirs::from("com", "ailiak", "AiliakMail")
             .context("could not resolve XDG project directories")?;
-        Ok(Self {
+        let mut paths = Self {
             config_dir: dirs.config_dir().to_path_buf(),
             data_dir: dirs.data_dir().to_path_buf(),
-        })
+        };
+        paths.migrate_legacy_mailbox_dirs()?;
+        Ok(paths)
+    }
+
+    /// Prefer AiliakMail dirs; if empty, reuse legacy `mailbox` XDG paths when present.
+    fn migrate_legacy_mailbox_dirs(&mut self) -> Result<()> {
+        let legacy = ProjectDirs::from("com", "mailbox", "mailbox");
+        let Some(legacy) = legacy else {
+            return Ok(());
+        };
+        let legacy_config = legacy.config_dir();
+        let legacy_data = legacy.data_dir();
+
+        if !self.config_dir.exists()
+            && legacy_config.join("config.toml").is_file()
+        {
+            self.config_dir = legacy_config.to_path_buf();
+        }
+        if !self.data_dir.exists() && legacy_data.join("mail.db").is_file() {
+            self.data_dir = legacy_data.to_path_buf();
+        }
+        Ok(())
     }
 
     pub fn ensure(&self) -> Result<()> {
@@ -26,6 +48,8 @@ impl AppPaths {
             .with_context(|| format!("create config dir {}", self.config_dir.display()))?;
         fs::create_dir_all(&self.data_dir)
             .with_context(|| format!("create data dir {}", self.data_dir.display()))?;
+        fs::create_dir_all(self.avatars_dir())
+            .with_context(|| format!("create avatars dir {}", self.avatars_dir().display()))?;
         Ok(())
     }
 
@@ -36,6 +60,11 @@ impl AppPaths {
     pub fn db_file(&self) -> PathBuf {
         self.data_dir.join("mail.db")
     }
+
+    /// Local profile-picture overrides (`{sha256(email)}.png`).
+    pub fn avatars_dir(&self) -> PathBuf {
+        self.data_dir.join("avatars")
+    }
 }
 
 #[cfg(test)]
@@ -43,9 +72,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn paths_are_under_mailbox() {
+    fn paths_are_under_ailiakmail_or_legacy() {
         let p = AppPaths::resolve().unwrap();
-        assert!(p.config_dir.to_string_lossy().contains("mailbox"));
-        assert!(p.data_dir.to_string_lossy().contains("mailbox"));
+        let cfg = p.config_dir.to_string_lossy().to_lowercase();
+        assert!(
+            cfg.contains("ailiakmail") || cfg.contains("mailbox"),
+            "unexpected config dir {}",
+            p.config_dir.display()
+        );
     }
 }

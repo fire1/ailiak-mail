@@ -4,11 +4,11 @@
 #   cargo install cargo-packager --locked
 #   cargo packager --release --formats nsis,dmg,deb   # on the matching OS
 
-name = "mailbox"
-product-name = "Mailbox"
-identifier = "com.ailiak.Mailbox"
+name = "ailiakmail"
+product-name = "AiliakMail"
+identifier = "com.ailiak.AiliakMail"
 version = "0.1.0"
-description = "Calm Linux email client — mail stays local, work goes to Ailiak"
+description = "Calm email client — mail stays local, work goes to Ailiak"
 publisher = "Ailiak"
 homepage = "https://ailiak.com"
 category = "Email"
@@ -27,7 +27,7 @@ icons = [
 
 # Resolved under target/release/ after before-packaging-command.
 [[binaries]]
-path = "mailbox"
+path = "ailiakmail"
 main = true
 
 # --- Windows: NSIS setup.exe and/or WiX MSI ---

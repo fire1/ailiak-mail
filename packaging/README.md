@@ -1,4 +1,4 @@
-# Packaging Mailbox (Linux · macOS · Windows)
+# Packaging AiliakMail (Linux · macOS · Windows)
 
 Installers are built with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager).  
 **Each OS package must be built on that OS** (or via GitHub Actions runners).

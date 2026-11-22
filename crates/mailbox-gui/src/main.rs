@@ -1,21 +1,25 @@
-//! Mailbox — calm Linux email client (native GUI).
+//! AiliakMail — calm desktop email client (native GUI).
 
 mod app;
+mod avatars;
 mod brand;
 mod calendar;
 mod icons;
 mod layout;
 mod panes;
+mod settings;
+mod svg_tex;
 mod theme;
 
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    // Quiet sctk-adwaita: GNOME button-layout may include "icon", which CSD ignores.
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("info,sctk_adwaita=error")
+        }))
         .with_target(false)
         .init();
 
@@ -31,15 +35,15 @@ fn main() -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([900.0, 560.0])
-            .with_title("Mailbox")
-            // Must match packaging/com.ailiak.Mailbox.desktop (StartupWMClass / file id).
-            .with_app_id("com.ailiak.Mailbox")
+            .with_title("AiliakMail")
+            // Must match packaging/com.ailiak.AiliakMail.desktop (StartupWMClass / file id).
+            .with_app_id("com.ailiak.AiliakMail")
             .with_icon(icon),
         ..Default::default()
     };
 
     eframe::run_native(
-        "com.ailiak.Mailbox",
+        "com.ailiak.AiliakMail",
         native_options,
         Box::new(|cc| Ok(Box::new(app::MailboxApp::new(cc)?))),
     )

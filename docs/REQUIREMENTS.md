@@ -1,4 +1,4 @@
-# Mailbox — task requirements (Rust / Linux)
+# AiliakMail — task requirements (Rust / Linux)
 
 ## 1. Vision
 

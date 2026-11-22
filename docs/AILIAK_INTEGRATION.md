@@ -1,6 +1,6 @@
-# Integrating Mailbox ↔ Ailiak
+# Integrating AiliakMail ↔ Ailiak
 
-Mailbox is a **standalone** Rust mail client. Ailiak is the **desk for tasks**.  
+AiliakMail is a **standalone** Rust mail client. Ailiak is the **desk for tasks**.  
 Integration should be a thin bridge: *mail → task*, not “Ailiak becomes your inbox.”
 
 ---
