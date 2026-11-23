@@ -213,34 +213,54 @@ impl PopSession {
     }
 }
 
-pub async fn test_login(account: &MailAccountConfig, password: &str) -> Result<()> {
+/// POP3 login test that also reports how many messages are on the server.
+pub async fn test_login_with_count(
+    account: &MailAccountConfig,
+    password: &str,
+) -> Result<usize> {
     if password.trim().is_empty() {
         bail!("mail password is empty — add it in Settings");
     }
+    let user = if account.username.is_empty() {
+        account.email.as_str()
+    } else {
+        account.username.as_str()
+    };
     let mut session = PopSession::connect(account).await?;
     session
-        .login(&account.username, password)
+        .login(user, password)
         .await
         .context("POP3 login")?;
     let (count, _) = session.stat().await?;
     info!(count, "POP3 STAT ok");
     session.quit().await.ok();
-    Ok(())
+    Ok(count)
+}
+
+pub async fn test_login(account: &MailAccountConfig, password: &str) -> Result<()> {
+    test_login_with_count(account, password).await.map(|_| ())
 }
 
 /// POP3 has a single mailbox — mapped to local folder `INBOX`.
+/// Returns `(folders, unread, messages, server_stat_count)`.
 pub async fn sync_inbox(
     account: &MailAccountConfig,
     password: &str,
     max_messages: u32,
-) -> Result<(Vec<Folder>, u32, Vec<Message>)> {
+) -> Result<(Vec<Folder>, u32, Vec<Message>, usize)> {
     if password.trim().is_empty() {
         bail!("mail password is empty — add it in Settings");
     }
 
+    let user = if account.username.is_empty() {
+        account.email.as_str()
+    } else {
+        account.username.as_str()
+    };
+
     let mut session = PopSession::connect(account).await?;
     session
-        .login(&account.username, password)
+        .login(user, password)
         .await
         .context("POP3 login")?;
 
@@ -252,11 +272,12 @@ pub async fn sync_inbox(
         name: "Inbox".into(),
         path: INBOX.into(),
         unread: 0,
+        hidden: false,
     }];
 
     if count == 0 {
         session.quit().await.ok();
-        return Ok((folders, 0, Vec::new()));
+        return Ok((folders, 0, Vec::new(), 0));
     }
 
     let uidl = session.uidl_all().await?;
@@ -264,10 +285,13 @@ pub async fn sync_inbox(
     let end = count;
 
     let mut messages = Vec::new();
+    let mut retr_failures = 0usize;
+    let mut parse_failures = 0usize;
     for msg_num in start..=end {
         let raw = match session.retr(msg_num).await {
             Ok(b) => b,
             Err(e) => {
+                retr_failures += 1;
                 tracing::warn!(msg_num, error = %e, "POP3 RETR failed; skipping");
                 continue;
             }
@@ -283,17 +307,30 @@ pub async fn sync_inbox(
         };
 
         // POP3 has no \Seen flag — treat newly fetched as unread.
-        if let Some(msg) = parse_raw_message(&account.id, INBOX, uid, false, &raw) {
-            messages.push(msg);
+        match parse_raw_message(&account.id, INBOX, uid, false, &raw) {
+            Some(msg) => messages.push(msg),
+            None => {
+                parse_failures += 1;
+                tracing::warn!(msg_num, uid, "POP3 message parse failed; skipping");
+            }
         }
     }
 
-    messages.sort_by(|a, b| b.envelope.date.cmp(&a.envelope.date));
+    if !messages.is_empty() {
+        messages.sort_by(|a, b| b.envelope.date.cmp(&a.envelope.date));
+    } else if retr_failures + parse_failures > 0 {
+        tracing::warn!(
+            retr_failures,
+            parse_failures,
+            server_count = count,
+            "POP3 sync produced no messages"
+        );
+    }
 
     let unread = messages.iter().filter(|m| !m.envelope.seen).count() as u32;
     session.quit().await.ok();
 
-    Ok((folders, unread, messages))
+    Ok((folders, unread, messages, count))
 }
 
 fn stable_uid(uidl: &str) -> u32 {

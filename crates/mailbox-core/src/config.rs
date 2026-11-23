@@ -14,6 +14,56 @@ pub struct AppConfig {
     pub ailiak: AiliakConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    /// OAuth client IDs for Sign in with Google / Microsoft (desktop PKCE).
+    #[serde(default)]
+    pub oauth: OAuthConfig,
+}
+
+/// How this account authenticates to the mail server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MailAuthMethod {
+    #[default]
+    Password,
+    /// Google OAuth2 + IMAP XOAUTH2 (browser sign-in, including 2FA).
+    GoogleOAuth,
+    /// Microsoft (Outlook.com / Microsoft 365) OAuth2 + IMAP XOAUTH2.
+    MicrosoftOAuth,
+    /// Yahoo Mail OAuth2 + IMAP XOAUTH2.
+    YahooOAuth,
+    /// Yandex Mail OAuth2 + IMAP XOAUTH2.
+    YandexOAuth,
+}
+
+impl MailAuthMethod {
+    pub fn is_oauth(self) -> bool {
+        !matches!(self, Self::Password)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OAuthConfig {
+    /// Google Cloud OAuth 2.0 Client ID (type: Desktop app).
+    #[serde(default)]
+    pub google_client_id: String,
+    /// Google Desktop client secret (token exchange; not a true secret for installed apps).
+    #[serde(default)]
+    pub google_client_secret: String,
+    /// Azure app registration Application (client) ID — public client / mobile & desktop.
+    #[serde(default)]
+    pub microsoft_client_id: String,
+    /// Yahoo OAuth Client ID.
+    #[serde(default)]
+    pub yahoo_client_id: String,
+    /// Yahoo OAuth Client Secret (required by Yahoo).
+    #[serde(default)]
+    pub yahoo_client_secret: String,
+    /// Yandex OAuth Client ID.
+    #[serde(default)]
+    pub yandex_client_id: String,
+    /// Yandex OAuth Client Secret.
+    #[serde(default)]
+    pub yandex_client_secret: String,
 }
 
 /// Incoming mail protocol. Existing configs without this field default to IMAP.
@@ -60,26 +110,38 @@ pub struct MailAccountConfig {
     pub smtp_port: u16,
     #[serde(default = "default_true")]
     pub smtp_tls: bool,
-    /// Password is never stored here — see `secrets` module / OS keyring.
+    /// Password / OAuth tokens are never stored here — see `secrets` / OS keyring.
     pub username: String,
+    #[serde(default)]
+    pub auth: MailAuthMethod,
 }
 
 impl MailAccountConfig {
-    /// Gmail IMAP/SMTP defaults. Auth with an [App Password](https://myaccount.google.com/apppasswords).
+    /// Gmail IMAP/SMTP defaults. Prefer Sign in with Google; App Password still works.
     pub fn gmail(email: impl Into<String>) -> Self {
+        Self::from_provider(crate::providers::MailProvider::Gmail, email)
+    }
+
+    /// Build an account draft from a [`crate::providers::MailProvider`] preset.
+    pub fn from_provider(
+        provider: crate::providers::MailProvider,
+        email: impl Into<String>,
+    ) -> Self {
         let email = email.into();
+        let p = provider.preset();
         Self {
-            id: "gmail".into(),
-            name: "Gmail".into(),
+            id: p.label.to_lowercase().replace(' ', "-"),
+            name: p.label.into(),
             email: email.clone(),
-            protocol: MailProtocol::Imap,
-            imap_host: "imap.gmail.com".into(),
-            imap_port: 993,
-            imap_tls: true,
-            smtp_host: "smtp.gmail.com".into(),
-            smtp_port: 587,
-            smtp_tls: true,
+            protocol: p.protocol,
+            imap_host: p.imap_host.into(),
+            imap_port: p.imap_port,
+            imap_tls: p.imap_tls,
+            smtp_host: p.smtp_host.into(),
+            smtp_port: p.smtp_port,
+            smtp_tls: p.smtp_tls,
             username: email,
+            auth: MailAuthMethod::Password,
         }
     }
 
@@ -98,6 +160,7 @@ impl MailAccountConfig {
             smtp_port: 587,
             smtp_tls: true,
             username: email,
+            auth: MailAuthMethod::Password,
         }
     }
 
@@ -208,6 +271,9 @@ pub struct UiConfig {
     /// Accent id from Ailiak.com mood options (`teal`, `cyan`, …).
     #[serde(default = "default_accent")]
     pub accent: String,
+    /// Account id opened on launch. Empty → first configured account.
+    #[serde(default)]
+    pub default_account_id: String,
 }
 
 fn default_demo() -> bool {
@@ -224,6 +290,7 @@ impl Default for UiConfig {
             use_demo_data: true,
             theme: ThemeMode::System,
             accent: default_accent(),
+            default_account_id: String::new(),
         }
     }
 }
@@ -257,12 +324,28 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Account used at startup: `ui.default_account_id` when valid, else first account.
     pub fn primary_account(&self) -> Option<&MailAccountConfig> {
+        let preferred = self.ui.default_account_id.trim();
+        if !preferred.is_empty() {
+            if let Some(a) = self.account_by_id(preferred) {
+                return Some(a);
+            }
+        }
         self.accounts.first()
     }
 
     pub fn account_by_id(&self, id: &str) -> Option<&MailAccountConfig> {
         self.accounts.iter().find(|a| a.id == id)
+    }
+
+    pub fn is_default_account(&self, id: &str) -> bool {
+        self.primary_account().is_some_and(|a| a.id == id)
+    }
+
+    /// Persist which account opens on launch.
+    pub fn set_default_account_id(&mut self, id: impl Into<String>) {
+        self.ui.default_account_id = id.into();
     }
 
     /// Insert or replace an account keyed by `id`.
@@ -292,6 +375,7 @@ mod tests {
             smtp_port: 587,
             smtp_tls: true,
             username: email.into(),
+            auth: MailAuthMethod::Password,
         }
     }
 
@@ -309,5 +393,22 @@ mod tests {
         assert_eq!(cfg.accounts.len(), 2);
         assert_eq!(cfg.account_by_id("a1").unwrap().name, "One renamed");
         assert_eq!(cfg.primary_account().unwrap().id, "a1");
+    }
+
+    #[test]
+    fn primary_account_prefers_default_id() {
+        let mut cfg = AppConfig::default();
+        cfg.upsert_account(sample("a1", "one@example.com"));
+        cfg.upsert_account(sample("a2", "two@example.com"));
+        assert_eq!(cfg.primary_account().unwrap().id, "a1");
+        cfg.set_default_account_id("a2");
+        assert_eq!(cfg.primary_account().unwrap().id, "a2");
+        assert!(cfg.is_default_account("a2"));
+        cfg.set_default_account_id("missing");
+        assert_eq!(
+            cfg.primary_account().unwrap().id,
+            "a1",
+            "invalid default falls back to first"
+        );
     }
 }

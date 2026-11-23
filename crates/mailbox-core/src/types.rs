@@ -25,6 +25,9 @@ pub struct Folder {
     pub name: String,
     pub path: String,
     pub unread: u32,
+    /// When true, folder is kept in the DB but hidden from the nav rail.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// Display order: Inbox → Sent → Archive → Trash → everything else.
@@ -76,24 +79,28 @@ mod tests {
                 name: "Trash".into(),
                 path: "Trash".into(),
                 unread: 0,
+                hidden: false,
             },
             Folder {
                 account_id: "a".into(),
                 name: "Archive".into(),
                 path: "Archive".into(),
                 unread: 0,
+                hidden: false,
             },
             Folder {
                 account_id: "a".into(),
                 name: "Inbox".into(),
                 path: "INBOX".into(),
                 unread: 0,
+                hidden: false,
             },
             Folder {
                 account_id: "a".into(),
                 name: "Sent".into(),
                 path: "Sent".into(),
                 unread: 0,
+                hidden: false,
             },
         ];
         sort_folders(&mut folders);
@@ -120,6 +127,9 @@ pub struct Envelope {
 pub struct Message {
     pub envelope: Envelope,
     pub body_text: String,
+    /// Sanitized-enough HTML for the reader (empty when the message was plain-only).
+    #[serde(default)]
+    pub body_html: String,
     pub to: Vec<String>,
     pub cc: Vec<String>,
 }

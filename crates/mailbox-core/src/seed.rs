@@ -24,6 +24,7 @@ pub fn seed_demo_if_empty(store: &Store) -> Result<bool> {
             name: name.into(),
             path: path.into(),
             unread,
+            hidden: false,
         })?;
     }
 
@@ -52,6 +53,7 @@ Tips:\n\
   • Send to Ailiak creates a Desk task from the open message\n\n\
 — Mailbox\n"
                 .into(),
+            body_html: String::new(),
             to: vec!["you@example.com".into()],
             cc: vec![],
         },
@@ -74,6 +76,7 @@ Send to Ailiak. Mailbox will create a Desk task with the subject, a short #mail 
 line, and enough detail to act — without uploading attachments.\n\n\
 Ada\n"
                 .into(),
+            body_html: String::new(),
             to: vec!["you@example.com".into()],
             cc: vec![],
         },
@@ -95,6 +98,7 @@ After the first sync, envelopes and bodies stay in SQLite under your XDG data \
 directory. You can reopen Mailbox with the network off and still read what you \
 already fetched.\n"
                 .into(),
+            body_html: String::new(),
             to: vec!["you@example.com".into()],
             cc: vec![],
         },
@@ -112,6 +116,7 @@ already fetched.\n"
                 snippet: "Sounds good — see you Saturday.".into(),
             },
             body_text: "Sounds good — see you Saturday.\n".into(),
+            body_html: String::new(),
             to: vec!["friend@example.com".into()],
             cc: vec![],
         },

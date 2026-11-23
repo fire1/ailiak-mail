@@ -44,14 +44,12 @@ impl FolderIcon {
 #[derive(Clone, Copy)]
 pub enum ToolbarIcon {
     Sync,
-    Calendar,
 }
 
 impl ToolbarIcon {
     fn glyph(self) -> &'static str {
         match self {
             Self::Sync => ph::ARROWS_CLOCKWISE,
-            Self::Calendar => ph::CALENDAR_BLANK,
         }
     }
 }
@@ -294,10 +292,84 @@ pub fn todo_nav_button(ui: &mut Ui, enabled: bool, collapsed: bool) -> Response 
     )
 }
 
+pub fn calendar_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
+    nav_action_row(
+        ui,
+        collapsed,
+        true,
+        "Calendar",
+        "Desk calendar (c)",
+        ph::CALENDAR_BLANK,
+    )
+}
+
 pub fn settings_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
     nav_action_row(ui, collapsed, true, "Settings", "Settings (,)", ph::GEAR)
 }
 
 pub fn help_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
     nav_action_row(ui, collapsed, true, "Help", "Help (?)", ph::QUESTION)
+}
+
+/// Stak row in the nav rail (sender/domain stack).
+pub fn stak_nav_button(
+    ui: &mut Ui,
+    label: &str,
+    selected: bool,
+    collapsed: bool,
+    brand: Option<&egui::TextureHandle>,
+) -> Response {
+    let accent = theme::accent(ui.ctx());
+    let mute = theme::mute(ui.ctx());
+    let height = 28.0;
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+
+    let fill = if selected {
+        theme::select(ui.ctx())
+    } else if response.hovered() {
+        theme::chip(ui.ctx())
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 6.0, fill);
+
+    let icon_size = crate::brand_logos::DISPLAY_SIZE;
+    let icon_center = if collapsed {
+        rect.center()
+    } else {
+        Pos2::new(rect.left() + 10.0 + icon_size * 0.5, rect.center().y)
+    };
+    let icon_rect = egui::Rect::from_center_size(
+        ui.painter().round_pos_to_pixels(icon_center),
+        Vec2::splat(icon_size),
+    );
+    if let Some(tex) = brand {
+        egui::Image::new((tex.id(), icon_rect.size()))
+            .rounding(4.0)
+            .paint_at(ui, icon_rect);
+    } else {
+        let icon_color = if selected { accent } else { mute };
+        paint_glyph(ui, icon_rect, ph::STACK, icon_color);
+    }
+
+    if !collapsed {
+        let text_pos = ui
+            .painter()
+            .round_pos_to_pixels(Pos2::new(rect.left() + 30.0, rect.center().y));
+        let font = theme::nav_font(12.0);
+        let color = if selected {
+            accent
+        } else {
+            ui.visuals().text_color()
+        };
+        ui.painter()
+            .text(text_pos, Align2::LEFT_CENTER, label, font, color);
+    }
+
+    if collapsed {
+        response.on_hover_text(label)
+    } else {
+        response
+    }
 }

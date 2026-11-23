@@ -13,10 +13,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+dotenvy = "0.15"
 eframe = { version = "0.29", default-features = true, features = ["default_fonts", "glow"] }
 egui = "0.29"
 egui-phosphor = "0.7.3"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 mailbox-ailiak.workspace = true
 mailbox-core.workspace = true
 md-5 = "0.10"
@@ -27,6 +28,10 @@ sha2 = "0.10"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid.workspace = true
+wry = "0.53"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [dev-dependencies]
 tempfile = "3"

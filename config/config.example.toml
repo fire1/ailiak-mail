@@ -7,6 +7,8 @@ use_demo_data = true
 theme = "system"
 # Accent from Ailiak.com: teal (default), cyan, gold, peach, lavender, leaf, sky, pink, stone, cobalt
 accent = "teal"
+# Account id opened on launch (Settings → Accounts → Use as default). Empty = first account.
+# default_account_id = "gmail"
 
 # Gmail (Settings → Use Gmail defaults, or uncomment):
 # [[accounts]]
@@ -42,3 +44,12 @@ enabled = false
 base_url = "https://api.ailiak.com"
 default_for_date = "today"
 hashtag = "mail"
+
+# Optional overrides — normal releases embed AiliakMail OAuth apps (see docs/oauth-apps.md).
+# [oauth]
+# google_client_id = "…"
+# microsoft_client_id = "…"
+# yahoo_client_id = "…"
+# yahoo_client_secret = "…"
+# yandex_client_id = "…"
+# yandex_client_secret = "…"

@@ -3,11 +3,16 @@
 mod app;
 mod avatars;
 mod brand;
+mod brand_logos;
 mod calendar;
 mod icons;
 mod layout;
+mod mail_reader;
+mod mail_webview;
 mod panes;
+mod provider_logos;
 mod settings;
+mod staks;
 mod svg_tex;
 mod theme;
 
@@ -15,6 +20,9 @@ use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    // Local OAuth overrides (gitignored `.env`) — never commit real values.
+    let _ = dotenvy::dotenv();
+
     // Quiet sctk-adwaita: GNOME button-layout may include "icon", which CSD ignores.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {

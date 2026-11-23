@@ -1,0 +1,26 @@
+From: Microsoft <replyto@email.microsoft.com>
+To: fire1@abv.bg
+Subject: Microsoft Ignite is your stage too
+Message-ID: <ignite-fixture@example.com>
+Date: Tue, 11 Nov 2026 20:06:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="boundary-fixture"
+
+--boundary-fixture
+Content-Type: text/plain; charset="utf-8"
+
+View as a web page <[[https://emails.microsoft.com/v/plain-only]]>
+
+Join Ignite plain
+Explore sessions <https://aka.ms/from-plain>
+
+--boundary-fixture
+Content-Type: text/html; charset="utf-8"
+
+<html><body>
+<p>Join Ignite HTML</p>
+<p><a href="https://aka.ms/from-html">Explore sessions</a></p>
+<img src="https://cdn.example.com/hero.png" alt="Hero">
+</body></html>
+
+--boundary-fixture--

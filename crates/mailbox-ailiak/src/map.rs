@@ -196,6 +196,7 @@ mod tests {
                 snippet: "hi".into(),
             },
             body_text: "body".into(),
+            body_html: String::new(),
             to: vec![],
             cc: vec![],
         };

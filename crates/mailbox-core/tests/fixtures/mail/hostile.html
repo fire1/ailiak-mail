@@ -1,0 +1,13 @@
+<html>
+<body>
+  <p>Hello <a href="https://safe.example/path">friend</a></p>
+  <script>document.cookie</script>
+  <p onclick="alert(1)">click me</p>
+  <a href="javascript:alert(1)">Run me</a>
+  <a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">Data url</a>
+  <a href="vbscript:msgbox(1)">VB</a>
+  <img src="javascript:alert(1)" alt="bad">
+  <iframe src="https://evil.example/"></iframe>
+  <p>Visible after sanitize</p>
+</body>
+</html>

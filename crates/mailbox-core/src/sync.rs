@@ -1,10 +1,11 @@
 //! High-level mail sync. GUI calls this — never IMAP/POP3 types directly.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use tracing::info;
 
 use crate::config::{MailAccountConfig, MailProtocol};
 use crate::imap;
+use crate::oauth::MailCredential;
 use crate::pop3;
 use crate::store::Store;
 
@@ -13,14 +14,18 @@ pub struct SyncReport {
     pub folders: usize,
     pub messages: usize,
     pub folder_path: String,
+    /// Human-readable detail (e.g. POP3 server message count).
+    pub detail: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
-    /// Max messages to pull for the target folder (newest first).
+    /// Max messages to pull for each folder (newest first).
     pub max_messages: u32,
     /// Folder to fetch bodies for. Defaults to INBOX. Ignored for POP3.
     pub folder_path: String,
+    /// When true, download mail for every listed IMAP folder (still capped per folder).
+    pub sync_all_folders: bool,
 }
 
 impl Default for SyncOptions {
@@ -28,27 +33,44 @@ impl Default for SyncOptions {
         Self {
             max_messages: 40,
             folder_path: "INBOX".into(),
+            sync_all_folders: false,
         }
     }
 }
 
 /// Verify login (IMAP or POP3 depending on account protocol).
-pub fn test_connection(account: &MailAccountConfig, password: &str) -> Result<()> {
+/// On success for POP3, `detail` includes the server message count.
+pub fn test_connection(account: &MailAccountConfig, credential: &MailCredential) -> Result<String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("start tokio runtime")?;
     match account.protocol {
-        MailProtocol::Imap => rt.block_on(imap::test_login(account, password)),
-        MailProtocol::Pop3 => rt.block_on(pop3::test_login(account, password)),
+        MailProtocol::Imap => {
+            rt.block_on(imap::test_login(account, credential))?;
+            Ok("IMAP login OK".into())
+        }
+        MailProtocol::Pop3 => match credential {
+            MailCredential::Password(password) => {
+                let count = rt.block_on(pop3::test_login_with_count(account, password))?;
+                if count == 0 {
+                    Ok("POP3 login OK — server inbox is empty (0 messages)".into())
+                } else {
+                    Ok(format!("POP3 login OK — {count} message(s) on server"))
+                }
+            }
+            MailCredential::OAuth2 { .. } => {
+                bail!("POP3 does not support OAuth — use an app password")
+            }
+        },
     }
 }
 
-/// List folders and sync one mailbox into the local SQLite cache.
+/// List folders and sync one or all mailboxes into the local SQLite cache.
 pub fn sync_account(
     store: &Store,
     account: &MailAccountConfig,
-    password: &str,
+    credential: &MailCredential,
     opts: SyncOptions,
 ) -> Result<SyncReport> {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -57,50 +79,97 @@ pub fn sync_account(
         .context("start tokio runtime")?;
 
     match account.protocol {
-        MailProtocol::Imap => rt.block_on(sync_imap(store, account, password, opts)),
-        MailProtocol::Pop3 => rt.block_on(sync_pop3(store, account, password, opts)),
+        MailProtocol::Imap => rt.block_on(sync_imap(store, account, credential, opts)),
+        MailProtocol::Pop3 => match credential {
+            MailCredential::Password(password) => {
+                rt.block_on(sync_pop3(store, account, password, opts))
+            }
+            MailCredential::OAuth2 { .. } => {
+                bail!("POP3 does not support OAuth — use IMAP (Gmail) or an app password")
+            }
+        },
     }
 }
 
 async fn sync_imap(
     store: &Store,
     account: &MailAccountConfig,
-    password: &str,
+    credential: &MailCredential,
     opts: SyncOptions,
 ) -> Result<SyncReport> {
-    let mut session = imap::connect_and_login(account, password).await?;
+    let mut session = imap::connect_and_login(account, credential).await?;
     let folders = imap::list_folders(&mut session, &account.id).await?;
     info!(count = folders.len(), "listed IMAP folders");
 
     for folder in &folders {
-        store.upsert_folder(folder)?;
+        // Preserve local hidden flag if the folder already exists.
+        let hidden = store
+            .list_all_folders(&account.id)
+            .ok()
+            .and_then(|all| {
+                all.into_iter()
+                    .find(|f| f.path == folder.path)
+                    .map(|f| f.hidden)
+            })
+            .unwrap_or(false);
+        let mut f = folder.clone();
+        f.hidden = hidden;
+        store.upsert_folder(&f)?;
     }
+    let keep: Vec<String> = folders.iter().map(|f| f.path.clone()).collect();
+    store.retain_folders(&account.id, &keep)?;
 
-    let folder_path = if folders.iter().any(|f| f.path == opts.folder_path) {
-        opts.folder_path.clone()
+    let targets: Vec<String> = if opts.sync_all_folders {
+        folders.iter().map(|f| f.path.clone()).collect()
+    } else if folders.iter().any(|f| f.path == opts.folder_path) {
+        vec![opts.folder_path.clone()]
     } else {
-        "INBOX".to_string()
+        vec!["INBOX".into()]
     };
 
-    let (unseen, messages) =
-        imap::sync_folder(&mut session, &account.id, &folder_path, opts.max_messages).await?;
-
-    if let Some(folder) = folders.iter().find(|f| f.path == folder_path) {
-        let mut updated = folder.clone();
-        updated.unread = unseen;
-        store.upsert_folder(&updated)?;
-    }
-
-    for msg in &messages {
-        store.upsert_message(msg)?;
+    let mut total_messages = 0usize;
+    let mut primary = targets.first().cloned().unwrap_or_else(|| "INBOX".into());
+    for path in &targets {
+        match imap::sync_folder(&mut session, &account.id, path, opts.max_messages).await {
+            Ok((unseen, messages)) => {
+                if let Some(folder) = folders.iter().find(|f| &f.path == path) {
+                    let mut updated = folder.clone();
+                    updated.unread = unseen;
+                    let _ = store.upsert_folder(&updated);
+                }
+                for msg in &messages {
+                    store.upsert_message(msg)?;
+                }
+                total_messages += messages.len();
+                if path == &opts.folder_path || targets.len() == 1 {
+                    primary = path.clone();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(folder = %path, error = %e, "folder sync failed; continuing");
+            }
+        }
     }
 
     session.logout().await.ok();
 
+    let detail = if opts.sync_all_folders {
+        format!(
+            "IMAP: refreshed {} folders, fetched {total_messages} message(s)",
+            folders.len()
+        )
+    } else {
+        format!(
+            "IMAP: {} folders on server · synced “{primary}”",
+            folders.len()
+        )
+    };
+
     Ok(SyncReport {
         folders: folders.len(),
-        messages: messages.len(),
-        folder_path,
+        messages: total_messages,
+        folder_path: primary,
+        detail,
     })
 }
 
@@ -110,23 +179,52 @@ async fn sync_pop3(
     password: &str,
     opts: SyncOptions,
 ) -> Result<SyncReport> {
-    let (folders, unseen, messages) =
+    let (folders, unseen, messages, server_count) =
         pop3::sync_inbox(account, password, opts.max_messages).await?;
-    info!(count = messages.len(), "POP3 messages fetched");
+    info!(
+        fetched = messages.len(),
+        server_count,
+        "POP3 messages fetched"
+    );
 
     for folder in &folders {
         let mut f = folder.clone();
         f.unread = unseen;
         store.upsert_folder(&f)?;
     }
+    store.retain_folders(
+        &account.id,
+        &folders.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+    )?;
 
     for msg in &messages {
         store.upsert_message(msg)?;
     }
 
+    let pop3_folder_note = if account.imap_host.to_lowercase().contains("abv.bg")
+        || account.email.to_lowercase().ends_with("@abv.bg")
+    {
+        "ABV is POP3-only (no IMAP) — Sent, Spam, Drafts, and custom folders stay in ABV webmail"
+    } else {
+        "POP3 cannot list server folders — only Inbox is available"
+    };
+    let detail = if server_count == 0 {
+        format!("{pop3_folder_note}; server inbox is empty")
+    } else if messages.is_empty() {
+        format!(
+            "{pop3_folder_note}; server has {server_count} message(s) but none could be downloaded"
+        )
+    } else {
+        format!(
+            "{pop3_folder_note}; saved {} of {server_count} from Inbox",
+            messages.len()
+        )
+    };
+
     Ok(SyncReport {
         folders: folders.len(),
         messages: messages.len(),
         folder_path: "INBOX".into(),
+        detail,
     })
 }

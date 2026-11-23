@@ -6,7 +6,7 @@
 
 ## Features
 
-- **IMAP sync** (Gmail App Password ready) with local SQLite cache  
+- **IMAP sync** (Sign in with Google / App Password) with local SQLite cache  
 - **POP3** for older mail servers (POP3S :995 or plain :110; mail left on server)  
 - **Folders** — Inbox → Sent → Archive → Trash, Lucide-style icons, collapsible rail  
 - **Multi-account** — avatar strip + folders in one nav column  
@@ -21,12 +21,16 @@
 git clone https://github.com/fire1/ailiakmail.git
 cd ailiakmail
 
-# Debian/Ubuntu deps for egui
+# Debian/Ubuntu deps for egui + HTML mail webview (WebKitGTK)
 sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-  libxkbcommon-dev libssl-dev pkg-config
+  libxkbcommon-dev libssl-dev pkg-config \
+  libgtk-3-dev libwebkit2gtk-4.1-dev
 
 cargo run -p mailbox-gui
 ```
+
+HTML messages render in an embedded OS webview (**wry**: WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows). Remote images stay blocked until **Load remote images…**. After upgrading, **Sync all** so messages get `body_html` stored. On Linux Wayland, child webviews need a working WebKitGTK stack; if the webview fails to create, the plain-text reader is used as fallback.
+
 
 Or build a release binary for your OS:
 
@@ -50,11 +54,16 @@ Add `--package` to also produce installers (`.deb` / AppImage / `.dmg` / NSIS) w
 
 Cross-compiling a full egui GUI to another OS is unreliable; for release artifacts use **GitHub Actions** (tag `v*` → `.github/workflows/release.yml`).
 
-## Gmail
+## App authorization (recommended)
 
-1. Google Account → **Security** → 2FA → **App password**  
-2. AiliakMail → **Settings** → **Use Gmail defaults** → your address  
-3. Paste app password → **Save** → **Test IMAP** → **Sync** (`g`)
+Supported: **Gmail**, **Outlook / Microsoft 365**, **Yahoo**, **Yandex**.  
+(iCloud and GMX use app-specific / account passwords only.)
+
+1. **Add account** → pick provider → **Authorize with …**  
+2. Complete login / 2FA in the browser (you are authorizing **AiliakMail**, not pasting a mail password)  
+3. **Sync** (`g`)
+
+Release builds should embed AiliakMail’s OAuth Client IDs (users never paste them). Maintainers: see [`docs/oauth-apps.md`](docs/oauth-apps.md).
 
 ## POP3 (older servers)
 

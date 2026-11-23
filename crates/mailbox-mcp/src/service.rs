@@ -6,7 +6,7 @@ use mailbox_core::paths::AppPaths;
 use mailbox_core::store::Store;
 use mailbox_core::sync::{sync_account, SyncOptions};
 use mailbox_core::types::{Envelope, Folder, Message};
-use mailbox_core::{secrets, MailAccountConfig};
+use mailbox_core::{secrets, MailAccountConfig, MailCredential};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -135,16 +135,19 @@ impl MailboxService {
             .account_by_id(&id)
             .cloned()
             .ok_or_else(|| anyhow!("account {id} not in config.toml — add it in AiliakMail Settings"))?;
-        let password = secrets::get_mail_password(&account.id)?
-            .ok_or_else(|| anyhow!("no password in OS keyring for account {}", account.id))?;
+        let credential = MailCredential::Password(
+            secrets::get_mail_password(&account.id)?
+                .ok_or_else(|| anyhow!("no password in OS keyring for account {}", account.id))?,
+        );
         let store = self.open_store()?;
         let report = sync_account(
             &store,
             &account,
-            &password,
+            &credential,
             SyncOptions {
                 max_messages: max_messages.unwrap_or(40),
                 folder_path: folder.unwrap_or("INBOX").to_string(),
+                sync_all_folders: false,
             },
         )
         .with_context(|| format!("sync {}", account.id))?;
@@ -178,6 +181,7 @@ mod tests {
                 snippet: "hello".into(),
             },
             body_text: "body".into(),
+            body_html: String::new(),
             to: vec!["you@example.com".into()],
             cc: vec![],
         }
@@ -203,6 +207,7 @@ mod tests {
             smtp_port: 587,
             smtp_tls: true,
             username: "demo@example.com".into(),
+            auth: mailbox_core::MailAuthMethod::Password,
         });
         cfg.save(&paths.config_file()).unwrap();
         let store = Store::open(&paths.db_file()).unwrap();
@@ -212,6 +217,7 @@ mod tests {
                 name: "Inbox".into(),
                 path: "INBOX".into(),
                 unread: 1,
+                hidden: false,
             })
             .unwrap();
         store.upsert_message(&sample_msg("demo", "INBOX", "1")).unwrap();

@@ -1,13 +1,15 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use eframe::App;
 use egui::RichText;
 use mailbox_ailiak::{
     build_payload, short_task_number, todo_defaults, AiliakClient, DeskTask,
 };
-use mailbox_core::config::{AppConfig, MailAccountConfig, MailProtocol};
+use mailbox_core::config::{AppConfig, MailAccountConfig, MailAuthMethod, MailProtocol};
+use mailbox_core::oauth::{self, MailCredential, OAuthProvider, OAuthSignInResult};
+use mailbox_core::oauth_clients;
 use mailbox_core::paths::AppPaths;
 use mailbox_core::secrets;
 use mailbox_core::seed::{demo_account_id, seed_demo_if_empty};
@@ -18,8 +20,9 @@ use mailbox_core::types::{Envelope, Folder, Message, MessageId};
 use crate::avatars::{AvatarCache, AvatarMsg};
 use crate::brand::AiliakLogo;
 use crate::calendar::CalendarState;
-use crate::settings::SettingsSection;
+use crate::settings::{AccountWizard, AccountWizardStep, SettingsSection};
 use crate::theme;
+use mailbox_core::providers::MailProvider;
 
 enum BgMsg {
     AiliakOk {
@@ -32,8 +35,12 @@ enum BgMsg {
         folders: usize,
         messages: usize,
         folder_path: String,
+        detail: String,
     },
-    TestOk(String),
+    /// Mail connection test finished (OK message or error text).
+    MailTest(Result<String, String>),
+    /// Browser OAuth sign-in finished.
+    OAuthSignIn(Result<OAuthSignInResult, String>),
     DeskTasks(Vec<DeskTask>),
     Error(String),
 }
@@ -46,12 +53,26 @@ pub struct MailboxApp {
     pub(crate) folders: Vec<Folder>,
     pub(crate) envelopes: Vec<Envelope>,
     pub(crate) selected_folder: String,
+    /// When set, message list is filtered to this Stak (sender/domain stack).
+    pub(crate) selected_stak: Option<String>,
     pub(crate) selected_message: Option<MessageId>,
     pub(crate) open_message: Option<Message>,
+    /// Opt-in remote images for the open message (privacy default: off).
+    pub(crate) load_remote_images: bool,
+    pub(crate) mail_images: crate::mail_reader::MailImageCache,
+    /// Cached structured body for the open message (avoids re-parse every frame).
+    pub(crate) mail_body_cache: Option<(MessageId, bool, mailbox_core::MailBody)>,
+    pub(crate) mail_webview: crate::mail_webview::MailWebView,
+    /// Set each frame by the reader when HTML should fill a screen rect.
+    pub(crate) mail_webview_req: Option<crate::mail_webview::MailWebViewRequest>,
     pub(crate) search: String,
     /// Request keyboard focus on the top-bar search field (set by `/`).
     pub(crate) focus_search: bool,
     pub(crate) status: String,
+    /// Latest Test connection result (shown under the button in Accounts).
+    pub(crate) mail_test_feedback: String,
+    /// Shown in the empty message list (why there is nothing to read).
+    pub(crate) list_empty_hint: String,
     pub(crate) show_settings: bool,
     pub(crate) settings_section: SettingsSection,
     pub(crate) show_help: bool,
@@ -76,9 +97,14 @@ pub struct MailboxApp {
     pub(crate) mail_tls: bool,
     pub(crate) imap_user_input: String,
     pub(crate) imap_password_input: String,
+    /// When true, mail password field shows plaintext.
+    pub(crate) show_mail_password: bool,
     pub(crate) smtp_host_input: String,
+    pub(crate) smtp_port: u16,
     /// Account id currently edited in Settings (may be a new draft).
     pub(crate) editing_account_id: String,
+    /// Multi-step add-account flow (`None` = manage existing).
+    pub(crate) account_wizard: Option<AccountWizard>,
     pub(crate) ailiak_logo: AiliakLogo,
     pub(crate) avatars: AvatarCache,
     avatar_tx: Sender<AvatarMsg>,
@@ -116,7 +142,7 @@ impl MailboxApp {
             let proto = config.primary_account().unwrap().protocol.label();
             format!("Ready — Sync to pull mail ({proto})")
         } else {
-            "Ready — demo mail, or add Gmail / POP3 in Settings".into()
+            "Ready — demo mail, or Add account in Settings".into()
         };
 
         let (bg_tx, bg_rx) = mpsc::channel();
@@ -135,11 +161,19 @@ impl MailboxApp {
             folders: Vec::new(),
             envelopes: Vec::new(),
             selected_folder: "INBOX".into(),
+            selected_stak: None,
             selected_message: None,
             open_message: None,
+            load_remote_images: false,
+            mail_images: crate::mail_reader::MailImageCache::default(),
+            mail_body_cache: None,
+            mail_webview: crate::mail_webview::MailWebView::default(),
+            mail_webview_req: None,
             search: String::new(),
             focus_search: false,
             status,
+            mail_test_feedback: String::new(),
+            list_empty_hint: String::new(),
             show_settings: false,
             settings_section: SettingsSection::Appearance,
             show_help: false,
@@ -161,8 +195,11 @@ impl MailboxApp {
             mail_tls: true,
             imap_user_input: String::new(),
             imap_password_input: String::new(),
+            show_mail_password: false,
             smtp_host_input: String::new(),
+            smtp_port: 587,
             editing_account_id,
+            account_wizard: None,
             ailiak_logo,
             avatars: AvatarCache::default(),
             avatar_tx,
@@ -182,42 +219,38 @@ impl MailboxApp {
         Ok(app)
     }
 
-    pub(crate) fn apply_gmail_preset(&mut self) {
-        let email = if self.account_email_input.trim().is_empty() {
-            "you@gmail.com".into()
-        } else {
-            self.account_email_input.trim().to_string()
-        };
-        let g = MailAccountConfig::gmail(email);
-        self.mail_protocol = MailProtocol::Imap;
-        self.account_name_input = g.name;
-        self.account_email_input = g.email.clone();
-        self.imap_host_input = g.imap_host;
-        self.mail_port_input = g.imap_port.to_string();
-        self.mail_tls = g.imap_tls;
-        self.imap_user_input = g.username;
-        self.smtp_host_input = g.smtp_host;
-        self.status = "Gmail preset filled — paste an App Password, Save, then Test / Sync".into();
+    pub(crate) fn apply_provider_preset(&mut self, provider: MailProvider) {
+        let email = self.account_email_input.trim().to_string();
+        let draft = MailAccountConfig::from_provider(provider, email.clone());
+        let preset = provider.preset();
+        self.mail_protocol = preset.protocol;
+        self.imap_host_input = draft.imap_host;
+        self.mail_port_input = draft.imap_port.to_string();
+        self.mail_tls = draft.imap_tls;
+        self.smtp_host_input = draft.smtp_host;
+        self.smtp_port = draft.smtp_port;
+        if self.account_name_input.trim().is_empty() {
+            self.account_name_input = preset.label.to_string();
+        }
+        if self.imap_user_input.trim().is_empty() && !email.is_empty() {
+            self.imap_user_input = email;
+        }
+        self.status = format!("{} defaults ready — enter email and password", preset.label);
     }
 
-    pub(crate) fn apply_pop3_preset(&mut self) {
-        let email = self.account_email_input.trim().to_string();
-        let p = MailAccountConfig::pop3_template(if email.is_empty() {
-            "you@example.com".into()
-        } else {
-            email
-        });
-        self.mail_protocol = MailProtocol::Pop3;
-        if self.account_name_input.trim().is_empty() {
-            self.account_name_input = p.name;
+    pub(crate) fn wizard_select_provider(&mut self, provider: MailProvider) {
+        self.apply_provider_preset(provider);
+        if let Some(wiz) = self.account_wizard.as_mut() {
+            wiz.provider = Some(provider);
+            wiz.step = AccountWizardStep::Credentials;
         }
-        self.mail_port_input = p.imap_port.to_string();
-        self.mail_tls = p.imap_tls;
-        if self.imap_user_input.trim().is_empty() && !self.account_email_input.trim().is_empty() {
-            self.imap_user_input = self.account_email_input.trim().to_string();
-        }
-        self.status =
-            "POP3 defaults (port 995, TLS) — set host, password, Save, then Test / Sync".into();
+    }
+
+    pub(crate) fn cancel_account_wizard(&mut self) {
+        self.account_wizard = None;
+        self.show_mail_password = false;
+        self.reload_settings_fields();
+        self.status = "Account setup cancelled".into();
     }
 
     fn fresh_account_id(email: &str) -> String {
@@ -276,6 +309,11 @@ impl MailboxApp {
                 (MailProtocol::Imap, true) => 993,
                 (MailProtocol::Imap, false) => 143,
             });
+        let auth = self
+            .config
+            .account_by_id(&id)
+            .map(|a| a.auth)
+            .unwrap_or(MailAuthMethod::Password);
         Some(MailAccountConfig {
             id,
             name: if self.account_name_input.trim().is_empty() {
@@ -293,14 +331,173 @@ impl MailboxApp {
             } else {
                 self.smtp_host_input.trim().to_string()
             },
-            smtp_port: 587,
+            smtp_port: if self.smtp_port == 0 { 587 } else { self.smtp_port },
             smtp_tls: true,
             username: if self.imap_user_input.trim().is_empty() {
                 email.to_string()
             } else {
                 self.imap_user_input.trim().to_string()
             },
+            auth,
         })
+    }
+
+    pub(crate) fn oauth_ready(&self, provider: OAuthProvider) -> bool {
+        oauth_clients::creds_ready(provider, &self.config.oauth)
+    }
+
+    /// Built-in AiliakMail app credentials are present (no Client ID paste needed).
+    pub(crate) fn oauth_app_embedded(&self, provider: OAuthProvider) -> bool {
+        oauth_clients::has_embedded_app(provider)
+    }
+
+    fn resolve_mail_credential(
+        &self,
+        account: &MailAccountConfig,
+    ) -> Result<MailCredential, String> {
+        match account.auth {
+            MailAuthMethod::Password => Ok(MailCredential::Password(
+                self.resolve_mail_password(&account.id)?,
+            )),
+            auth if auth.is_oauth() => {
+                let oauth = OAuthProvider::from_auth_method(auth).ok_or_else(|| {
+                    "Unknown OAuth provider on this account".to_string()
+                })?;
+                let creds = oauth_clients::resolve_creds(oauth, &self.config.oauth).ok_or_else(
+                    || {
+                        format!(
+                            "{} app authorization is not configured in this build",
+                            oauth.label()
+                        )
+                    },
+                )?;
+                oauth::ensure_access_token(&account.id, oauth, &creds)
+                    .map(|access_token| MailCredential::OAuth2 { access_token })
+                    .map_err(|e| e.to_string())
+            }
+            _ => Err("Unsupported auth method".into()),
+        }
+    }
+
+    /// Open browser app authorization (handles 2FA there) and finish account setup on success.
+    pub(crate) fn start_oauth_sign_in(&mut self, mail_provider: MailProvider) {
+        let Some(oauth) = OAuthProvider::from_mail_provider(mail_provider) else {
+            let msg = "This provider does not support browser authorization — use an app password."
+                .to_string();
+            self.status = msg.clone();
+            self.mail_test_feedback = msg;
+            return;
+        };
+        let Some(creds) = oauth_clients::resolve_creds(oauth, &self.config.oauth) else {
+            let msg = if oauth_clients::has_embedded_app(oauth) {
+                format!("{} credentials missing — check config overrides.", oauth.label())
+            } else {
+                format!(
+                    "AiliakMail is not registered with {} in this build. Use an app password, or ask the maintainer to embed OAuth app credentials (docs/oauth-apps.md).",
+                    oauth.label()
+                )
+            };
+            self.status = msg.clone();
+            self.mail_test_feedback = msg;
+            return;
+        };
+        if oauth.needs_client_secret()
+            && creds
+                .client_secret
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            let msg = format!(
+                "AiliakMail {} app secret is missing in this build — use an app password for now.",
+                oauth.label()
+            );
+            self.status = msg.clone();
+            self.mail_test_feedback = msg;
+            return;
+        }
+        let tx = self.bg_tx.clone();
+        let pending = format!(
+            "Authorize AiliakMail with {} in your browser…",
+            oauth.label()
+        );
+        self.status = pending.clone();
+        self.mail_test_feedback = pending;
+        thread::spawn(move || {
+            let result =
+                oauth::oauth_sign_in(oauth, mail_provider, &creds).map_err(|e| e.to_string());
+            let _ = tx.send(BgMsg::OAuthSignIn(result));
+        });
+    }
+
+    fn apply_oauth_sign_in(&mut self, result: OAuthSignInResult) {
+        let email = result.email.trim().to_string();
+        let id = self
+            .config
+            .accounts
+            .iter()
+            .find(|a| a.email.eq_ignore_ascii_case(&email))
+            .map(|a| a.id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| Self::fresh_account_id(&email));
+        if let Err(e) = oauth::store_oauth_tokens(&id, &result.tokens) {
+            let msg = format!("Could not store OAuth tokens: {e}");
+            self.status = msg.clone();
+            self.mail_test_feedback = msg;
+            return;
+        }
+        if let Some(url) = result.picture_url.as_deref() {
+            match AvatarCache::set_from_url(&self.paths.avatars_dir(), &email, url) {
+                Ok(()) => self.avatars.invalidate(&email),
+                Err(e) => tracing::warn!(error = %e, "could not fetch OAuth profile photo"),
+            }
+        }
+        let existing_name = self
+            .config
+            .account_by_id(&id)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        let mut account = MailAccountConfig::from_provider(result.mail_provider, email.clone());
+        account.id = id.clone();
+        account.name = if !self.account_name_input.trim().is_empty() {
+            self.account_name_input.trim().to_string()
+        } else if !existing_name.is_empty() {
+            existing_name
+        } else {
+            result.name.clone()
+        };
+        account.auth = result.oauth.auth_method();
+        self.account_name_input = account.name.clone();
+        self.account_email_input = email;
+        self.imap_user_input = account.username.clone();
+        self.imap_host_input = account.imap_host.clone();
+        self.smtp_host_input = account.smtp_host.clone();
+        self.mail_port_input = account.imap_port.to_string();
+        self.mail_tls = account.imap_tls;
+        self.mail_protocol = account.protocol;
+        self.imap_password_input.clear();
+        self.config.upsert_account(account);
+        self.config.ui.use_demo_data = false;
+        self.account_id = id.clone();
+        self.editing_account_id = id;
+        self.account_wizard = None;
+        if let Err(e) = self.config.save(&self.paths.config_file()) {
+            self.status = format!("Signed in but config save failed: {e}");
+            self.mail_test_feedback = self.status.clone();
+            return;
+        }
+        let _ = self.refresh_folders();
+        let _ = self.refresh_envelopes();
+        let msg = format!(
+            "Signed in as {} via {} — syncing mail…",
+            result.tokens.email,
+            result.oauth.label()
+        );
+        self.status = msg.clone();
+        self.mail_test_feedback = msg;
+        // Pull folders + Inbox immediately so sign-in feels complete.
+        self.start_sync(true);
     }
 
     pub(crate) fn switch_account(&mut self, id: &str) {
@@ -311,16 +508,36 @@ impl MailboxApp {
         }
         self.account_id = id.to_string();
         self.editing_account_id = id.to_string();
+        self.selected_stak = None;
         self.selected_message = None;
         self.open_message = None;
+        self.mail_webview.destroy();
+        self.mail_webview_req = None;
         self.search.clear();
         self.reload_settings_fields();
         if let Err(e) = self.refresh_folders() {
             self.status = e.to_string();
+            self.list_empty_hint = e.to_string();
         } else if let Err(e) = self.refresh_envelopes() {
             self.status = e.to_string();
+            self.list_empty_hint = e.to_string();
         } else if let Some(first) = self.envelopes.first().map(|e| e.id.clone()) {
+            self.list_empty_hint.clear();
             let _ = self.open_id(&first);
+        } else {
+            let proto = self
+                .selected_account()
+                .map(|a| a.protocol.label())
+                .unwrap_or("Mail");
+            self.list_empty_hint = if self.folders.is_empty() {
+                format!(
+                    "No mail downloaded yet for this account. Press Sync (g) to pull from the {proto} server."
+                )
+            } else {
+                format!(
+                    "Inbox is empty in the local cache. Press Sync (g) to refresh from the {proto} server."
+                )
+            };
         }
         let label = self
             .selected_account()
@@ -352,17 +569,24 @@ impl MailboxApp {
         self.mail_tls = true;
         self.imap_user_input.clear();
         self.imap_password_input.clear();
+        self.show_mail_password = false;
+        self.mail_test_feedback.clear();
         self.smtp_host_input.clear();
+        self.account_wizard = Some(AccountWizard::default());
         self.open_settings(SettingsSection::Accounts);
-        self.status = "New account — fill details and Save".into();
+        self.status = "Add account — choose a provider".into();
     }
 
     fn resolve_mail_password(&self, account_id: &str) -> Result<String, String> {
+        // Strip whitespace so Google/Yahoo/Apple app passwords pasted with spaces still work.
+        let normalize = |s: &str| -> String {
+            s.chars().filter(|c| !c.is_whitespace()).collect()
+        };
         if !self.imap_password_input.is_empty() {
-            return Ok(self.imap_password_input.clone());
+            return Ok(normalize(&self.imap_password_input));
         }
         match secrets::get_mail_password(account_id) {
-            Ok(Some(p)) => Ok(p),
+            Ok(Some(p)) => Ok(normalize(&p)),
             Ok(None) => Err(
                 "No password in keyring — paste your mail password in Settings".into(),
             ),
@@ -370,15 +594,29 @@ impl MailboxApp {
         }
     }
 
+    fn friendly_mail_test_error(raw: &str) -> String {
+        let lower = raw.to_ascii_lowercase();
+        if lower.contains("application-specific password") || lower.contains("app password") {
+            return "Gmail needs a Google App Password (16 characters), not your normal password. \
+Turn on 2-Step Verification, then create an App Password at https://myaccount.google.com/apppasswords \
+and paste it here."
+                .into();
+        }
+        format!("Error: {raw}")
+    }
+
     pub(crate) fn test_mail_connection(&mut self) {
         let Some(account) = self.current_account_draft() else {
-            self.status = "Enter email and server host first".into();
+            let msg = "Enter email and server host first".to_string();
+            self.status = msg.clone();
+            self.mail_test_feedback = msg;
             return;
         };
-        let password = match self.resolve_mail_password(&account.id) {
-            Ok(p) => p,
+        let credential = match self.resolve_mail_credential(&account) {
+            Ok(c) => c,
             Err(e) => {
-                self.status = e;
+                self.status = e.clone();
+                self.mail_test_feedback = e;
                 return;
             }
         };
@@ -389,18 +627,21 @@ impl MailboxApp {
             account.email.clone()
         };
         let proto = account.protocol.label();
-        self.status = format!("Testing {proto} login for {label}…");
-        thread::spawn(move || match test_connection(&account, &password) {
-            Ok(()) => {
-                let _ = tx.send(BgMsg::TestOk(format!("{proto} OK for {label}")));
+        let pending = format!("Testing {proto} login for {label}…");
+        self.status = pending.clone();
+        self.mail_test_feedback = pending;
+        thread::spawn(move || match test_connection(&account, &credential) {
+            Ok(detail) => {
+                let _ = tx.send(BgMsg::MailTest(Ok(format!("{detail} · {label}"))));
             }
             Err(e) => {
-                let _ = tx.send(BgMsg::Error(e.to_string()));
+                let _ = tx.send(BgMsg::MailTest(Err(e.to_string())));
             }
         });
     }
 
-    pub(crate) fn start_sync(&mut self) {
+    /// Sync mail. `sync_all` downloads every IMAP folder (POP3 is always Inbox only).
+    pub(crate) fn start_sync(&mut self, sync_all: bool) {
         let Some(account) = self
             .selected_account()
             .cloned()
@@ -410,8 +651,8 @@ impl MailboxApp {
             self.open_settings(SettingsSection::Accounts);
             return;
         };
-        let password = match self.resolve_mail_password(&account.id) {
-            Ok(p) => p,
+        let credential = match self.resolve_mail_credential(&account) {
+            Ok(c) => c,
             Err(e) => {
                 self.status = e;
                 self.open_settings(SettingsSection::Accounts);
@@ -419,11 +660,13 @@ impl MailboxApp {
             }
         };
 
-        // Persist password if typed this session
-        if !self.imap_password_input.is_empty() {
-            if let Err(e) = secrets::set_mail_password(&account.id, &password) {
-                self.status = format!("Keyring: {e}");
-                return;
+        // Persist password if typed this session (password auth only)
+        if account.auth == MailAuthMethod::Password && !self.imap_password_input.is_empty() {
+            if let MailCredential::Password(ref password) = credential {
+                if let Err(e) = secrets::set_mail_password(&account.id, password) {
+                    self.status = format!("Keyring: {e}");
+                    return;
+                }
             }
             self.imap_password_input.clear();
         }
@@ -431,17 +674,25 @@ impl MailboxApp {
         let db_path = self.paths.db_file();
         let folder = self.selected_folder.clone();
         let tx = self.bg_tx.clone();
-        self.status = format!("Syncing {}…", folder);
+        let is_pop3 = account.protocol == MailProtocol::Pop3;
+        self.status = if is_pop3 {
+            "Syncing Inbox (POP3)…".into()
+        } else if sync_all {
+            "Syncing all folders…".into()
+        } else {
+            format!("Syncing {}…", folder)
+        };
         thread::spawn(move || {
             let result = (|| -> Result<_> {
                 let store = Store::open(&db_path)?;
                 let report = sync_account(
                     &store,
                     &account,
-                    &password,
+                    &credential,
                     SyncOptions {
                         max_messages: 40,
                         folder_path: folder,
+                        sync_all_folders: sync_all,
                     },
                 )?;
                 Ok((account.id, report))
@@ -453,6 +704,7 @@ impl MailboxApp {
                         folders: report.folders,
                         messages: report.messages,
                         folder_path: report.folder_path,
+                        detail: report.detail,
                     });
                 }
                 Err(e) => {
@@ -460,6 +712,26 @@ impl MailboxApp {
                 }
             }
         });
+    }
+
+    pub(crate) fn set_folder_hidden(&mut self, path: &str, hidden: bool) {
+        if let Err(e) = self.store.set_folder_hidden(&self.account_id, path, hidden) {
+            self.status = e.to_string();
+            return;
+        }
+        if hidden && self.selected_folder == path {
+            if let Ok(visible) = self.store.list_folders(&self.account_id) {
+                self.selected_folder = visible
+                    .first()
+                    .map(|f| f.path.clone())
+                    .unwrap_or_else(|| "INBOX".into());
+            }
+        }
+        if let Err(e) = self.refresh_folders() {
+            self.status = e.to_string();
+        } else if let Err(e) = self.refresh_envelopes() {
+            self.status = e.to_string();
+        }
     }
 
     pub(crate) fn reload_settings_fields(&mut self) {
@@ -478,6 +750,7 @@ impl MailboxApp {
             self.mail_tls = a.imap_tls;
             self.imap_user_input = a.username;
             self.smtp_host_input = a.smtp_host;
+            self.smtp_port = a.smtp_port;
         }
         self.ailiak_token_input.clear();
     }
@@ -504,15 +777,45 @@ impl MailboxApp {
     }
 
     pub(crate) fn open_id(&mut self, id: &MessageId) -> Result<()> {
-        if let Some(msg) = self.store.get_message(id)? {
+        // Same message already open — skip SQLite + list reload (fast click path).
+        if self.selected_message.as_ref() == Some(id) && self.open_message.is_some() {
+            return Ok(());
+        }
+
+        if let Some(mut msg) = self.store.get_message(id)? {
             if !msg.envelope.seen {
                 self.store.mark_seen(id, true)?;
+                msg.envelope.seen = true;
+                // Update list row in place — avoid reloading the whole folder.
+                if let Some(env) = self.envelopes.iter_mut().find(|e| e.id == *id) {
+                    env.seen = true;
+                }
             }
+            self.load_remote_images = false;
+            self.mail_images.clear();
+            self.mail_body_cache = None;
+            self.mail_webview_req = None;
+            self.mail_webview.last_error = None; // retry create on next HTML message
             self.selected_message = Some(id.clone());
             self.open_message = Some(msg);
-            self.refresh_envelopes()?;
         }
         Ok(())
+    }
+
+    /// Structured body for the reader; rebuilt only when message or image opt-in changes.
+    pub(crate) fn cached_mail_body(&mut self) -> Option<&mailbox_core::MailBody> {
+        let msg = self.open_message.as_ref()?;
+        let id = msg.envelope.id.clone();
+        let load = self.load_remote_images;
+        let hit = matches!(
+            &self.mail_body_cache,
+            Some((cid, cload, _)) if *cid == id && *cload == load
+        );
+        if !hit {
+            let body = mailbox_core::build_mail_body(&msg.body_text, &msg.body_html, load);
+            self.mail_body_cache = Some((id, load, body));
+        }
+        self.mail_body_cache.as_ref().map(|(_, _, b)| b)
     }
 
     fn poll_bg(&mut self) {
@@ -527,24 +830,56 @@ impl MailboxApp {
                 BgMsg::WhoAmI(s) => {
                     self.status = format!("Ailiak: signed in as {s}");
                 }
-                BgMsg::TestOk(s) => {
-                    self.status = s;
+                BgMsg::MailTest(Ok(s)) => {
+                    self.status = s.clone();
+                    self.mail_test_feedback = s;
+                }
+                BgMsg::MailTest(Err(e)) => {
+                    let msg = Self::friendly_mail_test_error(&e);
+                    self.status = msg.clone();
+                    self.mail_test_feedback = msg;
+                }
+                BgMsg::OAuthSignIn(Ok(result)) => {
+                    self.apply_oauth_sign_in(result);
+                }
+                BgMsg::OAuthSignIn(Err(e)) => {
+                    let msg = format!("Sign-in: {e}");
+                    self.status = msg.clone();
+                    self.mail_test_feedback = msg;
                 }
                 BgMsg::SyncOk {
                     account_id,
                     folders,
                     messages,
                     folder_path,
+                    detail,
                 } => {
                     self.account_id = account_id;
                     self.selected_folder = folder_path.clone();
-                    self.status = format!(
-                        "Synced {messages} messages from {folder_path} ({folders} folders)"
-                    );
+                    self.status = if detail.is_empty() {
+                        format!(
+                            "Synced {messages} messages from {folder_path} ({folders} folders)"
+                        )
+                    } else {
+                        format!("Synced {messages} from {folder_path} — {detail}")
+                    };
+                    self.list_empty_hint = if messages == 0 {
+                        if detail.is_empty() {
+                            format!(
+                                "No messages in {folder_path}. Press Sync (g) again, or check Test connection in Settings."
+                            )
+                        } else {
+                            detail
+                        }
+                    } else {
+                        String::new()
+                    };
                     if let Err(e) = self.refresh_folders() {
                         self.status = e.to_string();
+                        self.list_empty_hint = e.to_string();
                     } else if let Err(e) = self.refresh_envelopes() {
                         self.status = e.to_string();
+                        self.list_empty_hint = e.to_string();
                     } else if let Some(first) = self.envelopes.first().map(|e| e.id.clone()) {
                         let _ = self.open_id(&first);
                     }
@@ -555,7 +890,9 @@ impl MailboxApp {
                 }
                 BgMsg::Error(e) => {
                     self.calendar.loading = false;
-                    self.status = format!("Error: {e}");
+                    let msg = format!("Error: {e}");
+                    self.status = msg.clone();
+                    self.list_empty_hint = msg;
                 }
             }
         }
@@ -574,6 +911,7 @@ impl MailboxApp {
         email: &str,
         name: &str,
     ) -> crate::avatars::AvatarView {
+        self.maybe_fetch_google_account_photo(email);
         self.avatars.resolve(
             ctx,
             &self.paths.avatars_dir(),
@@ -581,6 +919,49 @@ impl MailboxApp {
             name,
             &self.avatar_tx,
         )
+    }
+
+    /// If this is a Google OAuth account with no local photo yet, pull Google’s profile picture.
+    fn maybe_fetch_google_account_photo(&mut self, email: &str) {
+        let key = AvatarCache::normalize_email(email);
+        if key.is_empty() {
+            return;
+        }
+        let local = AvatarCache::local_path(&self.paths.avatars_dir(), &key);
+        if local.exists() || self.avatars.has_image(&key) {
+            return;
+        }
+        let Some(account) = self
+            .config
+            .accounts
+            .iter()
+            .find(|a| AvatarCache::normalize_email(&a.email) == key)
+            .cloned()
+        else {
+            return;
+        };
+        if account.auth != MailAuthMethod::GoogleOAuth {
+            return;
+        }
+        if !self.avatars.begin_oauth_photo_try(&key) {
+            return;
+        }
+        let Ok(cred) = self.resolve_mail_credential(&account) else {
+            return;
+        };
+        let MailCredential::OAuth2 { access_token } = cred else {
+            return;
+        };
+        let dir = self.paths.avatars_dir();
+        let tx = self.avatar_tx.clone();
+        thread::spawn(move || {
+            match oauth::fetch_google_picture_url(&access_token) {
+                Ok(Some(url)) => AvatarCache::spawn_url_fetch(key, url, dir, tx),
+                Ok(None) | Err(_) => {
+                    let _ = tx.send(AvatarMsg::Miss { email: key });
+                }
+            }
+        });
     }
 
     pub(crate) fn choose_account_avatar(&mut self) {
@@ -623,7 +1004,22 @@ impl MailboxApp {
         }
     }
 
-    /// Toggle the Todo side panel (same idea as Calendar).
+    /// Todo and Calendar share one right-side panel — opening one closes the other.
+    pub(crate) fn open_calendar_panel(&mut self) {
+        self.show_todo = false;
+        self.show_calendar = true;
+        self.refresh_desk_tasks();
+    }
+
+    pub(crate) fn toggle_calendar(&mut self) {
+        if self.show_calendar {
+            self.show_calendar = false;
+        } else {
+            self.open_calendar_panel();
+        }
+    }
+
+    /// Toggle the Todo side panel (replaces Calendar when opening).
     pub(crate) fn toggle_todo(&mut self) {
         if self.show_todo {
             self.show_todo = false;
@@ -657,9 +1053,8 @@ impl MailboxApp {
         self.todo_line = line;
         self.todo_detail = detail;
         self.todo_message_id = msg.envelope.message_id.clone();
+        self.show_calendar = false;
         self.show_todo = true;
-        self.show_calendar = true;
-        self.refresh_desk_tasks();
     }
 
     pub(crate) fn submit_todo(&mut self) {
@@ -783,6 +1178,7 @@ impl MailboxApp {
     }
 
     pub(crate) fn save_settings(&mut self) -> Result<()> {
+        let mut should_sync = false;
         if let Some(mut account) = self.current_account_draft() {
             if !account.imap_host.is_empty()
                 && (!account.email.is_empty() || !account.username.is_empty())
@@ -792,8 +1188,20 @@ impl MailboxApp {
                 }
                 let id = account.id.clone();
                 if !self.imap_password_input.is_empty() {
-                    secrets::set_mail_password(&id, &self.imap_password_input)?;
+                    let password = self.imap_password_input.clone();
+                    secrets::set_mail_password(&id, &password)?;
+                    // Confirm we can read it back before clearing the field.
+                    if !secrets::has_mail_password(&id) {
+                        bail!(
+                            "Password could not be stored securely — sync would fail. \
+Try again, or check that a keyring/secret-service is running."
+                        );
+                    }
                     self.imap_password_input.clear();
+                    account.auth = MailAuthMethod::Password;
+                    should_sync = true;
+                } else if account.auth.is_oauth() || secrets::has_mail_password(&id) {
+                    should_sync = true;
                 }
                 self.config.upsert_account(account);
                 self.account_id = id.clone();
@@ -811,7 +1219,18 @@ impl MailboxApp {
         }
 
         self.config.save(&self.paths.config_file())?;
-        self.status = format!("Saved {}", self.paths.config_file().display());
+        if should_sync {
+            self.status = "Account saved — syncing mail…".into();
+            self.list_empty_hint = "Syncing…".into();
+            self.start_sync(true);
+        } else {
+            self.status = format!("Saved {}", self.paths.config_file().display());
+            if self.envelopes.is_empty() {
+                self.list_empty_hint =
+                    "Account saved. Add/re-enter the password, then Sync (g) or Test connection."
+                        .into();
+            }
+        }
         Ok(())
     }
 
@@ -826,6 +1245,7 @@ impl MailboxApp {
                 ui.monospace("k / ↑     previous message");
                 ui.monospace("/         focus search");
                 ui.monospace("g         sync selected folder");
+                ui.monospace("Shift+G   sync all folders");
                 ui.monospace("a         Todo (mail → Ailiak)");
                 ui.monospace("c         calendar (Desk days)");
                 ui.monospace(",         settings page");
@@ -839,10 +1259,13 @@ impl MailboxApp {
                 ui.add_space(8.0);
                 ui.label(RichText::new("Gmail / POP3").strong());
                 ui.label(
-                    "Gmail: Settings → Use Gmail defaults → App Password → Test IMAP → Sync.",
+                    "Settings → Accounts → Add account → pick Gmail / Outlook / … → email & password.",
                 );
                 ui.label(
-                    "Older servers: Settings → POP3 → host/port (995 TLS or 110 plain) → Test → Sync.",
+                    "Custom servers: choose IMAP or POP3, then enter host with email & password.",
+                );
+                ui.label(
+                    "Folders: Sync lists IMAP mailboxes; Settings → Folders to hide ones you don’t need. POP3 is Inbox only.",
                 );
                 ui.add_space(8.0);
                 ui.label(RichText::new("Theme").strong());
@@ -867,8 +1290,9 @@ impl MailboxApp {
         }
 
         let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        if escape && !ctx.wants_keyboard_input() && self.show_todo {
+        if escape && !ctx.wants_keyboard_input() && (self.show_todo || self.show_calendar) {
             self.show_todo = false;
+            self.show_calendar = false;
             return;
         }
 
@@ -900,13 +1324,10 @@ impl MailboxApp {
                 self.toggle_todo();
             }
             if i.key_pressed(egui::Key::C) && !i.modifiers.any() {
-                self.show_calendar = !self.show_calendar;
-                if self.show_calendar {
-                    self.refresh_desk_tasks();
-                }
+                self.toggle_calendar();
             }
-            if i.key_pressed(egui::Key::G) && !i.modifiers.any() {
-                self.start_sync();
+            if i.key_pressed(egui::Key::G) {
+                self.start_sync(i.modifiers.shift);
             }
         });
 
@@ -942,17 +1363,38 @@ impl App for MailboxApp {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_bg();
         self.poll_avatars(ctx);
+        self.mail_images.poll(ctx);
+        crate::mail_webview::MailWebView::pump_platform();
         theme::sync_system(ctx, self.config.ui.theme);
         self.handle_keys(ctx);
+
+        // Reader sets this while painting; clear first so a missing request hides the view.
+        self.mail_webview_req = None;
 
         if self.show_help {
             self.help_window(ctx);
         }
 
         self.show_shell(ctx);
+
+        let hide_webview = self.show_settings || self.show_help;
+        if hide_webview {
+            self.mail_webview.hide();
+        } else if let Some(req) = self.mail_webview_req.take() {
+            self.mail_webview.show_html(
+                frame,
+                &req.msg_id,
+                &req.body_html,
+                req.load_images,
+                req.bounds,
+            );
+        } else {
+            self.mail_webview.hide();
+        }
+        self.mail_webview.poll_links();
 
         if (!self.status.contains("Ready") && self.status.ends_with('…')) || self.calendar.loading
         {

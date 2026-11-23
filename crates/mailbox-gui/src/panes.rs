@@ -7,9 +7,11 @@ use egui::{
 
 use crate::app::MailboxApp;
 use crate::avatars;
+use crate::brand_logos;
 use crate::calendar;
 use crate::icons::{self, FolderIcon};
 use crate::layout;
+use crate::staks;
 use crate::theme;
 use mailbox_core::types::{date_group_label, MessageId};
 
@@ -45,35 +47,22 @@ impl MailboxApp {
             });
         });
 
-        // Right: Sync / Calendar
+        // Right: Sync (selected folder)
         let right = Rect::from_min_max(
-            egui::pos2(bar.right() - (bar.width() * 0.28).max(140.0), bar.top()),
+            egui::pos2(bar.right() - (bar.width() * 0.28).max(160.0), bar.top()),
             bar.right_bottom(),
         );
         ui.allocate_new_ui(UiBuilder::new().max_rect(right), |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icons::toolbar_button(
                     ui,
-                    icons::ToolbarIcon::Calendar,
-                    "Calendar",
-                    "Ailiak Desk calendar (c)",
-                )
-                .clicked()
-                {
-                    self.show_calendar = !self.show_calendar;
-                    if self.show_calendar {
-                        self.refresh_desk_tasks();
-                    }
-                }
-                if icons::toolbar_button(
-                    ui,
                     icons::ToolbarIcon::Sync,
                     "Sync",
-                    "Fetch folders + messages for the selected folder (g)",
+                    "List folders + download the selected folder (g)",
                 )
                 .clicked()
                 {
-                    self.start_sync();
+                    self.start_sync(false);
                 }
             });
         });
@@ -156,7 +145,11 @@ impl MailboxApp {
         let mut switch_to: Option<String> = None;
         let mut add_account = false;
         let mut clicked_folder: Option<String> = None;
+        let mut clicked_stak: Option<String> = None;
+        let mut open_folders_settings = false;
+        let mut sync_folders: Option<bool> = None; // Some(true) = all IMAP folders
         let mut open_todo = false;
+        let mut open_calendar = false;
         let mut open_settings = false;
         let mut open_help = false;
         let mut toggle_collapse = false;
@@ -166,9 +159,9 @@ impl MailboxApp {
         ui.spacing_mut().item_spacing.y = 2.0;
 
         // Top-down: scrollable accounts/folders, then a fixed footer.
-        // 3 rows × 28 + separator + bottom breathing room.
+        // 4 rows × 28 + separator + bottom breathing room (Todo, Calendar, Settings, Help).
         let row_h = 28.0;
-        let footer_h = row_h * 3.0 + 8.0 + 8.0 + 18.0;
+        let footer_h = row_h * 4.0 + 8.0 + 8.0 + 18.0;
         let body_h = (ui.available_height() - footer_h).max(48.0);
 
         ScrollArea::vertical()
@@ -203,38 +196,142 @@ impl MailboxApp {
                 }
                 ui.add_space(4.0);
 
-                for (id, name, email) in &accounts {
-                    let selected = id == &selected_id;
-                    let tip = if name.is_empty() {
-                        email.clone()
-                    } else {
-                        format!("{name}\n{email}")
-                    };
-                    let view = self.resolve_avatar(ui.ctx(), email, name);
+                if collapsed {
+                    // Narrow rail: stack avatars in a centered column.
+                    for (id, name, email) in &accounts {
+                        let selected = id == &selected_id;
+                        let tip = if name.is_empty() {
+                            email.clone()
+                        } else {
+                            format!("{name}\n{email}")
+                        };
+                        let view = self.resolve_avatar(ui.ctx(), email, name);
+                        ui.horizontal(|ui| {
+                            ui.add_space((ui.available_width() - avatar_size).max(0.0) * 0.5);
+                            if avatars::avatar_button(ui, &view, avatar_size, selected, &tip)
+                                .clicked()
+                            {
+                                switch_to = Some(id.clone());
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
                     ui.horizontal(|ui| {
                         ui.add_space((ui.available_width() - avatar_size).max(0.0) * 0.5);
-                        if avatars::avatar_button(ui, &view, avatar_size, selected, &tip).clicked()
-                        {
-                            switch_to = Some(id.clone());
+                        if icons::plus_account_button(ui, avatar_size).clicked() {
+                            add_account = true;
                         }
                     });
-                    ui.add_space(4.0);
+                } else {
+                    // Wide panel: avatars + add on one row.
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        for (id, name, email) in &accounts {
+                            let selected = id == &selected_id;
+                            let tip = if name.is_empty() {
+                                email.clone()
+                            } else {
+                                format!("{name}\n{email}")
+                            };
+                            let view = self.resolve_avatar(ui.ctx(), email, name);
+                            if avatars::avatar_button(ui, &view, avatar_size, selected, &tip)
+                                .clicked()
+                            {
+                                switch_to = Some(id.clone());
+                            }
+                        }
+                        if icons::plus_account_button(ui, avatar_size).clicked() {
+                            add_account = true;
+                        }
+                    });
                 }
-                ui.horizontal(|ui| {
-                    ui.add_space((ui.available_width() - avatar_size).max(0.0) * 0.5);
-                    if icons::plus_account_button(ui, avatar_size).clicked() {
-                        add_account = true;
-                    }
-                });
 
                 ui.add_space(8.0);
+
+                // Staks — sender/domain stacks from the current folder cache.
+                let stak_list = staks::build_staks(&self.envelopes);
+                let selected_stak = self.selected_stak.clone();
+                if !stak_list.is_empty() {
+                    if !collapsed {
+                        ui.label(
+                            RichText::new("Staks")
+                                .small()
+                                .family(theme::nav_family())
+                                .color(mute),
+                        );
+                        ui.add_space(4.0);
+                    }
+                    for stak in &stak_list {
+                        let selected = selected_stak.as_deref() == Some(stak.id.as_str());
+                        let label = if stak.unread > 0 {
+                            format!("{} {}", stak.label, stak.unread)
+                        } else {
+                            stak.label.clone()
+                        };
+                        let brand = brand_logos::texture(ui.ctx(), &stak.id);
+                        if icons::stak_nav_button(
+                            ui,
+                            &label,
+                            selected,
+                            collapsed,
+                            brand.as_ref(),
+                        )
+                        .clicked()
+                        {
+                            clicked_stak = Some(stak.id.clone());
+                        }
+                    }
+                    ui.add_space(8.0);
+                }
+
                 if !collapsed {
-                    ui.label(
-                        RichText::new("Folders")
-                            .small()
-                            .family(theme::nav_family())
-                            .color(mute),
-                    );
+                    let is_pop3 = self
+                        .selected_account()
+                        .map(|a| a.protocol == mailbox_core::config::MailProtocol::Pop3)
+                        .unwrap_or(false);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Folders")
+                                .small()
+                                .family(theme::nav_family())
+                                .color(mute),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let manage = ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(egui_phosphor::regular::GEAR)
+                                            .family(theme::icon_family())
+                                            .size(12.0)
+                                            .color(mute),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text("Manage folders");
+                            if manage.clicked() {
+                                open_folders_settings = true;
+                            }
+                            let sync_tip = if is_pop3 {
+                                "Sync Inbox — POP3 cannot list server folders (ABV webmail folders stay online)"
+                            } else {
+                                "Sync all folders — list and download every IMAP folder (Shift+G)"
+                            };
+                            let sync = ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                                            .family(theme::icon_family())
+                                            .size(12.0)
+                                            .color(mute),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text(sync_tip);
+                            if sync.clicked() {
+                                sync_folders = Some(!is_pop3);
+                            }
+                        });
+                    });
                     ui.add_space(4.0);
                 }
 
@@ -258,6 +355,9 @@ impl MailboxApp {
         if icons::todo_nav_button(ui, todo_enabled, collapsed).clicked() {
             open_todo = true;
         }
+        if icons::calendar_nav_button(ui, collapsed).clicked() {
+            open_calendar = true;
+        }
         if icons::settings_nav_button(ui, collapsed).clicked() {
             open_settings = true;
         }
@@ -277,6 +377,7 @@ impl MailboxApp {
         }
         if let Some(path) = clicked_folder {
             self.selected_folder = path;
+            self.selected_stak = None;
             self.selected_message = None;
             self.open_message = None;
             if let Err(e) = self.refresh_envelopes() {
@@ -285,8 +386,38 @@ impl MailboxApp {
                 let _ = self.open_id(&first);
             }
         }
+        if let Some(stak_id) = clicked_stak {
+            if self.selected_stak.as_deref() == Some(stak_id.as_str()) {
+                self.selected_stak = None;
+            } else {
+                self.selected_stak = Some(stak_id);
+            }
+            self.selected_message = None;
+            self.open_message = None;
+            if let Some(first) = self
+                .envelopes
+                .iter()
+                .find(|e| {
+                    self.selected_stak
+                        .as_ref()
+                        .is_none_or(|id| staks::envelope_in_stak(e, id))
+                })
+                .map(|e| e.id.clone())
+            {
+                let _ = self.open_id(&first);
+            }
+        }
         if open_todo {
             self.toggle_todo();
+        }
+        if open_calendar {
+            self.toggle_calendar();
+        }
+        if let Some(all) = sync_folders {
+            self.start_sync(all);
+        }
+        if open_folders_settings {
+            self.open_settings(crate::settings::SettingsSection::Folders);
         }
         if open_settings {
             self.editing_account_id = self.account_id.clone();
@@ -310,8 +441,18 @@ impl MailboxApp {
             .find(|f| f.path == self.selected_folder)
             .map(|f| f.name.clone())
             .unwrap_or_else(|| self.selected_folder.clone());
+        let list_title = if let Some(stak_id) = self.selected_stak.as_deref() {
+            let label = staks::build_staks(&self.envelopes)
+                .into_iter()
+                .find(|s| s.id == stak_id)
+                .map(|s| s.label)
+                .unwrap_or_else(|| stak_id.to_string());
+            format!("{label} · {folder_title}")
+        } else {
+            folder_title
+        };
         ui.label(
-            RichText::new(&folder_title)
+            RichText::new(&list_title)
                 .strong()
                 .size(14.0)
                 .family(theme::nav_family())
@@ -319,7 +460,15 @@ impl MailboxApp {
         );
         ui.add_space(8.0);
 
-        let envelopes = self.envelopes.clone();
+        let envelopes: Vec<_> = if let Some(stak_id) = self.selected_stak.as_deref() {
+            self.envelopes
+                .iter()
+                .filter(|e| staks::envelope_in_stak(e, stak_id))
+                .cloned()
+                .collect()
+        } else {
+            self.envelopes.clone()
+        };
         let selected = self.selected_message.clone();
         let mut open: Option<MessageId> = None;
 
@@ -329,6 +478,37 @@ impl MailboxApp {
                 ui.set_max_width(col_w);
                 if envelopes.is_empty() {
                     ui.label(RichText::new("No messages").color(theme::mute(ui.ctx())));
+                    ui.add_space(6.0);
+                    let hint = if !self.list_empty_hint.is_empty() {
+                        self.list_empty_hint.clone()
+                    } else if self.folders.is_empty() {
+                        "Nothing downloaded yet. Press Sync (g) — or open Settings → Test connection.".into()
+                    } else {
+                        "This folder is empty in the local cache. Press Sync (g) to refresh.".into()
+                    };
+                    ui.label(
+                        RichText::new(hint)
+                            .small()
+                            .color(theme::mute(ui.ctx())),
+                    );
+                    ui.add_space(8.0);
+                    let is_pop3 = self
+                        .selected_account()
+                        .map(|a| a.protocol == mailbox_core::config::MailProtocol::Pop3)
+                        .unwrap_or(false);
+                    ui.horizontal(|ui| {
+                        if ui.button("Sync now").clicked() {
+                            self.start_sync(false);
+                        }
+                        if !is_pop3
+                            && ui
+                                .button("Sync all folders")
+                                .on_hover_text("Download every IMAP folder")
+                                .clicked()
+                        {
+                            self.start_sync(true);
+                        }
+                    });
                     return;
                 }
 
@@ -373,7 +553,16 @@ impl MailboxApp {
                             .color(theme::unread(ui.ctx()))
                     };
 
-                    let avatar = self.resolve_avatar(ui.ctx(), &env.from_addr, &env.from_name);
+                    let avatar = if let Some(brand_id) = staks::brand_id_for_addr(&env.from_addr)
+                    {
+                        brand_logos::texture(ui.ctx(), brand_id)
+                            .map(crate::avatars::AvatarView::Image)
+                            .unwrap_or_else(|| {
+                                self.resolve_avatar(ui.ctx(), &env.from_addr, &env.from_name)
+                            })
+                    } else {
+                        self.resolve_avatar(ui.ctx(), &env.from_addr, &env.from_name)
+                    };
 
                     let row = egui::Frame::none()
                         .fill(if is_sel {
@@ -386,7 +575,7 @@ impl MailboxApp {
                         .show(ui, |ui| {
                             ui.set_width(col_w - 4.0);
                             ui.horizontal(|ui| {
-                                avatars::avatar_widget(ui, &avatar, 26.0);
+                                avatars::avatar_widget(ui, &avatar, brand_logos::LIST_SIZE);
                                 ui.add_space(6.0);
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
@@ -466,27 +655,143 @@ impl MailboxApp {
         );
         ui.add_space(12.0);
         ui.separator();
-        ui.add_space(12.0);
+        ui.add_space(8.0);
 
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_max_width(ui.available_width());
-                ui.style_mut().spacing.item_spacing.y = 8.0;
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(&msg.body_text)
-                            .size(13.0)
-                            .line_height(Some(19.0))
-                            .color(theme::ink(ui.ctx())),
+        let html = msg.body_html.trim();
+        let use_webview = !html.is_empty();
+        let has_remote = if use_webview {
+            crate::mail_webview::MailWebView::has_remote_images(html)
+        } else {
+            self.cached_mail_body()
+                .map(|b| b.has_remote_images)
+                .unwrap_or(false)
+        };
+        if has_remote {
+            ui.horizontal(|ui| {
+                if self.load_remote_images {
+                    if ui.button("Block remote images").clicked() {
+                        self.load_remote_images = false;
+                        self.mail_body_cache = None;
+                    }
+                    ui.label(
+                        RichText::new("Remote images allowed for this message")
+                            .small()
+                            .color(theme::mute(ui.ctx())),
+                    );
+                } else if ui
+                    .button("Load remote images…")
+                    .on_hover_text(
+                        "Downloads images from the sender’s servers (may include tracking pixels)",
                     )
-                    .wrap()
-                    .selectable(true),
-                );
+                    .clicked()
+                {
+                    self.load_remote_images = true;
+                    self.mail_body_cache = None;
+                }
             });
+            ui.add_space(8.0);
+        }
+
+        let load_images = self.load_remote_images;
+        if use_webview {
+            if let Some(err) = self.mail_webview.last_error.as_ref() {
+                ui.label(
+                    RichText::new(format!(
+                        "HTML webview unavailable ({err}). Falling back to plain text."
+                    ))
+                    .small()
+                    .color(theme::mute(ui.ctx())),
+                );
+                ui.add_space(6.0);
+                let body = self.cached_mail_body().cloned();
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_max_width(ui.available_width());
+                        if let Some(body) = body.as_ref() {
+                            crate::mail_reader::show_body(
+                                ui,
+                                body,
+                                load_images,
+                                &mut self.mail_images,
+                            );
+                        }
+                    });
+            } else {
+                let (rect, _) =
+                    ui.allocate_exact_size(ui.available_size(), Sense::hover());
+                // Root viewport points → wry child bounds (logical pixels).
+                self.mail_webview_req = Some(crate::mail_webview::MailWebViewRequest {
+                    bounds: rect,
+                    msg_id: msg.envelope.id.clone(),
+                    body_html: msg.body_html.clone(),
+                    load_images,
+                });
+            }
+        } else {
+            let body = self.cached_mail_body().cloned();
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
+                    if let Some(body) = body.as_ref() {
+                        crate::mail_reader::show_body(
+                            ui,
+                            body,
+                            load_images,
+                            &mut self.mail_images,
+                        );
+                    }
+                });
+        }
     }
 
-    /// Todo → Desk compose (right side panel, same chrome as calendar).
+    /// Desk calendar (right side panel — mutually exclusive with Todo).
+    pub(crate) fn calendar_pane(&mut self, ui: &mut Ui) {
+        use egui_phosphor::regular as ph;
+
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Calendar")
+                    .strong()
+                    .size(15.0)
+                    .family(theme::nav_family())
+                    .color(theme::accent(ui.ctx())),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let close = ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(ph::X)
+                                .family(theme::icon_family())
+                                .size(14.0)
+                                .color(theme::mute(ui.ctx())),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Close (Esc)");
+                if close.clicked() {
+                    self.show_calendar = false;
+                }
+                if ui
+                    .small_button("↻")
+                    .on_hover_text("Refresh Desk")
+                    .clicked()
+                {
+                    self.refresh_desk_tasks();
+                }
+            });
+        });
+        ui.label(
+            RichText::new("Ailiak Desk")
+                .small()
+                .color(theme::mute(ui.ctx())),
+        );
+        ui.add_space(8.0);
+        let _ = calendar::show_month(ui, &mut self.calendar);
+    }
+
+    /// Todo → Desk compose (right side panel — mutually exclusive with Calendar).
     pub(crate) fn todo_pane(&mut self, ui: &mut Ui) {
         use egui_phosphor::regular as ph;
         use mailbox_ailiak::{compose_hint, parse_compose_commands};
@@ -553,8 +858,7 @@ impl MailboxApp {
                 }
             }
             if ui.small_button("Calendar").clicked() {
-                self.show_calendar = true;
-                self.refresh_desk_tasks();
+                self.open_calendar_panel();
             }
         });
 
@@ -608,6 +912,8 @@ impl MailboxApp {
     }
 
     pub(crate) fn status_bar(&mut self, ui: &mut Ui) {
+        use egui_phosphor::regular as ph;
+
         ui.horizontal(|ui| {
             let ailiak_label = if self.config.ailiak.enabled {
                 "Ailiak"
@@ -643,14 +949,31 @@ impl MailboxApp {
                     }
                 })
                 .unwrap_or_else(|| self.account_id.clone());
+            let status_text = self.status.clone();
             ui.label(
                 RichText::new(format!(
                     "{} · {} · {}",
-                    account_label, self.selected_folder, self.status
+                    account_label, self.selected_folder, status_text
                 ))
                 .small()
                 .color(theme::mute(ui.ctx())),
             );
+            if !status_text.is_empty()
+                && ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(ph::COPY)
+                                .family(theme::icon_family())
+                                .size(12.0)
+                                .color(theme::mute(ui.ctx())),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Copy status message")
+                    .clicked()
+            {
+                ui.ctx().copy_text(status_text);
+            }
         });
     }
 
@@ -756,43 +1079,29 @@ impl MailboxApp {
             ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
 
-        // Far-right: calendar (when open). Inward: Todo compose panel.
-        if self.show_calendar {
-            egui::SidePanel::right("calendar_v2")
+        // One right side panel: Todo and Calendar replace each other.
+        if self.show_todo || self.show_calendar {
+            let (default_w, min_w, max_w) = if self.show_todo {
+                (380.0, 320.0, 520.0)
+            } else {
+                (280.0, 220.0, 400.0)
+            };
+            egui::SidePanel::right("desk_side_v1")
                 .resizable(true)
-                .default_width(240.0)
-                .width_range(210.0..=320.0)
+                .default_width(default_w)
+                .width_range(min_w..=max_w)
                 .show_separator_line(false)
-                .frame(layout::panel_frame(egui::Margin::symmetric(12.0, 10.0), panel))
+                .frame(layout::panel_frame(
+                    egui::Margin::symmetric(if self.show_todo { 14.0 } else { 12.0 }, 12.0),
+                    panel,
+                ))
                 .show(ctx, |ui| {
                     layout::begin_panel(ui, panel);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Desk calendar")
-                                .strong()
-                                .color(theme::accent(ui.ctx())),
-                        );
-                        ui.add_space(ui.available_width() - 28.0);
-                        if ui.small_button("↻").on_hover_text("Refresh Desk").clicked() {
-                            self.refresh_desk_tasks();
-                        }
-                    });
-                    ui.add_space(6.0);
-                    let _ = calendar::show_month(ui, &mut self.calendar);
-                    layout::end_panel(ui);
-                });
-        }
-
-        if self.show_todo {
-            egui::SidePanel::right("todo_v1")
-                .resizable(true)
-                .default_width(380.0)
-                .width_range(320.0..=520.0)
-                .show_separator_line(false)
-                .frame(layout::panel_frame(egui::Margin::symmetric(14.0, 12.0), panel))
-                .show(ctx, |ui| {
-                    layout::begin_panel(ui, panel);
-                    self.todo_pane(ui);
+                    if self.show_todo {
+                        self.todo_pane(ui);
+                    } else {
+                        self.calendar_pane(ui);
+                    }
                     layout::end_panel(ui);
                 });
         }

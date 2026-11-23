@@ -3,6 +3,24 @@
 **/*.rs.bk
 .DS_Store
 *.swp
+
+# Local secrets / OAuth (never commit)
 .env
 .env.*
 !.env.example
+*.pem
+*.p12
+*.key
+credentials.json
+**/credentials.json
+client_secret*.json
+**/client_secret*.json
+
+# Local app config may contain oauth overrides
+/config/config.toml
+config/config.local.toml
+*.local.toml
+
+# OS keyring dumps / accidental exports
+secrets.json
+oauth-secrets.toml

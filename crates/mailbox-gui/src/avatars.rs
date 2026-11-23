@@ -37,6 +37,8 @@ enum Cached {
 pub struct AvatarCache {
     by_email: HashMap<String, Cached>,
     pending: HashSet<String>,
+    /// Emails we already tried to fill via OAuth profile photo this session.
+    tried_oauth_photo: HashSet<String>,
 }
 
 impl Default for AvatarCache {
@@ -44,6 +46,7 @@ impl Default for AvatarCache {
         Self {
             by_email: HashMap::new(),
             pending: HashSet::new(),
+            tried_oauth_photo: HashSet::new(),
         }
     }
 }
@@ -118,6 +121,10 @@ impl AvatarCache {
             AvatarMsg::Miss { email } => {
                 let key = Self::normalize_email(&email);
                 self.pending.remove(&key);
+                // Don't replace a photo that arrived from Google / local override.
+                if matches!(self.by_email.get(&key), Some(Cached::Image(_))) {
+                    return;
+                }
                 self.by_email.insert(key, Cached::InitialsOnly);
             }
         }
@@ -128,6 +135,24 @@ impl AvatarCache {
         let key = Self::normalize_email(email);
         self.by_email.remove(&key);
         self.pending.remove(&key);
+        self.tried_oauth_photo.remove(&key);
+    }
+
+    pub fn has_image(&self, email: &str) -> bool {
+        matches!(
+            self.by_email.get(&Self::normalize_email(email)),
+            Some(Cached::Image(_))
+        )
+    }
+
+    /// Returns true once per email per session for OAuth photo attempts.
+    pub fn begin_oauth_photo_try(&mut self, email: &str) -> bool {
+        let key = Self::normalize_email(email);
+        if key.is_empty() || self.has_image(&key) || self.tried_oauth_photo.contains(&key) {
+            return false;
+        }
+        self.tried_oauth_photo.insert(key);
+        true
     }
 
     /// Save an image file as the local PNG override for `email`.
@@ -146,6 +171,50 @@ impl AvatarCache {
             fs::remove_file(&dest)?;
         }
         Ok(())
+    }
+
+    /// Download a remote profile photo (e.g. Google `picture` URL) into the local override cache.
+    pub fn set_from_url(avatars_dir: &Path, email: &str, url: &str) -> anyhow::Result<()> {
+        let url = url.trim();
+        if url.is_empty() {
+            anyhow::bail!("empty picture url");
+        }
+        fs::create_dir_all(avatars_dir)?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .build()?;
+        let resp = client
+            .get(url)
+            .send()?
+            .error_for_status()
+            .map_err(|e| anyhow::anyhow!("download profile photo: {e}"))?;
+        let bytes = resp.bytes()?;
+        let img = image::load_from_memory(&bytes)?.to_rgba8();
+        let dest = Self::local_path(avatars_dir, email);
+        img.save(&dest)?;
+        Ok(())
+    }
+
+    /// Background: download `url`, save local override, then notify the UI.
+    pub fn spawn_url_fetch(
+        email: String,
+        url: String,
+        avatars_dir: PathBuf,
+        tx: Sender<AvatarMsg>,
+    ) {
+        thread::spawn(move || {
+            match Self::set_from_url(&avatars_dir, &email, &url)
+                .ok()
+                .and_then(|_| Self::load_rgba_file(&Self::local_path(&avatars_dir, &email)))
+            {
+                Some(rgba) => {
+                    let _ = tx.send(AvatarMsg::Ready { email, rgba });
+                }
+                None => {
+                    let _ = tx.send(AvatarMsg::Miss { email });
+                }
+            }
+        });
     }
 
     fn load_rgba_file(path: &Path) -> Option<ColorImage> {
@@ -296,22 +365,21 @@ pub fn avatar_button(
     }
 }
 
-/// Non-interactive circular avatar for list rows.
+/// Non-interactive rounded-square avatar for message list rows.
 pub fn avatar_widget(ui: &mut Ui, view: &AvatarView, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     let center = rect.center();
-    let radius = size * 0.5;
+    let rounding = Rounding::same((size * 0.22).clamp(4.0, 8.0));
     let painter = ui.painter();
 
     match view {
         AvatarView::Image(tex) => {
-            let image_rect = egui::Rect::from_center_size(center, Vec2::splat(size));
-            egui::Image::new((tex.id(), image_rect.size()))
-                .rounding(Rounding::same(radius))
-                .paint_at(ui, image_rect);
+            egui::Image::new((tex.id(), rect.size()))
+                .rounding(rounding)
+                .paint_at(ui, rect);
         }
         AvatarView::Initials { letters, fill } => {
-            painter.circle_filled(center, radius, *fill);
+            painter.rect_filled(rect, rounding, *fill);
             let font_size = (size * 0.4).clamp(8.0, 12.0);
             let ink = if fill.r() as u16 + fill.g() as u16 + fill.b() as u16 > 400 {
                 Color32::from_rgb(0x2a, 0x35, 0x31)
