@@ -292,6 +292,50 @@ impl Store {
         Ok(())
     }
 
+    pub fn delete_message(&self, id: &MessageId) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Move a cached message into another folder (updates `folder_path` + id).
+    pub fn move_message_local(
+        &self,
+        id: &MessageId,
+        account_id: &str,
+        from_folder: &str,
+        to_folder: &str,
+    ) -> Result<MessageId> {
+        let uid = crate::types::parse_imap_uid(id, account_id, from_folder).unwrap_or(0);
+        let new_id = format!("{account_id}:{to_folder}:{uid}");
+        if new_id == *id {
+            self.conn.execute(
+                "UPDATE messages SET folder_path = ?1 WHERE id = ?2",
+                params![to_folder, id],
+            )?;
+            return Ok(id.clone());
+        }
+        // Prefer rename when destination id is free; otherwise delete source after copy.
+        let updated = self.conn.execute(
+            r#"
+            UPDATE messages
+            SET id = ?1, folder_path = ?2
+            WHERE id = ?3
+              AND NOT EXISTS (SELECT 1 FROM messages WHERE id = ?1)
+            "#,
+            params![new_id, to_folder, id],
+        )?;
+        if updated == 0 {
+            // Collision or missing row — fall back to folder_path-only update.
+            self.conn.execute(
+                "UPDATE messages SET folder_path = ?1 WHERE id = ?2",
+                params![to_folder, id],
+            )?;
+            return Ok(id.clone());
+        }
+        Ok(new_id)
+    }
+
     pub fn search_local(&self, account_id: &str, query: &str) -> Result<Vec<Envelope>> {
         let q = format!("%{query}%");
         let mut stmt = self.conn.prepare(

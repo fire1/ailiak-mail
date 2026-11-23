@@ -34,5 +34,8 @@ pub use oauth_clients::{creds_ready as oauth_creds_ready, has_embedded_app, reso
 pub use providers::{MailProvider, ProviderPreset};
 pub use paths::AppPaths;
 pub use store::Store;
-pub use sync::{sync_account, test_connection, SyncOptions, SyncReport};
-pub use types::{date_group_label, AccountId, Envelope, Folder, Message, MessageId};
+pub use sync::{move_messages, sync_account, test_connection, SyncOptions, SyncReport};
+pub use types::{
+    date_group_label, resolve_special_folder, AccountId, Envelope, Folder, Message, MessageId,
+    SpecialFolderKind,
+};

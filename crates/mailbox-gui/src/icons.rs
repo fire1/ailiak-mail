@@ -44,14 +44,49 @@ impl FolderIcon {
 #[derive(Clone, Copy)]
 pub enum ToolbarIcon {
     Sync,
+    Archive,
+    Trash,
 }
 
 impl ToolbarIcon {
     fn glyph(self) -> &'static str {
         match self {
             Self::Sync => ph::ARROWS_CLOCKWISE,
+            Self::Archive => ph::ARCHIVE,
+            Self::Trash => ph::TRASH,
         }
     }
+}
+
+/// Icon-only toolbar control (Archive / Trash next to Sync).
+pub fn toolbar_icon_button(ui: &mut Ui, kind: ToolbarIcon, tip: &str, enabled: bool) -> Response {
+    let mute = theme::mute(ui.ctx());
+    let size = Vec2::splat(28.0);
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let fill = if !enabled {
+        Color32::TRANSPARENT
+    } else if response.is_pointer_button_down_on() {
+        theme::select(ui.ctx())
+    } else if response.hovered() {
+        theme::chip(ui.ctx())
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 6.0, fill);
+    }
+    let color = if enabled {
+        mute
+    } else {
+        mute.linear_multiply(0.4)
+    };
+    paint_glyph(ui, rect.shrink(6.0), kind.glyph(), color);
+    response.on_hover_text(tip)
 }
 
 fn paint_glyph(ui: &Ui, rect: egui::Rect, glyph: &str, color: Color32) {
@@ -216,6 +251,7 @@ fn nav_action_row(
     ui: &mut Ui,
     collapsed: bool,
     enabled: bool,
+    selected: bool,
     label: &str,
     hover: &str,
     glyph: &'static str,
@@ -233,6 +269,8 @@ fn nav_action_row(
 
     let fill = if !enabled {
         Color32::TRANSPARENT
+    } else if selected {
+        theme::select(ui.ctx())
     } else if response.hovered() {
         theme::chip(ui.ctx())
     } else {
@@ -242,7 +280,7 @@ fn nav_action_row(
 
     let icon_color = if !enabled {
         mute.linear_multiply(0.45)
-    } else if response.hovered() {
+    } else if selected || response.hovered() {
         accent
     } else {
         mute
@@ -264,10 +302,12 @@ fn nav_action_row(
             .painter()
             .round_pos_to_pixels(Pos2::new(rect.left() + 30.0, rect.center().y));
         let font = theme::nav_font(12.0);
-        let text_color = if enabled {
-            ui.visuals().text_color()
-        } else {
+        let text_color = if !enabled {
             mute.linear_multiply(0.55)
+        } else if selected {
+            accent
+        } else {
+            ui.visuals().text_color()
         };
         ui.painter()
             .text(text_pos, Align2::LEFT_CENTER, label, font, text_color);
@@ -281,11 +321,24 @@ fn nav_action_row(
     }
 }
 
+pub fn desk_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
+    nav_action_row(
+        ui,
+        collapsed,
+        true,
+        false,
+        "Desk",
+        "Open Ailiak Desk in browser (d)",
+        ph::BROWSER,
+    )
+}
+
 pub fn todo_nav_button(ui: &mut Ui, enabled: bool, collapsed: bool) -> Response {
     nav_action_row(
         ui,
         collapsed,
         enabled,
+        false,
         "Todo",
         "Todo — mail → Ailiak Desk (a)",
         ph::CHECK_SQUARE,
@@ -297,6 +350,7 @@ pub fn calendar_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
         ui,
         collapsed,
         true,
+        false,
         "Calendar",
         "Desk calendar (c)",
         ph::CALENDAR_BLANK,
@@ -304,11 +358,19 @@ pub fn calendar_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
 }
 
 pub fn settings_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
-    nav_action_row(ui, collapsed, true, "Settings", "Settings (,)", ph::GEAR)
+    nav_action_row(
+        ui,
+        collapsed,
+        true,
+        false,
+        "Settings",
+        "Settings (,)",
+        ph::GEAR,
+    )
 }
 
 pub fn help_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
-    nav_action_row(ui, collapsed, true, "Help", "Help (?)", ph::QUESTION)
+    nav_action_row(ui, collapsed, true, false, "Help", "Help (?)", ph::QUESTION)
 }
 
 /// Stak row in the nav rail (sender/domain stack).

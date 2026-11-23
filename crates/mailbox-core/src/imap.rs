@@ -197,6 +197,44 @@ pub async fn sync_folder(
     Ok((unseen, messages))
 }
 
+/// Move one message by UID into `dest_folder` (UID MOVE, or COPY + delete fallback).
+pub async fn move_uid(
+    session: &mut ImapSession,
+    from_folder: &str,
+    uid: u32,
+    dest_folder: &str,
+) -> Result<()> {
+    session
+        .select(from_folder)
+        .await
+        .with_context(|| format!("SELECT {from_folder}"))?;
+
+    let uid_s = uid.to_string();
+    match session.uid_mv(&uid_s, dest_folder).await {
+        Ok(()) => Ok(()),
+        Err(move_err) => {
+            tracing::debug!(error = %move_err, "UID MOVE failed; trying COPY+delete");
+            session
+                .uid_copy(&uid_s, dest_folder)
+                .await
+                .with_context(|| format!("UID COPY → {dest_folder}"))?;
+            let _ = session
+                .uid_store(&uid_s, "+FLAGS (\\Deleted)")
+                .await
+                .context("UID STORE \\Deleted")?
+                .try_collect::<Vec<_>>()
+                .await;
+            let _ = session
+                .expunge()
+                .await
+                .context("EXPUNGE")?
+                .try_collect::<Vec<_>>()
+                .await;
+            Ok(())
+        }
+    }
+}
+
 pub async fn fetch_uid_body(
     session: &mut ImapSession,
     folder_path: &str,

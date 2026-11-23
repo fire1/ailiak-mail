@@ -150,7 +150,7 @@ pub fn show_body(
             .show(ui, |ui| {
                 ui.label(
                     RichText::new(
-                        "This message includes remote images. They are blocked until you allow them (privacy / tracking).",
+                        "This message includes remote images. They are blocked until you allow this sender (privacy / tracking).",
                     )
                     .small()
                     .color(theme::mute(ui.ctx())),

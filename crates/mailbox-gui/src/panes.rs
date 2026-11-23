@@ -41,15 +41,14 @@ impl MailboxApp {
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .on_hover_text("Open Ailiak Desk");
                 if resp.clicked() {
-                    ui.ctx()
-                        .open_url(egui::OpenUrl::new_tab("https://ailiak.com/desk"));
+                    self.open_desk();
                 }
             });
         });
 
-        // Right: Sync (selected folder)
+        // Right: Archive / Trash (current message) + Sync
         let right = Rect::from_min_max(
-            egui::pos2(bar.right() - (bar.width() * 0.28).max(160.0), bar.top()),
+            egui::pos2(bar.right() - (bar.width() * 0.28).max(200.0), bar.top()),
             bar.right_bottom(),
         );
         ui.allocate_new_ui(UiBuilder::new().max_rect(right), |ui| {
@@ -63,6 +62,27 @@ impl MailboxApp {
                 .clicked()
                 {
                     self.start_sync(false);
+                }
+                let has_msg = self.open_message.is_some();
+                if icons::toolbar_icon_button(
+                    ui,
+                    icons::ToolbarIcon::Trash,
+                    "Trash current message (#)",
+                    has_msg,
+                )
+                .clicked()
+                {
+                    self.move_current_message(mailbox_core::SpecialFolderKind::Trash);
+                }
+                if icons::toolbar_icon_button(
+                    ui,
+                    icons::ToolbarIcon::Archive,
+                    "Archive current message (e)",
+                    has_msg,
+                )
+                .clicked()
+                {
+                    self.move_current_message(mailbox_core::SpecialFolderKind::Archive);
                 }
             });
         });
@@ -148,6 +168,7 @@ impl MailboxApp {
         let mut clicked_stak: Option<String> = None;
         let mut open_folders_settings = false;
         let mut sync_folders: Option<bool> = None; // Some(true) = all IMAP folders
+        let mut open_desk = false;
         let mut open_todo = false;
         let mut open_calendar = false;
         let mut open_settings = false;
@@ -158,10 +179,10 @@ impl MailboxApp {
         // Tighter vertical rhythm than the global style (folders felt too airy).
         ui.spacing_mut().item_spacing.y = 2.0;
 
-        // Top-down: scrollable accounts/folders, then a fixed footer.
-        // 4 rows × 28 + separator + bottom breathing room (Todo, Calendar, Settings, Help).
+        // Top-down: scrollable accounts/folders, then a fixed tools strip (paper fill).
+        // 5 rows × 28 + padding (Desk, Todo, Calendar, Settings, Help).
         let row_h = 28.0;
-        let footer_h = row_h * 4.0 + 8.0 + 8.0 + 18.0;
+        let footer_h = row_h * 5.0 + 12.0 + 16.0;
         let body_h = (ui.available_height() - footer_h).max(48.0);
 
         ScrollArea::vertical()
@@ -349,9 +370,21 @@ impl MailboxApp {
                 }
             });
 
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
+        // Tools strip — same paper as the mail reader so it reads as a separate section.
+        let paper = theme::paper(ui.ctx());
+        let side_inset = 8.0; // match SidePanel left/right margin
+        let max = ui.max_rect();
+        let top = ui.cursor().top();
+        let footer_bg = Rect::from_min_max(
+            egui::pos2(max.left() - side_inset, top),
+            egui::pos2(max.right() + side_inset, max.bottom()),
+        );
+        ui.painter().rect_filled(footer_bg, 0.0, paper);
+
+        ui.add_space(8.0);
+        if icons::desk_nav_button(ui, collapsed).clicked() {
+            open_desk = true;
+        }
         if icons::todo_nav_button(ui, todo_enabled, collapsed).clicked() {
             open_todo = true;
         }
@@ -365,6 +398,11 @@ impl MailboxApp {
             open_help = true;
         }
         ui.add_space(16.0);
+        // Keep paper continuous through leftover space under the tools.
+        let leftover = ui.available_height();
+        if leftover > 0.0 {
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), leftover), Sense::hover());
+        }
 
         if toggle_collapse {
             self.folders_collapsed = !self.folders_collapsed;
@@ -406,6 +444,9 @@ impl MailboxApp {
             {
                 let _ = self.open_id(&first);
             }
+        }
+        if open_desk {
+            self.open_desk();
         }
         if open_todo {
             self.toggle_todo();
@@ -451,13 +492,46 @@ impl MailboxApp {
         } else {
             folder_title
         };
-        ui.label(
-            RichText::new(&list_title)
-                .strong()
-                .size(14.0)
-                .family(theme::nav_family())
-                .color(theme::ink(ui.ctx())),
-        );
+        let list_count = if let Some(stak_id) = self.selected_stak.as_deref() {
+            self.envelopes
+                .iter()
+                .filter(|e| staks::envelope_in_stak(e, stak_id))
+                .count()
+        } else {
+            self.envelopes.len()
+        };
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(&list_title)
+                    .strong()
+                    .size(14.0)
+                    .family(theme::nav_family())
+                    .color(theme::ink(ui.ctx())),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let enabled = list_count > 0;
+                if icons::toolbar_icon_button(
+                    ui,
+                    icons::ToolbarIcon::Trash,
+                    "Trash all messages in this list",
+                    enabled,
+                )
+                .clicked()
+                {
+                    self.move_listed_messages(mailbox_core::SpecialFolderKind::Trash);
+                }
+                if icons::toolbar_icon_button(
+                    ui,
+                    icons::ToolbarIcon::Archive,
+                    "Archive all messages in this list",
+                    enabled,
+                )
+                .clicked()
+                {
+                    self.move_listed_messages(mailbox_core::SpecialFolderKind::Archive);
+                }
+            });
+        });
         ui.add_space(8.0);
 
         let envelopes: Vec<_> = if let Some(stak_id) = self.selected_stak.as_deref() {
@@ -667,26 +741,31 @@ impl MailboxApp {
                 .unwrap_or(false)
         };
         if has_remote {
+            let from = msg.envelope.from_addr.clone();
             ui.horizontal(|ui| {
                 if self.load_remote_images {
-                    if ui.button("Block remote images").clicked() {
-                        self.load_remote_images = false;
-                        self.mail_body_cache = None;
+                    if ui
+                        .button("Block images from sender")
+                        .on_hover_text(format!(
+                            "Stop loading remote images from {from} (including later mail)"
+                        ))
+                        .clicked()
+                    {
+                        self.block_remote_images_for_sender();
                     }
                     ui.label(
-                        RichText::new("Remote images allowed for this message")
+                        RichText::new(format!("Images allowed for {from}"))
                             .small()
                             .color(theme::mute(ui.ctx())),
                     );
                 } else if ui
-                    .button("Load remote images…")
-                    .on_hover_text(
-                        "Downloads images from the sender’s servers (may include tracking pixels)",
-                    )
+                    .button("Always load images from sender…")
+                    .on_hover_text(format!(
+                        "Allow remote images for {from} on this and future messages (may include tracking pixels)"
+                    ))
                     .clicked()
                 {
-                    self.load_remote_images = true;
-                    self.mail_body_cache = None;
+                    self.allow_remote_images_for_sender();
                 }
             });
             ui.add_space(8.0);
@@ -1001,10 +1080,19 @@ impl MailboxApp {
 
         {
             let collapsed = self.folders_collapsed;
+            // Bottom margin is 0 so the tools strip (Desk/Todo/…) can paint paper to the edge.
             let mut side = egui::SidePanel::left("nav_v4")
                 .resizable(!collapsed)
                 .show_separator_line(false)
-                .frame(layout::panel_frame(egui::Margin::symmetric(8.0, 8.0), panel));
+                .frame(layout::panel_frame(
+                    egui::Margin {
+                        left: 8.0,
+                        right: 8.0,
+                        top: 8.0,
+                        bottom: 0.0,
+                    },
+                    panel,
+                ));
             side = if collapsed {
                 side.exact_width(56.0)
             } else {

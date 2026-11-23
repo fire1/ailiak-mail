@@ -8,6 +8,7 @@ use crate::imap;
 use crate::oauth::MailCredential;
 use crate::pop3;
 use crate::store::Store;
+use crate::types::{parse_imap_uid, Folder, MessageId, SpecialFolderKind};
 
 #[derive(Debug, Clone)]
 pub struct SyncReport {
@@ -171,6 +172,99 @@ async fn sync_imap(
         folder_path: primary,
         detail,
     })
+}
+
+/// Move messages to Archive or Trash.
+/// IMAP: UID MOVE on the server, then update the local cache.
+/// POP3: local folder move only (server has no Archive/Trash folders).
+pub fn move_messages(
+    store: &Store,
+    account: &MailAccountConfig,
+    credential: &MailCredential,
+    message_ids: &[MessageId],
+    kind: SpecialFolderKind,
+) -> Result<usize> {
+    if message_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut folders = store.list_all_folders(&account.id)?;
+    // POP3 has no server folders beyond Inbox — keep local Archive/Trash mailboxes.
+    if account.protocol == MailProtocol::Pop3 {
+        ensure_special_folder(store, &account.id, &mut folders, kind)?;
+    }
+    let dest = crate::types::resolve_special_folder(&folders, kind).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No {} folder found — Sync all folders (Shift+G) so Archive/Trash are listed",
+            kind.label()
+        )
+    })?;
+
+    // Snapshot envelopes before mutation.
+    let mut jobs: Vec<(MessageId, String, Option<u32>)> = Vec::new();
+    for id in message_ids {
+        let Some(msg) = store.get_message(id)? else {
+            continue;
+        };
+        let from = msg.envelope.folder_path.clone();
+        if from == dest {
+            continue;
+        }
+        let uid = parse_imap_uid(id, &account.id, &from);
+        jobs.push((id.clone(), from, uid));
+    }
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+
+    if account.protocol == MailProtocol::Imap {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("start tokio runtime")?;
+        rt.block_on(async {
+            let mut session = imap::connect_and_login(account, credential).await?;
+            for (id, from, uid) in &jobs {
+                if let Some(uid) = uid {
+                    if let Err(e) = imap::move_uid(&mut session, from, *uid, &dest).await {
+                        tracing::warn!(error = %e, msg = %id, "IMAP move failed; moving locally");
+                    }
+                }
+                store.move_message_local(id, &account.id, from, &dest)?;
+            }
+            session.logout().await.ok();
+            Ok::<(), anyhow::Error>(())
+        })?;
+    } else {
+        for (id, from, _) in &jobs {
+            store.move_message_local(id, &account.id, from, &dest)?;
+        }
+    }
+
+    Ok(jobs.len())
+}
+
+fn ensure_special_folder(
+    store: &Store,
+    account_id: &str,
+    folders: &mut Vec<Folder>,
+    kind: SpecialFolderKind,
+) -> Result<()> {
+    if crate::types::resolve_special_folder(folders, kind).is_some() {
+        return Ok(());
+    }
+    // Local-only mailbox when the server never listed one (typical POP3).
+    let path = kind.label().to_string();
+    let folder = Folder {
+        account_id: account_id.to_string(),
+        name: path.clone(),
+        path: path.clone(),
+        unread: 0,
+        hidden: false,
+    };
+    store.upsert_folder(&folder)?;
+    folders.push(folder);
+    Ok(())
 }
 
 async fn sync_pop3(

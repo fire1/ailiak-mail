@@ -49,6 +49,64 @@ pub fn folder_sort_key(path: &str) -> (u8, String) {
     (rank, p)
 }
 
+/// Target mailbox for quick Archive / Trash actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialFolderKind {
+    Archive,
+    Trash,
+}
+
+impl SpecialFolderKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Archive => "Archive",
+            Self::Trash => "Trash",
+        }
+    }
+
+    fn matches(self, path: &str, name: &str) -> bool {
+        let key = format!("{path} {name}").to_lowercase();
+        match self {
+            Self::Archive => {
+                key.contains("archive")
+                    // Gmail has no classic Archive mailbox; All Mail is the usual target.
+                    || key.contains("[gmail]/all mail")
+            }
+            Self::Trash => {
+                key.contains("trash") || key.contains("bin") || key.contains("deleted")
+            }
+        }
+    }
+}
+
+/// Pick the best local/IMAP path for Archive or Trash from known folders.
+pub fn resolve_special_folder(folders: &[Folder], kind: SpecialFolderKind) -> Option<String> {
+    let mut best: Option<(i32, String)> = None;
+    for f in folders {
+        if !kind.matches(&f.path, &f.name) {
+            continue;
+        }
+        let key = format!("{} {}", f.path, f.name).to_lowercase();
+        // Prefer exact-ish names over Gmail “All Mail” for archive.
+        let score = match kind {
+            SpecialFolderKind::Archive if key.contains("archive") => 3,
+            SpecialFolderKind::Archive => 1,
+            SpecialFolderKind::Trash if key.contains("trash") => 3,
+            SpecialFolderKind::Trash => 2,
+        };
+        if best.as_ref().map(|(s, _)| *s).unwrap_or(0) < score {
+            best = Some((score, f.path.clone()));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// Parse IMAP UID from local id `{account_id}:{folder_path}:{uid}`.
+pub fn parse_imap_uid(id: &str, account_id: &str, folder_path: &str) -> Option<u32> {
+    let prefix = format!("{account_id}:{folder_path}:");
+    id.strip_prefix(&prefix)?.parse().ok()
+}
+
 pub fn sort_folders(folders: &mut [Folder]) {
     folders.sort_by_key(|a| folder_sort_key(&a.path));
 }

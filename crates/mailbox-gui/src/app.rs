@@ -8,14 +8,14 @@ use mailbox_ailiak::{
     build_payload, short_task_number, todo_defaults, AiliakClient, DeskTask,
 };
 use mailbox_core::config::{AppConfig, MailAccountConfig, MailAuthMethod, MailProtocol};
-use mailbox_core::oauth::{self, MailCredential, OAuthProvider, OAuthSignInResult};
+use mailbox_core::oauth::{self, open_url, MailCredential, OAuthProvider, OAuthSignInResult};
 use mailbox_core::oauth_clients;
 use mailbox_core::paths::AppPaths;
 use mailbox_core::secrets;
 use mailbox_core::seed::{demo_account_id, seed_demo_if_empty};
 use mailbox_core::store::Store;
-use mailbox_core::sync::{sync_account, test_connection, SyncOptions};
-use mailbox_core::types::{Envelope, Folder, Message, MessageId};
+use mailbox_core::sync::{move_messages, sync_account, test_connection, SyncOptions};
+use mailbox_core::types::{Envelope, Folder, Message, MessageId, SpecialFolderKind};
 
 use crate::avatars::{AvatarCache, AvatarMsg};
 use crate::brand::AiliakLogo;
@@ -23,6 +23,9 @@ use crate::calendar::CalendarState;
 use crate::settings::{AccountWizard, AccountWizardStep, SettingsSection};
 use crate::theme;
 use mailbox_core::providers::MailProvider;
+
+/// Full Ailiak Desk in the system browser (escape hatch; Todo uses the API).
+pub(crate) const DESK_URL: &str = "https://ailiak.com";
 
 enum BgMsg {
     AiliakOk {
@@ -42,6 +45,11 @@ enum BgMsg {
     /// Browser OAuth sign-in finished.
     OAuthSignIn(Result<OAuthSignInResult, String>),
     DeskTasks(Vec<DeskTask>),
+    /// Archive / Trash finished (count moved).
+    MailMoved {
+        kind: SpecialFolderKind,
+        count: usize,
+    },
     Error(String),
 }
 
@@ -557,6 +565,15 @@ impl MailboxApp {
         self.show_settings = true;
         self.show_help = false;
         self.show_todo = false;
+        self.show_calendar = false;
+    }
+
+    /// Open Ailiak Desk in the system browser.
+    pub(crate) fn open_desk(&mut self) {
+        match open_url(DESK_URL) {
+            Ok(()) => self.status = format!("Opened {DESK_URL}"),
+            Err(e) => self.status = format!("Could not open Desk: {e}"),
+        }
     }
 
     pub(crate) fn start_new_account(&mut self) {
@@ -636,6 +653,79 @@ and paste it here."
             }
             Err(e) => {
                 let _ = tx.send(BgMsg::MailTest(Err(e.to_string())));
+            }
+        });
+    }
+
+    /// Archive or trash the open message (conversation).
+    pub(crate) fn move_current_message(&mut self, kind: SpecialFolderKind) {
+        let Some(id) = self.selected_message.clone() else {
+            self.status = "Select a message first".into();
+            return;
+        };
+        self.start_move_messages(vec![id], kind);
+    }
+
+    /// Archive or trash every message currently shown in the mid list.
+    pub(crate) fn move_listed_messages(&mut self, kind: SpecialFolderKind) {
+        let ids: Vec<MessageId> = if let Some(stak_id) = self.selected_stak.as_deref() {
+            self.envelopes
+                .iter()
+                .filter(|e| crate::staks::envelope_in_stak(e, stak_id))
+                .map(|e| e.id.clone())
+                .collect()
+        } else {
+            self.envelopes.iter().map(|e| e.id.clone()).collect()
+        };
+        if ids.is_empty() {
+            self.status = "No messages to move".into();
+            return;
+        }
+        self.start_move_messages(ids, kind);
+    }
+
+    fn start_move_messages(&mut self, ids: Vec<MessageId>, kind: SpecialFolderKind) {
+        let Some(account) = self.selected_account().cloned() else {
+            self.status = "Add a mail account in Settings first".into();
+            self.open_settings(SettingsSection::Accounts);
+            return;
+        };
+        let credential = match self.resolve_mail_credential(&account) {
+            Ok(c) => c,
+            Err(e) => {
+                // Local-only move still works without a live credential for POP3-ish cases,
+                // but IMAP needs auth — try local path with a dummy only when POP3 password missing?
+                // Prefer requiring credential so server stays consistent for IMAP.
+                if account.protocol == MailProtocol::Imap {
+                    self.status = e;
+                    self.open_settings(SettingsSection::Accounts);
+                    return;
+                }
+                // POP3: allow local Archive/Trash without re-entering password.
+                MailCredential::Password(String::new())
+            }
+        };
+
+        let db_path = self.paths.db_file();
+        let tx = self.bg_tx.clone();
+        let n = ids.len();
+        self.status = if n == 1 {
+            format!("Moving to {}…", kind.label())
+        } else {
+            format!("Moving {n} to {}…", kind.label())
+        };
+        thread::spawn(move || {
+            let result = (|| -> Result<usize> {
+                let store = Store::open(&db_path)?;
+                move_messages(&store, &account, &credential, &ids, kind)
+            })();
+            match result {
+                Ok(count) => {
+                    let _ = tx.send(BgMsg::MailMoved { kind, count });
+                }
+                Err(e) => {
+                    let _ = tx.send(BgMsg::Error(e.to_string()));
+                }
             }
         });
     }
@@ -791,7 +881,7 @@ and paste it here."
                     env.seen = true;
                 }
             }
-            self.load_remote_images = false;
+            self.load_remote_images = self.config.ui.allows_remote_images(&msg.envelope.from_addr);
             self.mail_images.clear();
             self.mail_body_cache = None;
             self.mail_webview_req = None;
@@ -800,6 +890,40 @@ and paste it here."
             self.open_message = Some(msg);
         }
         Ok(())
+    }
+
+    /// Allow remote images for the open message’s sender (persisted; once per From address).
+    pub(crate) fn allow_remote_images_for_sender(&mut self) {
+        let Some(addr) = self
+            .open_message
+            .as_ref()
+            .map(|m| m.envelope.from_addr.clone())
+        else {
+            return;
+        };
+        self.config.ui.allow_remote_images_sender(&addr);
+        self.load_remote_images = true;
+        self.mail_body_cache = None;
+        if let Err(e) = self.config.save(&self.paths.config_file()) {
+            self.status = format!("Could not save image allowlist: {e}");
+        }
+    }
+
+    /// Revoke remote images for the open message’s sender.
+    pub(crate) fn block_remote_images_for_sender(&mut self) {
+        let Some(addr) = self
+            .open_message
+            .as_ref()
+            .map(|m| m.envelope.from_addr.clone())
+        else {
+            return;
+        };
+        self.config.ui.block_remote_images_sender(&addr);
+        self.load_remote_images = false;
+        self.mail_body_cache = None;
+        if let Err(e) = self.config.save(&self.paths.config_file()) {
+            self.status = format!("Could not save image allowlist: {e}");
+        }
     }
 
     /// Structured body for the reader; rebuilt only when message or image opt-in changes.
@@ -824,8 +948,36 @@ and paste it here."
                 BgMsg::AiliakOk { task_id, for_date } => {
                     self.show_todo = false;
                     let day = for_date.unwrap_or_else(|| "today".into());
-                    self.status = format!("Todo created {task_id} · Desk {day}");
                     self.refresh_desk_tasks();
+                    // One-shot escape hatch to organize on the full Desk UI.
+                    match open_url(DESK_URL) {
+                        Ok(()) => {
+                            self.status =
+                                format!("Todo created {task_id} · Desk {day} · opened {DESK_URL}");
+                        }
+                        Err(_) => {
+                            self.status = format!("Todo created {task_id} · Desk {day}");
+                        }
+                    }
+                }
+                BgMsg::MailMoved { kind, count } => {
+                    let label = kind.label();
+                    self.status = if count == 1 {
+                        format!("Moved 1 message to {label}")
+                    } else {
+                        format!("Moved {count} messages to {label}")
+                    };
+                    self.open_message = None;
+                    self.selected_message = None;
+                    self.mail_webview_req = None;
+                    self.mail_body_cache = None;
+                    if let Err(e) = self.refresh_folders() {
+                        self.status = e.to_string();
+                    } else if let Err(e) = self.refresh_envelopes() {
+                        self.status = e.to_string();
+                    } else if let Some(first) = self.envelopes.first().map(|e| e.id.clone()) {
+                        let _ = self.open_id(&first);
+                    }
                 }
                 BgMsg::WhoAmI(s) => {
                     self.status = format!("Ailiak: signed in as {s}");
@@ -1246,8 +1398,11 @@ Try again, or check that a keyring/secret-service is running."
                 ui.monospace("/         focus search");
                 ui.monospace("g         sync selected folder");
                 ui.monospace("Shift+G   sync all folders");
+                ui.monospace("d         open Desk in browser");
                 ui.monospace("a         Todo (mail → Ailiak)");
                 ui.monospace("c         calendar (Desk days)");
+                ui.monospace("e         archive current message");
+                ui.monospace("# / Del   trash current message");
                 ui.monospace(",         settings page");
                 ui.monospace("Esc       leave settings");
                 ui.monospace("?         this help");
@@ -1320,11 +1475,24 @@ Try again, or check that a keyring/secret-service is running."
             if i.key_pressed(egui::Key::Comma) {
                 self.open_settings(SettingsSection::Appearance);
             }
+            if i.key_pressed(egui::Key::D) && !i.modifiers.any() {
+                self.open_desk();
+            }
             if i.key_pressed(egui::Key::A) && !i.modifiers.any() {
                 self.toggle_todo();
             }
             if i.key_pressed(egui::Key::C) && !i.modifiers.any() {
                 self.toggle_calendar();
+            }
+            if i.key_pressed(egui::Key::E) && !i.modifiers.any() {
+                self.move_current_message(SpecialFolderKind::Archive);
+            }
+            let trash = i.key_pressed(egui::Key::Delete)
+                || i.events
+                    .iter()
+                    .any(|ev| matches!(ev, egui::Event::Text(t) if t == "#"));
+            if trash {
+                self.move_current_message(SpecialFolderKind::Trash);
             }
             if i.key_pressed(egui::Key::G) {
                 self.start_sync(i.modifiers.shift);
@@ -1380,8 +1548,8 @@ impl App for MailboxApp {
 
         self.show_shell(ctx);
 
-        let hide_webview = self.show_settings || self.show_help;
-        if hide_webview {
+        let hide_mail = self.show_settings || self.show_help;
+        if hide_mail {
             self.mail_webview.hide();
         } else if let Some(req) = self.mail_webview_req.take() {
             self.mail_webview.show_html(

@@ -274,6 +274,38 @@ pub struct UiConfig {
     /// Account id opened on launch. Empty → first configured account.
     #[serde(default)]
     pub default_account_id: String,
+    /// Lowercased `From` addresses allowed to load remote images (privacy allowlist).
+    #[serde(default)]
+    pub remote_image_senders: Vec<String>,
+}
+
+/// Normalize a mail address for allowlist lookup (trim + lowercase).
+pub fn normalize_mail_addr(addr: &str) -> String {
+    addr.trim().to_lowercase()
+}
+
+impl UiConfig {
+    pub fn allows_remote_images(&self, from_addr: &str) -> bool {
+        let key = normalize_mail_addr(from_addr);
+        !key.is_empty() && self.remote_image_senders.iter().any(|s| s == &key)
+    }
+
+    /// Remember this sender so later messages auto-load remote images.
+    pub fn allow_remote_images_sender(&mut self, from_addr: &str) {
+        let key = normalize_mail_addr(from_addr);
+        if key.is_empty() {
+            return;
+        }
+        if !self.remote_image_senders.iter().any(|s| s == &key) {
+            self.remote_image_senders.push(key);
+        }
+    }
+
+    /// Forget this sender; remote images stay blocked again.
+    pub fn block_remote_images_sender(&mut self, from_addr: &str) {
+        let key = normalize_mail_addr(from_addr);
+        self.remote_image_senders.retain(|s| s != &key);
+    }
 }
 
 fn default_demo() -> bool {
@@ -291,6 +323,7 @@ impl Default for UiConfig {
             theme: ThemeMode::System,
             accent: default_accent(),
             default_account_id: String::new(),
+            remote_image_senders: Vec::new(),
         }
     }
 }
