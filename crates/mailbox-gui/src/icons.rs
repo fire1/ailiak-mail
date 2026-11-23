@@ -425,13 +425,9 @@ pub fn stak_nav_button(
         } else {
             ui.visuals().text_color()
         };
-        ui.painter()
-            .text(text_pos, Align2::LEFT_CENTER, label, font, color);
+        let text_max_w = (rect.right() - 8.0 - text_pos.x).max(0.0);
+        theme::paint_truncated_line(ui, text_pos, label, font, color, text_max_w);
     }
 
-    if collapsed {
-        response.on_hover_text(label)
-    } else {
-        response
-    }
+    response.on_hover_text(label)
 }

@@ -185,6 +185,9 @@ impl MailboxApp {
         let footer_h = row_h * 5.0 + 12.0 + 16.0;
         let body_h = (ui.available_height() - footer_h).max(48.0);
 
+        let paper = theme::paper(ui.ctx());
+        let side_inset = 8.0; // match SidePanel left/right margin + footer bleed
+
         ScrollArea::vertical()
             .id_salt("nav_scroll_v5")
             .max_height(body_h)
@@ -192,87 +195,122 @@ impl MailboxApp {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing.y = 2.0;
-                if collapsed {
-                    // Same centered column as folder / footer icons.
-                    ui.horizontal(|ui| {
-                        let btn = 28.0;
-                        ui.add_space((ui.available_width() - btn).max(0.0) * 0.5);
-                        if icons::collapse_button(ui, true, mute).clicked() {
-                            toggle_collapse = true;
-                        }
-                    });
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Accounts")
-                                .small()
-                                .family(theme::nav_family())
-                                .color(mute),
-                        );
-                        ui.add_space(ui.available_width() - 28.0);
-                        if icons::collapse_button(ui, false, mute).clicked() {
-                            toggle_collapse = true;
-                        }
-                    });
-                }
-                ui.add_space(4.0);
 
-                if collapsed {
-                    // Narrow rail: stack avatars in a centered column.
-                    for (id, name, email) in &accounts {
-                        let selected = id == &selected_id;
-                        let tip = if name.is_empty() {
-                            email.clone()
+                // Same paper band as the bottom tools strip.
+                egui::Frame::none()
+                    .fill(paper)
+                    .inner_margin(egui::Margin {
+                        left: side_inset,
+                        right: side_inset,
+                        top: 8.0,
+                        bottom: 8.0,
+                    })
+                    .outer_margin(egui::Margin {
+                        left: -side_inset,
+                        right: -side_inset,
+                        top: -8.0, // cancel SidePanel top margin so paper hits the edge
+                        bottom: 0.0,
+                    })
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        if collapsed {
+                            // Same centered column as folder / footer icons.
+                            ui.horizontal(|ui| {
+                                let btn = 28.0;
+                                ui.add_space((ui.available_width() - btn).max(0.0) * 0.5);
+                                if icons::collapse_button(ui, true, mute).clicked() {
+                                    toggle_collapse = true;
+                                }
+                            });
                         } else {
-                            format!("{name}\n{email}")
-                        };
-                        let view = self.resolve_avatar(ui.ctx(), email, name);
-                        ui.horizontal(|ui| {
-                            ui.add_space((ui.available_width() - avatar_size).max(0.0) * 0.5);
-                            if avatars::avatar_button(ui, &view, avatar_size, selected, &tip)
-                                .clicked()
-                            {
-                                switch_to = Some(id.clone());
-                            }
-                        });
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Accounts")
+                                        .small()
+                                        .family(theme::nav_family())
+                                        .color(mute),
+                                );
+                                ui.add_space(ui.available_width() - 28.0);
+                                if icons::collapse_button(ui, false, mute).clicked() {
+                                    toggle_collapse = true;
+                                }
+                            });
+                        }
                         ui.add_space(4.0);
-                    }
-                    ui.horizontal(|ui| {
-                        ui.add_space((ui.available_width() - avatar_size).max(0.0) * 0.5);
-                        if icons::plus_account_button(ui, avatar_size).clicked() {
-                            add_account = true;
-                        }
-                    });
-                } else {
-                    // Wide panel: avatars + add on one row.
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        for (id, name, email) in &accounts {
-                            let selected = id == &selected_id;
-                            let tip = if name.is_empty() {
-                                email.clone()
-                            } else {
-                                format!("{name}\n{email}")
-                            };
-                            let view = self.resolve_avatar(ui.ctx(), email, name);
-                            if avatars::avatar_button(ui, &view, avatar_size, selected, &tip)
-                                .clicked()
-                            {
-                                switch_to = Some(id.clone());
+
+                        if collapsed {
+                            // Narrow rail: stack avatars in a centered column.
+                            for (id, name, email) in &accounts {
+                                let selected = id == &selected_id;
+                                let tip = if name.is_empty() {
+                                    email.clone()
+                                } else {
+                                    format!("{name}\n{email}")
+                                };
+                                let view = self.resolve_avatar(ui.ctx(), email, name);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(
+                                        (ui.available_width() - avatar_size).max(0.0) * 0.5,
+                                    );
+                                    if avatars::avatar_button(
+                                        ui,
+                                        &view,
+                                        avatar_size,
+                                        selected,
+                                        &tip,
+                                    )
+                                    .clicked()
+                                    {
+                                        switch_to = Some(id.clone());
+                                    }
+                                });
+                                ui.add_space(4.0);
                             }
-                        }
-                        if icons::plus_account_button(ui, avatar_size).clicked() {
-                            add_account = true;
+                            ui.horizontal(|ui| {
+                                ui.add_space(
+                                    (ui.available_width() - avatar_size).max(0.0) * 0.5,
+                                );
+                                if icons::plus_account_button(ui, avatar_size).clicked() {
+                                    add_account = true;
+                                }
+                            });
+                        } else {
+                            // Wide panel: avatars + add on one row.
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                for (id, name, email) in &accounts {
+                                    let selected = id == &selected_id;
+                                    let tip = if name.is_empty() {
+                                        email.clone()
+                                    } else {
+                                        format!("{name}\n{email}")
+                                    };
+                                    let view = self.resolve_avatar(ui.ctx(), email, name);
+                                    if avatars::avatar_button(
+                                        ui,
+                                        &view,
+                                        avatar_size,
+                                        selected,
+                                        &tip,
+                                    )
+                                    .clicked()
+                                    {
+                                        switch_to = Some(id.clone());
+                                    }
+                                }
+                                if icons::plus_account_button(ui, avatar_size).clicked() {
+                                    add_account = true;
+                                }
+                            });
                         }
                     });
-                }
 
                 ui.add_space(8.0);
 
                 // Staks — sender/domain stacks from the current folder cache.
-                let stak_list = staks::build_staks(&self.envelopes);
                 let selected_stak = self.selected_stak.clone();
-                if !stak_list.is_empty() {
+                if !self.staks_cache.is_empty() {
                     if !collapsed {
                         ui.label(
                             RichText::new("Staks")
@@ -282,7 +320,7 @@ impl MailboxApp {
                         );
                         ui.add_space(4.0);
                     }
-                    for stak in &stak_list {
+                    for stak in &self.staks_cache {
                         let selected = selected_stak.as_deref() == Some(stak.id.as_str());
                         let label = if stak.unread > 0 {
                             format!("{} {}", stak.label, stak.unread)
@@ -306,10 +344,10 @@ impl MailboxApp {
                 }
 
                 if !collapsed {
-                    let is_pop3 = self
+                    let (is_pop3, is_abv) = self
                         .selected_account()
-                        .map(|a| a.protocol == mailbox_core::config::MailProtocol::Pop3)
-                        .unwrap_or(false);
+                        .map(|a| (a.is_pop3(), a.looks_like_abv()))
+                        .unwrap_or((false, false));
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new("Folders")
@@ -332,11 +370,7 @@ impl MailboxApp {
                             if manage.clicked() {
                                 open_folders_settings = true;
                             }
-                            let sync_tip = if is_pop3 {
-                                "Sync Inbox — POP3 cannot list server folders (ABV webmail folders stay online)"
-                            } else {
-                                "Sync all folders — list and download every IMAP folder (Shift+G)"
-                            };
+                            let sync_tip = mailbox_core::nav_sync_tip(is_pop3, is_abv);
                             let sync = ui
                                 .add(
                                     egui::Button::new(
@@ -370,9 +404,7 @@ impl MailboxApp {
                 }
             });
 
-        // Tools strip — same paper as the mail reader so it reads as a separate section.
-        let paper = theme::paper(ui.ctx());
-        let side_inset = 8.0; // match SidePanel left/right margin
+        // Tools strip — same paper as the accounts band / mail reader.
         let max = ui.max_rect();
         let top = ui.cursor().top();
         let footer_bg = Rect::from_min_max(
@@ -483,10 +515,11 @@ impl MailboxApp {
             .map(|f| f.name.clone())
             .unwrap_or_else(|| self.selected_folder.clone());
         let list_title = if let Some(stak_id) = self.selected_stak.as_deref() {
-            let label = staks::build_staks(&self.envelopes)
-                .into_iter()
+            let label = self
+                .staks_cache
+                .iter()
                 .find(|s| s.id == stak_id)
-                .map(|s| s.label)
+                .map(|s| s.label.clone())
                 .unwrap_or_else(|| stak_id.to_string());
             format!("{label} · {folder_title}")
         } else {
@@ -534,14 +567,15 @@ impl MailboxApp {
         });
         ui.add_space(8.0);
 
-        let envelopes: Vec<_> = if let Some(stak_id) = self.selected_stak.as_deref() {
+        let env_indices: Vec<usize> = if let Some(stak_id) = self.selected_stak.as_deref() {
             self.envelopes
                 .iter()
-                .filter(|e| staks::envelope_in_stak(e, stak_id))
-                .cloned()
+                .enumerate()
+                .filter(|(_, e)| staks::envelope_in_stak(e, stak_id))
+                .map(|(i, _)| i)
                 .collect()
         } else {
-            self.envelopes.clone()
+            (0..self.envelopes.len()).collect()
         };
         let selected = self.selected_message.clone();
         let mut open: Option<MessageId> = None;
@@ -550,7 +584,7 @@ impl MailboxApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_max_width(col_w);
-                if envelopes.is_empty() {
+                if env_indices.is_empty() {
                     ui.label(RichText::new("No messages").color(theme::mute(ui.ctx())));
                     ui.add_space(6.0);
                     let hint = if !self.list_empty_hint.is_empty() {
@@ -587,8 +621,22 @@ impl MailboxApp {
                 }
 
                 let mut last_group: Option<String> = None;
-                for env in &envelopes {
-                    let group = date_group_label(env.date);
+                for &idx in &env_indices {
+                    // Copy row fields so we can call resolve_avatar (&mut self) without
+                    // holding a borrow on envelopes.
+                    let (env_id, from_name, from_addr, subject_s, snippet, seen, date_ts) = {
+                        let env = &self.envelopes[idx];
+                        (
+                            env.id.clone(),
+                            env.from_name.clone(),
+                            env.from_addr.clone(),
+                            env.subject.clone(),
+                            env.snippet.clone(),
+                            env.seen,
+                            env.date,
+                        )
+                    };
+                    let group = date_group_label(date_ts);
                     if last_group.as_ref() != Some(&group) {
                         if last_group.is_some() {
                             ui.add_space(8.0);
@@ -602,40 +650,39 @@ impl MailboxApp {
                         last_group = Some(group);
                     }
 
-                    let is_sel = selected.as_ref() == Some(&env.id);
-                    let from = if env.from_name.is_empty() {
-                        env.from_addr.clone()
+                    let is_sel = selected.as_ref() == Some(&env_id);
+                    let from = if from_name.is_empty() {
+                        from_addr.as_str()
                     } else {
-                        env.from_name.clone()
+                        from_name.as_str()
                     };
-                    let date = env.date.format("%b %d").to_string();
-                    let name_style = if env.seen {
-                        RichText::new(&from).size(12.0)
+                    let date = date_ts.format("%b %d").to_string();
+                    let name_style = if seen {
+                        RichText::new(from).size(12.0)
                     } else {
-                        RichText::new(&from)
+                        RichText::new(from)
                             .strong()
                             .size(12.0)
                             .color(theme::ink(ui.ctx()))
                     };
-                    let subject = if env.seen {
-                        RichText::new(&env.subject)
+                    let subject = if seen {
+                        RichText::new(&subject_s)
                             .small()
                             .color(theme::mute(ui.ctx()))
                     } else {
-                        RichText::new(&env.subject)
+                        RichText::new(&subject_s)
                             .small()
                             .color(theme::unread(ui.ctx()))
                     };
 
-                    let avatar = if let Some(brand_id) = staks::brand_id_for_addr(&env.from_addr)
-                    {
+                    let avatar = if let Some(brand_id) = staks::brand_id_for_addr(&from_addr) {
                         brand_logos::texture(ui.ctx(), brand_id)
                             .map(crate::avatars::AvatarView::Image)
                             .unwrap_or_else(|| {
-                                self.resolve_avatar(ui.ctx(), &env.from_addr, &env.from_name)
+                                self.resolve_avatar(ui.ctx(), &from_addr, &from_name)
                             })
                     } else {
-                        self.resolve_avatar(ui.ctx(), &env.from_addr, &env.from_name)
+                        self.resolve_avatar(ui.ctx(), &from_addr, &from_name)
                     };
 
                     let row = egui::Frame::none()
@@ -668,7 +715,7 @@ impl MailboxApp {
                                     ui.add(egui::Label::new(subject).truncate());
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(&env.snippet)
+                                            RichText::new(&snippet)
                                                 .small()
                                                 .color(theme::mute(ui.ctx())),
                                         )
@@ -679,7 +726,7 @@ impl MailboxApp {
                         });
 
                     if row.response.interact(Sense::click()).clicked() {
-                        open = Some(env.id.clone());
+                        open = Some(env_id);
                     }
                     ui.add_space(2.0);
                 }
@@ -1150,7 +1197,7 @@ impl MailboxApp {
                 ui.painter().vline(
                     x,
                     list_rect.y_range(),
-                    egui::Stroke::new(1.0, theme::mute(ui.ctx()).linear_multiply(0.45)),
+                    egui::Stroke::new(1.0_f32, theme::mute(ui.ctx()).linear_multiply(0.45)),
                 );
                 response
             })

@@ -23,12 +23,13 @@ pub mod sync;
 pub mod types;
 
 pub use config::{
-    AiliakConfig, AppConfig, MailAccountConfig, MailAuthMethod, MailProtocol, OAuthConfig,
-    ThemeMode,
+    folders_panel_help, looks_like_abv, nav_sync_tip, pop3_account_form_help,
+    pop3_sync_limitation_note, AiliakConfig, AppConfig, MailAccountConfig, MailAuthMethod,
+    MailProtocol, OAuthConfig, ThemeMode,
 };
 pub use oauth::{
-    ensure_access_token, oauth_sign_in, store_oauth_tokens, MailCredential, OAuthClientCreds,
-    OAuthProvider, OAuthSignInResult,
+    ensure_access_token, oauth_sign_in, resolve_mail_credential, store_oauth_tokens, MailCredential,
+    OAuthClientCreds, OAuthProvider, OAuthSignInResult,
 };
 pub use oauth_clients::{creds_ready as oauth_creds_ready, has_embedded_app, resolve_creds as resolve_oauth_creds};
 pub use providers::{MailProvider, ProviderPreset};

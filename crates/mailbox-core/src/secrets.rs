@@ -36,9 +36,15 @@ fn session_passwords() -> &'static Mutex<HashMap<String, String>> {
 }
 
 fn file_path() -> Result<PathBuf> {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(p) = PATH.get() {
+        return Ok(p.clone());
+    }
     let paths = AppPaths::resolve()?;
     paths.ensure()?;
-    Ok(paths.config_dir.join("credentials.json"))
+    let path = paths.config_dir.join("credentials.json");
+    let _ = PATH.set(path.clone());
+    Ok(path)
 }
 
 fn load_file() -> FileStore {
@@ -137,8 +143,28 @@ pub fn delete_mail_password(account_id: &str) -> Result<()> {
 }
 
 /// True when a password is available (OS keyring, session, or credential file).
+///
+/// May talk to the OS keyring (DBus / keyutils) — **do not call from the UI paint path**.
 pub fn has_mail_password(account_id: &str) -> bool {
     matches!(get_mail_password(account_id), Ok(Some(p)) if !p.is_empty())
+}
+
+/// Fast UI-safe check: session memory + local credential file only (no keyring/DBus).
+///
+/// Safe to call while painting. Matches [`set_mail_password`], which always mirrors to the file.
+pub fn has_mail_password_local(account_id: &str) -> bool {
+    if account_id.is_empty() {
+        return false;
+    }
+    if let Ok(map) = session_passwords().lock() {
+        if map.get(account_id).is_some_and(|p| !p.is_empty()) {
+            return true;
+        }
+    }
+    load_file()
+        .mail_passwords
+        .get(account_id)
+        .is_some_and(|p| !p.is_empty())
 }
 
 pub fn set_ailiak_token(token: &str) -> Result<()> {

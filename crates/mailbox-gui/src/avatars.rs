@@ -323,13 +323,13 @@ pub fn avatar_button(
         painter.circle_stroke(
             center,
             radius + 1.5,
-            egui::Stroke::new(2.0, theme::accent(ui.ctx())),
+            egui::Stroke::new(2.0_f32, theme::accent(ui.ctx())),
         );
     } else if response.hovered() {
         painter.circle_stroke(
             center,
             radius + 1.0,
-            egui::Stroke::new(1.5, theme::mute(ui.ctx())),
+            egui::Stroke::new(1.5_f32, theme::mute(ui.ctx())),
         );
     }
 

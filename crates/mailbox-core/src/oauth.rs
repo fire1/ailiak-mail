@@ -68,7 +68,6 @@ impl OAuthProvider {
             MailProvider::Yandex => Some(Self::Yandex),
             MailProvider::Icloud
             | MailProvider::Gmx
-            | MailProvider::Abv
             | MailProvider::Imap
             | MailProvider::Pop3 => None,
         }
@@ -672,6 +671,42 @@ pub fn ensure_access_token(
 pub enum MailCredential {
     Password(String),
     OAuth2 { access_token: String },
+}
+
+/// Resolve password / OAuth access token for mail I/O.
+///
+/// May hit the keyring and (for OAuth refresh) the network — call from a worker
+/// thread, never from the egui UI loop.
+pub fn resolve_mail_credential(
+    account: &crate::config::MailAccountConfig,
+    oauth_config: &crate::config::OAuthConfig,
+    password_override: Option<&str>,
+) -> Result<MailCredential> {
+    let normalize = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+    match account.auth {
+        MailAuthMethod::Password => {
+            if let Some(p) = password_override.map(str::trim).filter(|s| !s.is_empty()) {
+                return Ok(MailCredential::Password(normalize(p)));
+            }
+            match secrets::get_mail_password(&account.id)? {
+                Some(p) => Ok(MailCredential::Password(normalize(&p))),
+                None => bail!("No password in keyring — paste your mail password in Settings"),
+            }
+        }
+        auth if auth.is_oauth() => {
+            let oauth = OAuthProvider::from_auth_method(auth)
+                .ok_or_else(|| anyhow!("Unknown OAuth provider on this account"))?;
+            let creds = crate::oauth_clients::resolve_creds(oauth, oauth_config).ok_or_else(|| {
+                anyhow!(
+                    "{} app authorization is not configured in this build",
+                    oauth.label()
+                )
+            })?;
+            let access_token = ensure_access_token(&account.id, oauth, &creds)?;
+            Ok(MailCredential::OAuth2 { access_token })
+        }
+        _ => bail!("Unsupported auth method"),
+    }
 }
 
 /// SASL XOAUTH2 initial client response (async-imap Authenticator).

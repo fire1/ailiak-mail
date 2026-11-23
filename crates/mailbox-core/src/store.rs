@@ -11,23 +11,47 @@ pub struct Store {
 }
 
 impl Store {
+    /// Open for the UI thread — short busy wait so the egui loop never ANRs on SQLITE_BUSY.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let conn =
-            Connection::open(path).with_context(|| format!("open sqlite {}", path.display()))?;
-        let store = Self { conn };
-        store.migrate()?;
-        Ok(store)
+        Self::open_with_busy_ms(path, 50)
+    }
+
+    /// Open for background sync/move workers — wait longer for writers.
+    pub fn open_for_worker(path: &Path) -> Result<Self> {
+        Self::open_with_busy_ms(path, 10_000)
     }
 
     pub fn open_in_memory() -> Result<Self> {
         let store = Self {
             conn: Connection::open_in_memory()?,
         };
+        store.configure_connection(50)?;
         store.migrate()?;
         Ok(store)
+    }
+
+    fn open_with_busy_ms(path: &Path, busy_ms: u32) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn =
+            Connection::open(path).with_context(|| format!("open sqlite {}", path.display()))?;
+        let store = Self { conn };
+        store.configure_connection(busy_ms)?;
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// WAL so UI + workers can share the DB. Keep UI `busy_ms` tiny to avoid freezes.
+    fn configure_connection(&self, busy_ms: u32) -> Result<()> {
+        self.conn.execute_batch(&format!(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA busy_timeout = {busy_ms};
+            PRAGMA synchronous = NORMAL;
+            "#
+        ))?;
+        Ok(())
     }
 
     fn migrate(&self) -> Result<()> {

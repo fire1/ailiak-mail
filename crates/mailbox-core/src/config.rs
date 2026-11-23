@@ -166,13 +166,19 @@ impl MailAccountConfig {
 
     pub fn is_gmail(&self) -> bool {
         self.protocol == MailProtocol::Imap
-            && (self.imap_host.eq_ignore_ascii_case("imap.gmail.com")
-                || self.email.to_lowercase().ends_with("@gmail.com")
-                || self.email.to_lowercase().ends_with("@googlemail.com"))
+            && matches!(
+                crate::providers::MailProvider::infer_from_host_email(&self.imap_host, &self.email),
+                Some(crate::providers::MailProvider::Gmail)
+            )
     }
 
     pub fn is_pop3(&self) -> bool {
         self.protocol == MailProtocol::Pop3
+    }
+
+    /// True when this account looks like abv.bg (POP3-only; no IMAP folders).
+    pub fn looks_like_abv(&self) -> bool {
+        looks_like_abv(&self.imap_host, &self.email)
     }
 
     pub fn mail_host(&self) -> &str {
@@ -195,6 +201,53 @@ impl MailAccountConfig {
             (MailProtocol::Pop3, true) => self.imap_port = 995,
             (MailProtocol::Pop3, false) => self.imap_port = 110,
         }
+    }
+}
+
+/// True when host/email looks like abv.bg (Bulgarian ISP — POP3 only).
+pub fn looks_like_abv(host: &str, email: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    let email = email.trim().to_ascii_lowercase();
+    host.contains("abv.bg") || email.ends_with("@abv.bg")
+}
+
+/// Short note embedded in POP3 sync success/detail strings.
+pub fn pop3_sync_limitation_note(host: &str, email: &str) -> &'static str {
+    if looks_like_abv(host, email) {
+        "ABV is POP3-only (no IMAP) — Sent, Spam, Drafts, and custom folders stay in ABV webmail"
+    } else {
+        "POP3 cannot list server folders — only Inbox is available"
+    }
+}
+
+/// Longer help under the account edit form when protocol is POP3.
+pub fn pop3_account_form_help(host: &str, email: &str) -> &'static str {
+    if looks_like_abv(host, email) {
+        "ABV supports POP3 only (no IMAP). Sync downloads Inbox; Sent, Spam, Drafts, and custom folders stay in ABV webmail. Mail is left on the server."
+    } else {
+        "POP3 maps to a single Inbox — server folders cannot be listed. Mail is left on the server (no delete)."
+    }
+}
+
+/// Help text for Settings → Folders (POP3 / ABV vs IMAP).
+pub fn folders_panel_help(is_pop3: bool, is_abv: bool) -> &'static str {
+    if is_abv {
+        "ABV has no IMAP — Sync only downloads Inbox. Sent, Spam, Drafts, and custom folders stay in ABV webmail."
+    } else if is_pop3 {
+        "POP3 cannot list server folders. Sync downloads Inbox only; hide/show applies to local folders."
+    } else {
+        "IMAP lists every mailbox on Sync. Hide folders you don’t want in the left rail."
+    }
+}
+
+/// Tooltip for the nav-rail sync button.
+pub fn nav_sync_tip(is_pop3: bool, is_abv: bool) -> &'static str {
+    if is_pop3 && is_abv {
+        "Sync Inbox — POP3 cannot list server folders (ABV webmail folders stay online)"
+    } else if is_pop3 {
+        "Sync Inbox — POP3 cannot list server folders"
+    } else {
+        "Sync all folders — list and download every IMAP folder (Shift+G)"
     }
 }
 

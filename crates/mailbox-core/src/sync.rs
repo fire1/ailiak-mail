@@ -295,13 +295,8 @@ async fn sync_pop3(
         store.upsert_message(msg)?;
     }
 
-    let pop3_folder_note = if account.imap_host.to_lowercase().contains("abv.bg")
-        || account.email.to_lowercase().ends_with("@abv.bg")
-    {
-        "ABV is POP3-only (no IMAP) — Sent, Spam, Drafts, and custom folders stay in ABV webmail"
-    } else {
-        "POP3 cannot list server folders — only Inbox is available"
-    };
+    let pop3_folder_note =
+        crate::config::pop3_sync_limitation_note(&account.imap_host, &account.email);
     let detail = if server_count == 0 {
         format!("{pop3_folder_note}; server inbox is empty")
     } else if messages.is_empty() {

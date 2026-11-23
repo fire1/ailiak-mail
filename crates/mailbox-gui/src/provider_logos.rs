@@ -67,7 +67,6 @@ fn tex_for<'a>(pack: &'a LogoPack, provider: MailProvider) -> &'a TextureHandle 
         MailProvider::Icloud => &pack.icloud,
         MailProvider::Yandex => &pack.yandex,
         MailProvider::Gmx => &pack.gmx,
-        MailProvider::Abv => &pack.pop3,
         MailProvider::Imap => &pack.imap,
         MailProvider::Pop3 => &pack.pop3,
     }
@@ -75,4 +74,9 @@ fn tex_for<'a>(pack: &'a LogoPack, provider: MailProvider) -> &'a TextureHandle 
 
 pub fn texture(ctx: &Context, provider: MailProvider) -> TextureHandle {
     tex_for(&pack(ctx), provider).clone()
+}
+
+/// Rasterize provider SVGs once (call at startup) so the Add-account screen does not hitch.
+pub fn preload(ctx: &Context) {
+    let _ = pack(ctx);
 }

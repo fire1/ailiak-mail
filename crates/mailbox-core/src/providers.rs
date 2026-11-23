@@ -12,8 +12,6 @@ pub enum MailProvider {
     Icloud,
     Yandex,
     Gmx,
-    /// ABV.bg (Bulgaria) — POP3 only.
-    Abv,
     /// Custom IMAP + SMTP (user fills hosts).
     Imap,
     /// Custom POP3 + SMTP (user fills hosts).
@@ -42,7 +40,7 @@ pub struct ProviderPreset {
 }
 
 impl MailProvider {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 9] = [
         Self::Gmail,
         Self::Yahoo,
         Self::Office365,
@@ -50,7 +48,6 @@ impl MailProvider {
         Self::Icloud,
         Self::Yandex,
         Self::Gmx,
-        Self::Abv,
         Self::Imap,
         Self::Pop3,
     ];
@@ -162,21 +159,6 @@ impl MailProvider {
                 supports_oauth: false,
                 oauth_button: "",
             },
-            Self::Abv => ProviderPreset {
-                provider: self,
-                label: "ABV",
-                blurb: "abv.bg — POP3 Inbox only (no IMAP folders)",
-                protocol: MailProtocol::Pop3,
-                imap_host: "pop3.abv.bg",
-                imap_port: 995,
-                imap_tls: true,
-                smtp_host: "smtp.abv.bg",
-                smtp_port: 465,
-                smtp_tls: true,
-                password_hint: "Full address (you@abv.bg) + mailbox password. Enable POP3 in ABV webmail settings if login fails. ABV has no IMAP — Sent/Spam/custom folders stay in webmail only.",
-                supports_oauth: false,
-                oauth_button: "",
-            },
             Self::Imap => ProviderPreset {
                 provider: self,
                 label: "IMAP",
@@ -216,6 +198,38 @@ impl MailProvider {
 
     pub fn supports_oauth(self) -> bool {
         self.preset().supports_oauth
+    }
+
+    /// Guess a well-known provider from incoming host + email (for logos / OAuth CTA).
+    /// Unknown hosts return `None`; ABV-style POP3 maps to [`Self::Pop3`].
+    pub fn infer_from_host_email(host: &str, email: &str) -> Option<Self> {
+        let host = host.trim().to_ascii_lowercase();
+        let email = email.trim().to_ascii_lowercase();
+        if host.contains("gmail.com")
+            || email.ends_with("@gmail.com")
+            || email.ends_with("@googlemail.com")
+        {
+            return Some(Self::Gmail);
+        }
+        if host.contains("mail.yahoo.") || email.contains("@yahoo.") || email.ends_with("@ymail.com")
+        {
+            return Some(Self::Yahoo);
+        }
+        if host.contains("office365")
+            || host.contains("outlook.")
+            || email.ends_with("@outlook.com")
+            || email.ends_with("@hotmail.com")
+            || email.ends_with("@live.com")
+        {
+            return Some(Self::Outlook);
+        }
+        if host.contains("yandex.") || email.contains("@yandex.") {
+            return Some(Self::Yandex);
+        }
+        if crate::config::looks_like_abv(&host, &email) {
+            return Some(Self::Pop3);
+        }
+        None
     }
 }
 

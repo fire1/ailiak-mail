@@ -156,6 +156,38 @@ pub fn nav_font(size: f32) -> FontId {
     FontId::new(size, nav_family())
 }
 
+/// Paint a single line of text, ellipsizing when it exceeds `max_width`.
+/// `pos` is the left-center anchor (same as `Align2::LEFT_CENTER` for `painter.text`).
+pub fn paint_truncated_line(
+    ui: &egui::Ui,
+    pos: egui::Pos2,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) {
+    use egui::text::{LayoutJob, TextFormat, TextWrapping};
+
+    let max_width = max_width.max(0.0);
+    let mut job = LayoutJob::single_section(
+        text.to_owned(),
+        TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
+    );
+    job.wrap = TextWrapping {
+        max_width,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.painter().layout_job(job);
+    let anchor = egui::pos2(pos.x, pos.y - galley.size().y * 0.5);
+    ui.painter().galley(anchor, galley, color);
+}
+
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
@@ -279,18 +311,18 @@ fn paint_visuals(mut visuals: Visuals, p: Palette) -> Visuals {
     visuals.faint_bg_color = p.faint;
     visuals.extreme_bg_color = p.chip;
     visuals.widgets.noninteractive.bg_fill = p.panel;
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.ink);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.ink);
     visuals.widgets.inactive.bg_fill = p.chip;
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, p.ink);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.ink);
     visuals.widgets.hovered.bg_fill = p.select;
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, p.accent);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, p.accent);
     visuals.widgets.active.bg_fill = p.select;
-    visuals.widgets.active.fg_stroke = Stroke::new(1.25, p.accent);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.25_f32, p.accent);
     visuals.selection.bg_fill = p.select;
-    visuals.selection.stroke = Stroke::new(1.0, p.accent);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, line);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, line);
-    visuals.window_stroke = Stroke::new(1.0, line);
+    visuals.selection.stroke = Stroke::new(1.0_f32, p.accent);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, line);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, line);
+    visuals.window_stroke = Stroke::new(1.0_f32, line);
     visuals.window_rounding = Rounding::same(10.0);
     visuals.menu_rounding = Rounding::same(8.0);
     visuals.widgets.noninteractive.rounding = Rounding::same(8.0);

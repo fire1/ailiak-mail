@@ -139,7 +139,7 @@ impl MailboxService {
             secrets::get_mail_password(&account.id)?
                 .ok_or_else(|| anyhow!("no password in OS keyring for account {}", account.id))?,
         );
-        let store = self.open_store()?;
+        let store = Store::open_for_worker(&self.paths.db_file())?;
         let report = sync_account(
             &store,
             &account,

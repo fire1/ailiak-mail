@@ -63,6 +63,8 @@ pub struct MailboxApp {
     pub(crate) selected_folder: String,
     /// When set, message list is filtered to this Stak (sender/domain stack).
     pub(crate) selected_stak: Option<String>,
+    /// Cached Staks for the current envelope list (rebuilt on refresh / mark-seen).
+    pub(crate) staks_cache: Vec<crate::staks::Stak>,
     pub(crate) selected_message: Option<MessageId>,
     pub(crate) open_message: Option<Message>,
     /// Opt-in remote images for the open message (privacy default: off).
@@ -107,6 +109,8 @@ pub struct MailboxApp {
     pub(crate) imap_password_input: String,
     /// When true, mail password field shows plaintext.
     pub(crate) show_mail_password: bool,
+    /// Cached "password on file" for the editing account (never query keyring while painting).
+    pub(crate) mail_password_saved: bool,
     pub(crate) smtp_host_input: String,
     pub(crate) smtp_port: u16,
     /// Account id currently edited in Settings (may be a new draft).
@@ -170,6 +174,7 @@ impl MailboxApp {
             envelopes: Vec::new(),
             selected_folder: "INBOX".into(),
             selected_stak: None,
+            staks_cache: Vec::new(),
             selected_message: None,
             open_message: None,
             load_remote_images: false,
@@ -204,6 +209,7 @@ impl MailboxApp {
             imap_user_input: String::new(),
             imap_password_input: String::new(),
             show_mail_password: false,
+            mail_password_saved: false,
             smtp_host_input: String::new(),
             smtp_port: 587,
             editing_account_id,
@@ -218,6 +224,8 @@ impl MailboxApp {
         app.reload_settings_fields();
         app.refresh_folders()?;
         app.refresh_envelopes()?;
+        // Warm SVG textures before Settings → Add account (avoids a long hitch on first open).
+        crate::provider_logos::preload(&cc.egui_ctx);
         if let Some(first) = app.envelopes.first().map(|e| e.id.clone()) {
             app.open_id(&first)?;
         }
@@ -359,31 +367,13 @@ impl MailboxApp {
         oauth_clients::has_embedded_app(provider)
     }
 
-    fn resolve_mail_credential(
-        &self,
-        account: &MailAccountConfig,
-    ) -> Result<MailCredential, String> {
-        match account.auth {
-            MailAuthMethod::Password => Ok(MailCredential::Password(
-                self.resolve_mail_password(&account.id)?,
-            )),
-            auth if auth.is_oauth() => {
-                let oauth = OAuthProvider::from_auth_method(auth).ok_or_else(|| {
-                    "Unknown OAuth provider on this account".to_string()
-                })?;
-                let creds = oauth_clients::resolve_creds(oauth, &self.config.oauth).ok_or_else(
-                    || {
-                        format!(
-                            "{} app authorization is not configured in this build",
-                            oauth.label()
-                        )
-                    },
-                )?;
-                oauth::ensure_access_token(&account.id, oauth, &creds)
-                    .map(|access_token| MailCredential::OAuth2 { access_token })
-                    .map_err(|e| e.to_string())
-            }
-            _ => Err("Unsupported auth method".into()),
+    /// Password typed in Settings this session (if any). OAuth/network resolve runs off-thread.
+    fn password_override(&self) -> Option<String> {
+        let p = self.imap_password_input.trim();
+        if p.is_empty() {
+            None
+        } else {
+            Some(p.to_string())
         }
     }
 
@@ -455,11 +445,14 @@ impl MailboxApp {
             self.mail_test_feedback = msg;
             return;
         }
-        if let Some(url) = result.picture_url.as_deref() {
-            match AvatarCache::set_from_url(&self.paths.avatars_dir(), &email, url) {
-                Ok(()) => self.avatars.invalidate(&email),
-                Err(e) => tracing::warn!(error = %e, "could not fetch OAuth profile photo"),
-            }
+        if let Some(url) = result.picture_url.as_deref().filter(|u| !u.is_empty()) {
+            // Off UI thread — HTTP download must not freeze the egui loop.
+            AvatarCache::spawn_url_fetch(
+                email.clone(),
+                url.to_string(),
+                self.paths.avatars_dir(),
+                self.avatar_tx.clone(),
+            );
         }
         let existing_name = self
             .config
@@ -594,23 +587,6 @@ impl MailboxApp {
         self.status = "Add account — choose a provider".into();
     }
 
-    fn resolve_mail_password(&self, account_id: &str) -> Result<String, String> {
-        // Strip whitespace so Google/Yahoo/Apple app passwords pasted with spaces still work.
-        let normalize = |s: &str| -> String {
-            s.chars().filter(|c| !c.is_whitespace()).collect()
-        };
-        if !self.imap_password_input.is_empty() {
-            return Ok(normalize(&self.imap_password_input));
-        }
-        match secrets::get_mail_password(account_id) {
-            Ok(Some(p)) => Ok(normalize(&p)),
-            Ok(None) => Err(
-                "No password in keyring — paste your mail password in Settings".into(),
-            ),
-            Err(e) => Err(format!("Keyring: {e}")),
-        }
-    }
-
     fn friendly_mail_test_error(raw: &str) -> String {
         let lower = raw.to_ascii_lowercase();
         if lower.contains("application-specific password") || lower.contains("app password") {
@@ -629,14 +605,8 @@ and paste it here."
             self.mail_test_feedback = msg;
             return;
         };
-        let credential = match self.resolve_mail_credential(&account) {
-            Ok(c) => c,
-            Err(e) => {
-                self.status = e.clone();
-                self.mail_test_feedback = e;
-                return;
-            }
-        };
+        let oauth_config = self.config.oauth.clone();
+        let password_override = self.password_override();
         let tx = self.bg_tx.clone();
         let label = if account.email.is_empty() {
             account.imap_host.clone()
@@ -647,12 +617,25 @@ and paste it here."
         let pending = format!("Testing {proto} login for {label}…");
         self.status = pending.clone();
         self.mail_test_feedback = pending;
-        thread::spawn(move || match test_connection(&account, &credential) {
-            Ok(detail) => {
-                let _ = tx.send(BgMsg::MailTest(Ok(format!("{detail} · {label}"))));
-            }
-            Err(e) => {
-                let _ = tx.send(BgMsg::MailTest(Err(e.to_string())));
+        thread::spawn(move || {
+            let credential = match oauth::resolve_mail_credential(
+                &account,
+                &oauth_config,
+                password_override.as_deref(),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(BgMsg::MailTest(Err(e.to_string())));
+                    return;
+                }
+            };
+            match test_connection(&account, &credential) {
+                Ok(detail) => {
+                    let _ = tx.send(BgMsg::MailTest(Ok(format!("{detail} · {label}"))));
+                }
+                Err(e) => {
+                    let _ = tx.send(BgMsg::MailTest(Err(e.to_string())));
+                }
             }
         });
     }
@@ -690,23 +673,11 @@ and paste it here."
             self.open_settings(SettingsSection::Accounts);
             return;
         };
-        let credential = match self.resolve_mail_credential(&account) {
-            Ok(c) => c,
-            Err(e) => {
-                // Local-only move still works without a live credential for POP3-ish cases,
-                // but IMAP needs auth — try local path with a dummy only when POP3 password missing?
-                // Prefer requiring credential so server stays consistent for IMAP.
-                if account.protocol == MailProtocol::Imap {
-                    self.status = e;
-                    self.open_settings(SettingsSection::Accounts);
-                    return;
-                }
-                // POP3: allow local Archive/Trash without re-entering password.
-                MailCredential::Password(String::new())
-            }
-        };
 
         let db_path = self.paths.db_file();
+        let oauth_config = self.config.oauth.clone();
+        let password_override = self.password_override();
+        let allow_pop3_local = account.protocol == MailProtocol::Pop3;
         let tx = self.bg_tx.clone();
         let n = ids.len();
         self.status = if n == 1 {
@@ -715,8 +686,24 @@ and paste it here."
             format!("Moving {n} to {}…", kind.label())
         };
         thread::spawn(move || {
+            let credential = match oauth::resolve_mail_credential(
+                &account,
+                &oauth_config,
+                password_override.as_deref(),
+            ) {
+                Ok(c) => c,
+                Err(e) if allow_pop3_local => {
+                    // POP3: allow local Archive/Trash without re-entering password.
+                    let _ = e;
+                    MailCredential::Password(String::new())
+                }
+                Err(e) => {
+                    let _ = tx.send(BgMsg::Error(e.to_string()));
+                    return;
+                }
+            };
             let result = (|| -> Result<usize> {
-                let store = Store::open(&db_path)?;
+                let store = Store::open_for_worker(&db_path)?;
                 move_messages(&store, &account, &credential, &ids, kind)
             })();
             match result {
@@ -741,28 +728,23 @@ and paste it here."
             self.open_settings(SettingsSection::Accounts);
             return;
         };
-        let credential = match self.resolve_mail_credential(&account) {
-            Ok(c) => c,
-            Err(e) => {
-                self.status = e;
-                self.open_settings(SettingsSection::Accounts);
-                return;
-            }
-        };
 
-        // Persist password if typed this session (password auth only)
-        if account.auth == MailAuthMethod::Password && !self.imap_password_input.is_empty() {
-            if let MailCredential::Password(ref password) = credential {
-                if let Err(e) = secrets::set_mail_password(&account.id, password) {
+        // Persist typed password locally (keyring only — no network).
+        let password_override = self.password_override();
+        if account.auth == MailAuthMethod::Password {
+            if let Some(ref password) = password_override {
+                let normalized: String = password.chars().filter(|c| !c.is_whitespace()).collect();
+                if let Err(e) = secrets::set_mail_password(&account.id, &normalized) {
                     self.status = format!("Keyring: {e}");
                     return;
                 }
+                self.imap_password_input.clear();
             }
-            self.imap_password_input.clear();
         }
 
         let db_path = self.paths.db_file();
         let folder = self.selected_folder.clone();
+        let oauth_config = self.config.oauth.clone();
         let tx = self.bg_tx.clone();
         let is_pop3 = account.protocol == MailProtocol::Pop3;
         self.status = if is_pop3 {
@@ -774,7 +756,12 @@ and paste it here."
         };
         thread::spawn(move || {
             let result = (|| -> Result<_> {
-                let store = Store::open(&db_path)?;
+                let credential = oauth::resolve_mail_credential(
+                    &account,
+                    &oauth_config,
+                    password_override.as_deref(),
+                )?;
+                let store = Store::open_for_worker(&db_path)?;
                 let report = sync_account(
                     &store,
                     &account,
@@ -831,6 +818,7 @@ and paste it here."
             .or_else(|| self.config.primary_account())
             .cloned();
         if let Some(a) = account {
+            self.mail_password_saved = secrets::has_mail_password_local(&a.id);
             self.editing_account_id = a.id;
             self.account_name_input = a.name;
             self.account_email_input = a.email;
@@ -841,6 +829,8 @@ and paste it here."
             self.imap_user_input = a.username;
             self.smtp_host_input = a.smtp_host;
             self.smtp_port = a.smtp_port;
+        } else {
+            self.mail_password_saved = false;
         }
         self.ailiak_token_input.clear();
     }
@@ -863,7 +853,12 @@ and paste it here."
             self.store
                 .search_local(&self.account_id, self.search.trim())?
         };
+        self.rebuild_staks_cache();
         Ok(())
+    }
+
+    pub(crate) fn rebuild_staks_cache(&mut self) {
+        self.staks_cache = crate::staks::build_staks(&self.envelopes);
     }
 
     pub(crate) fn open_id(&mut self, id: &MessageId) -> Result<()> {
@@ -880,6 +875,7 @@ and paste it here."
                 if let Some(env) = self.envelopes.iter_mut().find(|e| e.id == *id) {
                     env.seen = true;
                 }
+                self.rebuild_staks_cache();
             }
             self.load_remote_images = self.config.ui.allows_remote_images(&msg.envelope.from_addr);
             self.mail_images.clear();
@@ -1098,15 +1094,17 @@ and paste it here."
         if !self.avatars.begin_oauth_photo_try(&key) {
             return;
         }
-        let Ok(cred) = self.resolve_mail_credential(&account) else {
-            return;
-        };
-        let MailCredential::OAuth2 { access_token } = cred else {
-            return;
-        };
+        let oauth_config = self.config.oauth.clone();
         let dir = self.paths.avatars_dir();
         let tx = self.avatar_tx.clone();
         thread::spawn(move || {
+            let access_token = match oauth::resolve_mail_credential(&account, &oauth_config, None) {
+                Ok(MailCredential::OAuth2 { access_token }) => access_token,
+                _ => {
+                    let _ = tx.send(AvatarMsg::Miss { email: key });
+                    return;
+                }
+            };
             match oauth::fetch_google_picture_url(&access_token) {
                 Ok(Some(url)) => AvatarCache::spawn_url_fetch(key, url, dir, tx),
                 Ok(None) | Err(_) => {
@@ -1244,7 +1242,7 @@ and paste it here."
             let result = (|| -> Result<(String, Option<String>)> {
                 let mut client = AiliakClient::new(base, token)?;
                 let created = client.create_task(&payload)?;
-                let store = Store::open(&db_path)?;
+                let store = Store::open_for_worker(&db_path)?;
                 store.record_ailiak_link(&message_id, &created.id)?;
                 Ok((created.id, for_date_status))
             })();
@@ -1350,9 +1348,10 @@ Try again, or check that a keyring/secret-service is running."
                         );
                     }
                     self.imap_password_input.clear();
+                    self.mail_password_saved = true;
                     account.auth = MailAuthMethod::Password;
                     should_sync = true;
-                } else if account.auth.is_oauth() || secrets::has_mail_password(&id) {
+                } else if account.auth.is_oauth() || secrets::has_mail_password_local(&id) {
                     should_sync = true;
                 }
                 self.config.upsert_account(account);

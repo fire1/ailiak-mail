@@ -3,6 +3,8 @@ name = "mailbox-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
 description = "Accounts, config, store, and mail models for AiliakMail"
 
 [dependencies]
@@ -22,12 +24,10 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 toml.workspace = true
 tracing.workspace = true
-uuid.workspace = true
 webpki-roots.workspace = true
 
 [build-dependencies]

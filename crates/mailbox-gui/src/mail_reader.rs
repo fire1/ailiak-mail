@@ -187,7 +187,7 @@ pub fn show_body(
             }
             BodyBlock::Quote(spans) => {
                 egui::Frame::none()
-                    .stroke(egui::Stroke::new(2.0, theme::mute(ui.ctx())))
+                    .stroke(egui::Stroke::new(2.0_f32, theme::mute(ui.ctx())))
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                     .show(ui, |ui| {
                         show_spans(ui, spans, 13.0, false);

@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug ailiakmail",
+      "cargo": {
+        "args": ["build", "--bin=ailiakmail", "--package=mailbox-gui"],
+        "filter": {
+          "name": "ailiakmail",
+          "kind": "bin"
+        }
+      },
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1",
+        "RUST_LOG": "mailbox_gui=debug,mailbox_core=debug,mailbox_ailiak=debug"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "attach",
+      "name": "Attach to ailiakmail (freeze)",
+      "program": "${workspaceFolder}/target/debug/ailiakmail",
+      "pid": "${command:pickProcess}"
+    }
+  ]
+}

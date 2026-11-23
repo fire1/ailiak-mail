@@ -138,7 +138,14 @@ pub(crate) fn known_brand(domain: &str) -> Option<(&'static str, &'static str)> 
         ("abv.bg", "abv", "ABV"),
     ];
     for (suffix, id, label) in BRANDS {
-        if domain == *suffix || domain.ends_with(&format!(".{suffix}")) {
+        if domain == *suffix {
+            return Some((*id, *label));
+        }
+        // Subdomain match without allocating (".google.com").
+        if domain.len() > suffix.len()
+            && domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.'
+            && domain.ends_with(suffix)
+        {
             return Some((*id, *label));
         }
     }

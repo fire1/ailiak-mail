@@ -229,13 +229,13 @@ impl MailboxApp {
                             ui.painter().circle_stroke(
                                 center,
                                 13.5,
-                                egui::Stroke::new(2.0, theme::ink(ui.ctx())),
+                                egui::Stroke::new(2.0_f32, theme::ink(ui.ctx())),
                             );
                         } else if resp.hovered() {
                             ui.painter().circle_stroke(
                                 center,
                                 13.5,
-                                egui::Stroke::new(1.5, theme::mute(ui.ctx())),
+                                egui::Stroke::new(1.5_f32, theme::mute(ui.ctx())),
                             );
                         }
                         if resp.clicked() {
@@ -419,7 +419,6 @@ impl MailboxApp {
                         MailProvider::Icloud,
                         MailProvider::Yandex,
                         MailProvider::Gmx,
-                        MailProvider::Abv,
                     ] {
                         if provider_card(ui, p).clicked() {
                             self.wizard_select_provider(p);
@@ -740,7 +739,8 @@ impl MailboxApp {
                 ui.text_edit_singleline(&mut self.imap_user_input);
                 ui.end_row();
                 ui.label("Password");
-                let saved = secrets::has_mail_password(&self.editing_account_id);
+                // Cached at reload — never hit OS keyring / disk while painting (causes ANR).
+                let saved = self.mail_password_saved;
                 let hint = if saved && self.imap_password_input.is_empty() {
                     "Saved — leave blank to keep, or type a new password"
                 } else {
@@ -761,13 +761,10 @@ impl MailboxApp {
 
         if self.mail_protocol == MailProtocol::Pop3 {
             ui.add_space(4.0);
-            let pop3_note = if self.imap_host_input.to_lowercase().contains("abv.bg")
-                || self.account_email_input.to_lowercase().ends_with("@abv.bg")
-            {
-                "ABV supports POP3 only (no IMAP). Sync downloads Inbox; Sent, Spam, Drafts, and custom folders stay in ABV webmail. Mail is left on the server."
-            } else {
-                "POP3 maps to a single Inbox — server folders cannot be listed. Mail is left on the server (no delete)."
-            };
+            let pop3_note = mailbox_core::pop3_account_form_help(
+                &self.imap_host_input,
+                &self.account_email_input,
+            );
             ui.label(
                 RichText::new(pop3_note)
                     .small()
@@ -777,7 +774,7 @@ impl MailboxApp {
 
         let editing = self.config.account_by_id(&self.editing_account_id);
         let edit_oauth = editing.and_then(|a| OAuthProvider::from_auth_method(a.auth));
-        let inferred_mail = infer_mail_provider(
+        let inferred_mail = MailProvider::infer_from_host_email(
             &self.imap_host_input,
             &self.account_email_input,
         );
@@ -889,12 +886,12 @@ impl MailboxApp {
     fn folders_panel(&mut self, ui: &mut Ui) {
         let is_pop3 = self
             .selected_account()
-            .map(|a| a.protocol == MailProtocol::Pop3)
+            .map(|a| a.is_pop3())
             .unwrap_or(self.mail_protocol == MailProtocol::Pop3);
-        let is_abv = self.selected_account().is_some_and(|a| {
-            a.imap_host.to_lowercase().contains("abv.bg")
-                || a.email.to_lowercase().ends_with("@abv.bg")
-        });
+        let is_abv = self
+            .selected_account()
+            .is_some_and(|a| a.looks_like_abv())
+            || mailbox_core::looks_like_abv(&self.imap_host_input, &self.account_email_input);
 
         ui.label(
             RichText::new("Folders")
@@ -902,13 +899,7 @@ impl MailboxApp {
                 .size(16.0)
                 .family(theme::nav_family()),
         );
-        let folder_help = if is_abv {
-            "ABV has no IMAP — Sync only downloads Inbox. Sent, Spam, Drafts, and custom folders stay in ABV webmail."
-        } else if is_pop3 {
-            "POP3 cannot list server folders. Sync downloads Inbox only; hide/show applies to local folders."
-        } else {
-            "IMAP lists every mailbox on Sync. Hide folders you don’t want in the left rail."
-        };
+        let folder_help = mailbox_core::folders_panel_help(is_pop3, is_abv);
         ui.label(
             RichText::new(folder_help)
                 .small()
@@ -1102,36 +1093,6 @@ fn wizard_password_fields(
     }
 }
 
-fn infer_mail_provider(imap_host: &str, email: &str) -> Option<MailProvider> {
-    let host = imap_host.trim().to_ascii_lowercase();
-    let email = email.trim().to_ascii_lowercase();
-    if host.contains("gmail.com")
-        || email.ends_with("@gmail.com")
-        || email.ends_with("@googlemail.com")
-    {
-        return Some(MailProvider::Gmail);
-    }
-    if host.contains("mail.yahoo.") || email.contains("@yahoo.") || email.ends_with("@ymail.com")
-    {
-        return Some(MailProvider::Yahoo);
-    }
-    if host.contains("office365")
-        || host.contains("outlook.")
-        || email.ends_with("@outlook.com")
-        || email.ends_with("@hotmail.com")
-        || email.ends_with("@live.com")
-    {
-        return Some(MailProvider::Outlook);
-    }
-    if host.contains("yandex.") || email.contains("@yandex.") {
-        return Some(MailProvider::Yandex);
-    }
-    if host.contains("abv.bg") || email.ends_with("@abv.bg") {
-        return Some(MailProvider::Abv);
-    }
-    None
-}
-
 fn oauth_client_fields(ui: &mut Ui, oauth: &mut mailbox_core::OAuthConfig, provider: OAuthProvider) {
     match provider {
         OAuthProvider::Google => {
@@ -1309,7 +1270,7 @@ fn provider_card(ui: &mut Ui, provider: MailProvider) -> egui::Response {
         rect,
         8.0,
         fill,
-        egui::Stroke::new(1.0, theme::mute(ui.ctx()).linear_multiply(0.35)),
+        egui::Stroke::new(1.0_f32, theme::mute(ui.ctx()).linear_multiply(0.35)),
     );
 
     let tex = provider_logos::texture(ui.ctx(), provider);
@@ -1320,21 +1281,24 @@ fn provider_card(ui: &mut Ui, provider: MailProvider) -> egui::Response {
     egui::Image::new((tex.id(), logo_rect.size())).paint_at(ui, logo_rect);
 
     let text_x = rect.left() + 14.0 + logo + 10.0;
-    ui.painter().text(
+    let text_max_w = (rect.right() - 10.0 - text_x).max(0.0);
+    theme::paint_truncated_line(
+        ui,
         egui::pos2(text_x, rect.center().y - 8.0),
-        egui::Align2::LEFT_CENTER,
         preset.label,
         theme::nav_font(13.0),
         theme::ink(ui.ctx()),
+        text_max_w,
     );
-    ui.painter().text(
+    theme::paint_truncated_line(
+        ui,
         egui::pos2(text_x, rect.center().y + 10.0),
-        egui::Align2::LEFT_CENTER,
         preset.blurb,
         egui::FontId::proportional(11.0),
         theme::mute(ui.ctx()),
+        text_max_w,
     );
-    response.on_hover_text(preset.password_hint)
+    response.on_hover_text(format!("{}\n{}", preset.blurb, preset.password_hint))
 }
 
 fn theme_chip(ui: &mut Ui, mode: &mut ThemeMode, value: ThemeMode, label: &str) {
