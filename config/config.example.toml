@@ -7,6 +7,8 @@ use_demo_data = true
 theme = "system"
 # Accent from Ailiak.com: teal (default), cyan, gold, peach, lavender, leaf, sky, pink, stone, cobalt
 accent = "teal"
+# Minutes between automatic syncs (Settings → Folders). 0 = off. Default: 60 (1 hour).
+auto_sync_mins = 60
 # Account id opened on launch (Settings → Accounts → Use as default). Empty = first account.
 # default_account_id = "gmail"
 

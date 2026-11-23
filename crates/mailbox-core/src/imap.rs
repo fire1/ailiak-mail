@@ -197,6 +197,31 @@ pub async fn sync_folder(
     Ok((unseen, messages))
 }
 
+/// Set or clear `\Seen` on a message (UID STORE).
+pub async fn set_seen(
+    session: &mut ImapSession,
+    folder_path: &str,
+    uid: u32,
+    seen: bool,
+) -> Result<()> {
+    session
+        .select(folder_path)
+        .await
+        .with_context(|| format!("SELECT {folder_path}"))?;
+    let flags = if seen {
+        "+FLAGS (\\Seen)"
+    } else {
+        "-FLAGS (\\Seen)"
+    };
+    let _ = session
+        .uid_store(uid.to_string(), flags)
+        .await
+        .with_context(|| format!("UID STORE {flags} uid={uid}"))?
+        .try_collect::<Vec<_>>()
+        .await;
+    Ok(())
+}
+
 /// Move one message by UID into `dest_folder` (UID MOVE, or COPY + delete fallback).
 pub async fn move_uid(
     session: &mut ImapSession,

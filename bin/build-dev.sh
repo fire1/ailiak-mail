@@ -7,7 +7,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 if [[ "$(uname -s)" == Linux* ]]; then
-  export WINIT_UNIX_BACKEND="${WINIT_UNIX_BACKEND:-x11}"
+  # wry child WebKitGTK needs X11 for both the window (winit) and GDK.
+  # WINIT_UNIX_BACKEND is ignored by winit ≥0.29 — eframe forces X11 in main.rs.
+  export GDK_BACKEND="${GDK_BACKEND:-x11}"
 fi
 
 exec cargo run -p mailbox-gui "$@"

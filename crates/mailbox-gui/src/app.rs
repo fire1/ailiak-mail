@@ -1,5 +1,6 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use eframe::App;
@@ -14,11 +15,14 @@ use mailbox_core::paths::AppPaths;
 use mailbox_core::secrets;
 use mailbox_core::seed::{demo_account_id, seed_demo_if_empty};
 use mailbox_core::store::Store;
-use mailbox_core::sync::{move_messages, sync_account, test_connection, SyncOptions};
+use mailbox_core::sync::{
+    mark_seen_on_server, move_messages, sync_account, test_connection, SyncOptions,
+};
 use mailbox_core::types::{Envelope, Folder, Message, MessageId, SpecialFolderKind};
 
 use crate::avatars::{AvatarCache, AvatarMsg};
 use crate::brand::AiliakLogo;
+use crate::busy::BusyFlags;
 use crate::calendar::CalendarState;
 use crate::settings::{AccountWizard, AccountWizardStep, SettingsSection};
 use crate::theme;
@@ -90,6 +94,16 @@ pub struct MailboxApp {
     pub(crate) show_todo: bool,
     /// Folder rail: icons only when true.
     pub(crate) folders_collapsed: bool,
+    /// Nav accordion: Staks section open.
+    pub(crate) staks_section_open: bool,
+    /// Nav accordion: Folders section open.
+    pub(crate) folders_section_open: bool,
+    /// Avatar click → mid-list multi-select (checkboxes on messages).
+    pub(crate) list_multi_select: bool,
+    /// Message ids checked while `list_multi_select` is on.
+    pub(crate) list_selected: std::collections::HashSet<MessageId>,
+    /// Visible-list index where Shift+arrow selection started.
+    list_select_anchor: Option<usize>,
     /// Mid-column width — owned by us (not egui PanelState).
     pub(crate) list_width: f32,
     /// Left edge of the list panel (for manual resize math).
@@ -123,6 +137,12 @@ pub struct MailboxApp {
     avatar_rx: Receiver<AvatarMsg>,
     bg_tx: Sender<BgMsg>,
     bg_rx: Receiver<BgMsg>,
+    /// Toolbar / settings spinners for in-flight work.
+    pub(crate) busy: BusyFlags,
+    /// Last sync start (manual or auto) — drives the auto-sync timer.
+    last_sync_at: Instant,
+    /// Webview torn down; send `Close` next frame so wry Drop does not hang.
+    exit_after_webview: bool,
 }
 
 impl MailboxApp {
@@ -193,6 +213,11 @@ impl MailboxApp {
             show_calendar: false,
             show_todo: false,
             folders_collapsed: false,
+            staks_section_open: false,
+            folders_section_open: true,
+            list_multi_select: false,
+            list_selected: std::collections::HashSet::new(),
+            list_select_anchor: None,
             list_width: 340.0,
             list_panel_left: 0.0,
             todo_line: String::new(),
@@ -220,6 +245,9 @@ impl MailboxApp {
             avatar_rx,
             bg_tx,
             bg_rx,
+            busy: BusyFlags::default(),
+            exit_after_webview: false,
+            last_sync_at: Instant::now(),
         };
         app.reload_settings_fields();
         app.refresh_folders()?;
@@ -422,6 +450,7 @@ impl MailboxApp {
         );
         self.status = pending.clone();
         self.mail_test_feedback = pending;
+        self.busy.oauth = true;
         thread::spawn(move || {
             let result =
                 oauth::oauth_sign_in(oauth, mail_provider, &creds).map_err(|e| e.to_string());
@@ -501,12 +530,143 @@ impl MailboxApp {
         self.start_sync(true);
     }
 
+    /// Nav account avatar: switch account (same id just refreshes edit fields).
+    pub(crate) fn on_account_avatar_click(&mut self, id: &str) {
+        if self.account_id != id {
+            self.clear_list_multi_select();
+        }
+        self.switch_account(id);
+    }
+
+    pub(crate) fn toggle_list_multi_select(&mut self) {
+        if self.list_multi_select {
+            self.clear_list_multi_select();
+            if self.status.contains("Select messages") {
+                self.status = "Ready".into();
+            }
+        } else {
+            self.list_multi_select = true;
+            self.list_selected.clear();
+            self.list_select_anchor = None;
+            self.status =
+                "Select messages — Shift+↑/↓, then Del to trash (Esc to finish)".into();
+        }
+    }
+
+    pub(crate) fn clear_list_multi_select(&mut self) {
+        self.list_multi_select = false;
+        self.list_selected.clear();
+        self.list_select_anchor = None;
+    }
+
+    pub(crate) fn toggle_list_message_selected(&mut self, id: &MessageId) {
+        if self.list_selected.contains(id) {
+            self.list_selected.remove(id);
+        } else {
+            self.list_selected.insert(id.clone());
+        }
+        self.list_select_anchor = None;
+        // Nothing checked → leave multi-select so mid-list shows sender pictures again.
+        if self.list_multi_select && self.list_selected.is_empty() {
+            self.clear_list_multi_select();
+            if self.status.contains("Select messages") || self.status.contains("Selected ") {
+                self.status = "Ready".into();
+            }
+        }
+    }
+
+    /// Select every message currently shown in the mid list (Ctrl/Cmd+A).
+    pub(crate) fn select_all_visible_messages(&mut self) {
+        let indices = self.visible_envelope_indices();
+        if indices.is_empty() {
+            self.status = "No messages to select".into();
+            return;
+        }
+        self.list_multi_select = true;
+        self.list_select_anchor = Some(0);
+        self.list_selected.clear();
+        for &ei in &indices {
+            if let Some(e) = self.envelopes.get(ei) {
+                self.list_selected.insert(e.id.clone());
+            }
+        }
+        let n = self.list_selected.len();
+        self.status = format!("Selected {n} — Del to trash, Esc to clear");
+    }
+
+    /// Envelope indices currently shown in the mid list (respects Stak filter).
+    fn visible_envelope_indices(&self) -> Vec<usize> {
+        if let Some(stak_id) = self.selected_stak.as_deref() {
+            self.envelopes
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| crate::staks::envelope_in_stak(e, stak_id))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            (0..self.envelopes.len()).collect()
+        }
+    }
+
+    /// Move focus by `delta` rows. With Shift, enter/extend multi-select range.
+    fn navigate_list(&mut self, delta: isize, extend: bool) {
+        let indices = self.visible_envelope_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let cur_vis = self
+            .selected_message
+            .as_ref()
+            .and_then(|id| {
+                indices
+                    .iter()
+                    .position(|&i| self.envelopes.get(i).is_some_and(|e| &e.id == id))
+            })
+            .unwrap_or(0);
+        let next = (cur_vis as isize + delta).clamp(0, indices.len() as isize - 1) as usize;
+
+        if extend {
+            if !self.list_multi_select {
+                self.list_multi_select = true;
+                self.list_selected.clear();
+                self.status =
+                    "Select messages — Shift+↑/↓, then Del to trash (Esc to finish)".into();
+            }
+            if self.list_select_anchor.is_none() {
+                self.list_select_anchor = Some(cur_vis);
+                // Include the starting row in the range.
+                if let Some(&ei) = indices.get(cur_vis) {
+                    if let Some(e) = self.envelopes.get(ei) {
+                        self.list_selected.insert(e.id.clone());
+                    }
+                }
+            }
+            let anchor = self.list_select_anchor.unwrap_or(cur_vis);
+            let lo = anchor.min(next);
+            let hi = anchor.max(next);
+            self.list_selected.clear();
+            for vis in lo..=hi {
+                if let Some(&ei) = indices.get(vis) {
+                    if let Some(e) = self.envelopes.get(ei) {
+                        self.list_selected.insert(e.id.clone());
+                    }
+                }
+            }
+        } else {
+            self.list_select_anchor = None;
+        }
+
+        let id = self.envelopes[indices[next]].id.clone();
+        let _ = self.open_id(&id);
+    }
+
     pub(crate) fn switch_account(&mut self, id: &str) {
         if self.account_id == id {
             self.editing_account_id = id.to_string();
             self.reload_settings_fields();
             return;
         }
+        self.clear_list_multi_select();
         self.account_id = id.to_string();
         self.editing_account_id = id.to_string();
         self.selected_stak = None;
@@ -617,6 +777,7 @@ and paste it here."
         let pending = format!("Testing {proto} login for {label}…");
         self.status = pending.clone();
         self.mail_test_feedback = pending;
+        self.busy.mail_test = true;
         thread::spawn(move || {
             let credential = match oauth::resolve_mail_credential(
                 &account,
@@ -649,9 +810,25 @@ and paste it here."
         self.start_move_messages(vec![id], kind);
     }
 
-    /// Archive or trash every message currently shown in the mid list.
+    /// Archive or trash mid-list selection (multi-select) or every visible row.
     pub(crate) fn move_listed_messages(&mut self, kind: SpecialFolderKind) {
-        let ids: Vec<MessageId> = if let Some(stak_id) = self.selected_stak.as_deref() {
+        let ids: Vec<MessageId> = if self.list_multi_select {
+            let visible: std::collections::HashSet<&MessageId> =
+                if let Some(stak_id) = self.selected_stak.as_deref() {
+                    self.envelopes
+                        .iter()
+                        .filter(|e| crate::staks::envelope_in_stak(e, stak_id))
+                        .map(|e| &e.id)
+                        .collect()
+                } else {
+                    self.envelopes.iter().map(|e| &e.id).collect()
+                };
+            self.list_selected
+                .iter()
+                .filter(|id| visible.contains(id))
+                .cloned()
+                .collect()
+        } else if let Some(stak_id) = self.selected_stak.as_deref() {
             self.envelopes
                 .iter()
                 .filter(|e| crate::staks::envelope_in_stak(e, stak_id))
@@ -661,13 +838,20 @@ and paste it here."
             self.envelopes.iter().map(|e| e.id.clone()).collect()
         };
         if ids.is_empty() {
-            self.status = "No messages to move".into();
+            self.status = if self.list_multi_select {
+                "Check at least one message first".into()
+            } else {
+                "No messages to move".into()
+            };
             return;
         }
         self.start_move_messages(ids, kind);
     }
 
     fn start_move_messages(&mut self, ids: Vec<MessageId>, kind: SpecialFolderKind) {
+        if self.busy.moving() || self.busy.sync {
+            return;
+        }
         let Some(account) = self.selected_account().cloned() else {
             self.status = "Add a mail account in Settings first".into();
             self.open_settings(SettingsSection::Accounts);
@@ -680,6 +864,7 @@ and paste it here."
         let allow_pop3_local = account.protocol == MailProtocol::Pop3;
         let tx = self.bg_tx.clone();
         let n = ids.len();
+        self.busy.set_move(kind);
         self.status = if n == 1 {
             format!("Moving to {}…", kind.label())
         } else {
@@ -719,6 +904,9 @@ and paste it here."
 
     /// Sync mail. `sync_all` downloads every IMAP folder (POP3 is always Inbox only).
     pub(crate) fn start_sync(&mut self, sync_all: bool) {
+        if self.busy.sync {
+            return;
+        }
         let Some(account) = self
             .selected_account()
             .cloned()
@@ -747,6 +935,8 @@ and paste it here."
         let oauth_config = self.config.oauth.clone();
         let tx = self.bg_tx.clone();
         let is_pop3 = account.protocol == MailProtocol::Pop3;
+        self.busy.sync = true;
+        self.last_sync_at = Instant::now();
         self.status = if is_pop3 {
             "Syncing Inbox (POP3)…".into()
         } else if sync_all {
@@ -837,12 +1027,82 @@ and paste it here."
 
     fn refresh_folders(&mut self) -> Result<()> {
         self.folders = self.store.list_folders(&self.account_id)?;
+        // Local virtual folder — snoozed mail stays unread until opened later.
+        let (_, snoozed_unread) = self.store.snoozed_counts(&self.account_id)?;
+        self.folders.push(mailbox_core::Folder {
+            account_id: self.account_id.clone(),
+            name: "Snoozed".into(),
+            path: mailbox_core::SNOOZED_FOLDER_PATH.into(),
+            unread: snoozed_unread,
+            hidden: false,
+        });
+        self.folders
+            .sort_by_key(|f| mailbox_core::types::folder_sort_key(&f.path));
         if self.folders.is_empty() {
             self.selected_folder = "INBOX".into();
         } else if !self.folders.iter().any(|f| f.path == self.selected_folder) {
             self.selected_folder = self.folders[0].path.clone();
         }
         Ok(())
+    }
+
+    /// Snooze open message for later — keeps it unread and hides it from the folder list.
+    pub(crate) fn snooze_current_message(&mut self) {
+        if self.busy.snooze {
+            return;
+        }
+        let Some(id) = self.selected_message.clone() else {
+            self.status = "Select a message first".into();
+            return;
+        };
+        self.busy.snooze = true;
+        let was_snoozed = self.store.is_snoozed(&id).unwrap_or(false);
+        let result = (|| -> Result<()> {
+            if was_snoozed {
+                self.store.set_snoozed(&id, false)?;
+                self.status = "Unsnoozed — back in its folder".into();
+            } else {
+                // Opening marks read; snooze restores unread so it stays “for later”.
+                if self
+                    .open_message
+                    .as_ref()
+                    .is_some_and(|m| m.envelope.seen)
+                {
+                    if self.store.mark_seen(&id, false)? {
+                        if let Some(msg) = self.open_message.as_mut() {
+                            msg.envelope.seen = false;
+                        }
+                        if let Some(env) = self.envelopes.iter_mut().find(|e| e.id == id) {
+                            env.seen = false;
+                        }
+                        let folder = self
+                            .open_message
+                            .as_ref()
+                            .map(|m| m.envelope.folder_path.clone())
+                            .unwrap_or_else(|| self.selected_folder.clone());
+                        self.push_seen_to_server(id.clone(), folder, false);
+                    }
+                }
+                self.store.set_snoozed(&id, true)?;
+                self.status = "Snoozed — left unread for later".into();
+            }
+
+            self.selected_message = None;
+            self.open_message = None;
+            self.mail_body_cache = None;
+            self.mail_webview_req = None;
+            self.selected_stak = None;
+            self.refresh_folders()?;
+            self.refresh_envelopes()?;
+            if let Some(first) = self.envelopes.first().map(|e| e.id.clone()) {
+                let _ = self.open_id(&first);
+            }
+            Ok(())
+        })();
+        self.busy.snooze = false;
+        if let Err(e) = result {
+            self.status = e.to_string();
+        }
     }
 
     pub(crate) fn refresh_envelopes(&mut self) -> Result<()> {
@@ -858,7 +1118,13 @@ and paste it here."
     }
 
     pub(crate) fn rebuild_staks_cache(&mut self) {
+        let had_staks = !self.staks_cache.is_empty();
         self.staks_cache = crate::staks::build_staks(&self.envelopes);
+        // Staks cleared → open Folders so the rail isn’t left collapsed/empty.
+        if had_staks && self.staks_cache.is_empty() {
+            self.folders_section_open = true;
+            self.staks_section_open = false;
+        }
     }
 
     pub(crate) fn open_id(&mut self, id: &MessageId) -> Result<()> {
@@ -869,13 +1135,21 @@ and paste it here."
 
         if let Some(mut msg) = self.store.get_message(id)? {
             if !msg.envelope.seen {
-                self.store.mark_seen(id, true)?;
+                let changed = self.store.mark_seen(id, true)?;
                 msg.envelope.seen = true;
                 // Update list row in place — avoid reloading the whole folder.
                 if let Some(env) = self.envelopes.iter_mut().find(|e| e.id == *id) {
                     env.seen = true;
                 }
                 self.rebuild_staks_cache();
+                if changed {
+                    let _ = self.refresh_folders();
+                    self.push_seen_to_server(
+                        id.clone(),
+                        msg.envelope.folder_path.clone(),
+                        true,
+                    );
+                }
             }
             self.load_remote_images = self.config.ui.allows_remote_images(&msg.envelope.from_addr);
             self.mail_images.clear();
@@ -886,6 +1160,31 @@ and paste it here."
             self.open_message = Some(msg);
         }
         Ok(())
+    }
+
+    /// Best-effort IMAP `\Seen` (background). Local cache is already updated.
+    fn push_seen_to_server(&self, message_id: MessageId, folder_path: String, seen: bool) {
+        let Some(account) = self.selected_account().cloned() else {
+            return;
+        };
+        if account.protocol != MailProtocol::Imap {
+            return;
+        }
+        let oauth_config = self.config.oauth.clone();
+        thread::spawn(move || {
+            let credential = match oauth::resolve_mail_credential(&account, &oauth_config, None) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(error = %e, "mark-seen: no credential");
+                    return;
+                }
+            };
+            if let Err(e) =
+                mark_seen_on_server(&account, &credential, &message_id, &folder_path, seen)
+            {
+                tracing::debug!(error = %e, msg = %message_id, "IMAP mark-seen failed");
+            }
+        });
     }
 
     /// Allow remote images for the open message’s sender (persisted; once per From address).
@@ -942,6 +1241,7 @@ and paste it here."
         while let Ok(msg) = self.bg_rx.try_recv() {
             match msg {
                 BgMsg::AiliakOk { task_id, for_date } => {
+                    self.busy.ailiak = false;
                     self.show_todo = false;
                     let day = for_date.unwrap_or_else(|| "today".into());
                     self.refresh_desk_tasks();
@@ -957,12 +1257,14 @@ and paste it here."
                     }
                 }
                 BgMsg::MailMoved { kind, count } => {
+                    self.busy.clear_move();
                     let label = kind.label();
                     self.status = if count == 1 {
                         format!("Moved 1 message to {label}")
                     } else {
                         format!("Moved {count} messages to {label}")
                     };
+                    self.list_selected.clear();
                     self.open_message = None;
                     self.selected_message = None;
                     self.mail_webview_req = None;
@@ -976,21 +1278,26 @@ and paste it here."
                     }
                 }
                 BgMsg::WhoAmI(s) => {
+                    self.busy.ailiak = false;
                     self.status = format!("Ailiak: signed in as {s}");
                 }
                 BgMsg::MailTest(Ok(s)) => {
+                    self.busy.mail_test = false;
                     self.status = s.clone();
                     self.mail_test_feedback = s;
                 }
                 BgMsg::MailTest(Err(e)) => {
+                    self.busy.mail_test = false;
                     let msg = Self::friendly_mail_test_error(&e);
                     self.status = msg.clone();
                     self.mail_test_feedback = msg;
                 }
                 BgMsg::OAuthSignIn(Ok(result)) => {
+                    self.busy.oauth = false;
                     self.apply_oauth_sign_in(result);
                 }
                 BgMsg::OAuthSignIn(Err(e)) => {
+                    self.busy.oauth = false;
                     let msg = format!("Sign-in: {e}");
                     self.status = msg.clone();
                     self.mail_test_feedback = msg;
@@ -1002,6 +1309,8 @@ and paste it here."
                     folder_path,
                     detail,
                 } => {
+                    self.busy.sync = false;
+                    self.last_sync_at = Instant::now();
                     self.account_id = account_id;
                     self.selected_folder = folder_path.clone();
                     self.status = if detail.is_empty() {
@@ -1034,10 +1343,16 @@ and paste it here."
                 }
                 BgMsg::DeskTasks(tasks) => {
                     self.calendar.loading = false;
+                    self.busy.ailiak = false;
                     self.calendar.tasks = tasks;
                 }
                 BgMsg::Error(e) => {
                     self.calendar.loading = false;
+                    if self.busy.sync {
+                        self.last_sync_at = Instant::now();
+                    }
+                    self.busy.clear_network();
+                    self.busy.snooze = false;
                     let msg = format!("Error: {e}");
                     self.status = msg.clone();
                     self.list_empty_hint = msg;
@@ -1238,6 +1553,7 @@ and paste it here."
         let db_path = self.paths.db_file();
 
         self.status = "Creating Todo on Desk…".into();
+        self.busy.ailiak = true;
         thread::spawn(move || {
             let result = (|| -> Result<(String, Option<String>)> {
                 let mut client = AiliakClient::new(base, token)?;
@@ -1269,6 +1585,7 @@ and paste it here."
         let tag = self.config.ailiak.hashtag.clone();
         let tx = self.bg_tx.clone();
         self.calendar.loading = true;
+        self.busy.ailiak = true;
         thread::spawn(move || {
             let result = (|| -> Result<Vec<DeskTask>> {
                 let mut client = AiliakClient::new(base, token)?;
@@ -1310,6 +1627,7 @@ and paste it here."
         let base = self.config.ailiak.base_url.clone();
         let tx = self.bg_tx.clone();
         self.status = "Testing Ailiak…".into();
+        self.busy.ailiak = true;
         thread::spawn(move || {
             let result = (|| -> Result<String> {
                 let mut client = AiliakClient::new(base, token)?;
@@ -1385,6 +1703,24 @@ Try again, or check that a keyring/secret-service is running."
         Ok(())
     }
 
+    /// Fire a background sync when `ui.auto_sync_mins` elapses.
+    fn tick_auto_sync(&mut self, ctx: &egui::Context) {
+        let mins = self.config.ui.auto_sync_mins;
+        if mins == 0 || self.busy.sync || self.config.accounts.is_empty() {
+            return;
+        }
+        let interval = Duration::from_secs(u64::from(mins) * 60);
+        let elapsed = self.last_sync_at.elapsed();
+        if elapsed >= interval {
+            self.start_sync(false);
+            return;
+        }
+        let remaining = interval.saturating_sub(elapsed);
+        // Wake often enough to stay close to the interval without busy-looping.
+        let wake = remaining.min(Duration::from_secs(60)).max(Duration::from_secs(1));
+        ctx.request_repaint_after(wake);
+    }
+
     fn help_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_help;
         egui::Window::new("Help")
@@ -1394,16 +1730,18 @@ Try again, or check that a keyring/secret-service is running."
                 ui.label(RichText::new("Keyboard").strong());
                 ui.monospace("j / ↓     next message");
                 ui.monospace("k / ↑     previous message");
+                ui.monospace("Shift+↑/↓ extend multi-select in the list");
+                ui.monospace("Ctrl+A    select all visible messages");
                 ui.monospace("/         focus search");
                 ui.monospace("g         sync selected folder");
                 ui.monospace("Shift+G   sync all folders");
                 ui.monospace("d         open Desk in browser");
                 ui.monospace("a         Todo (mail → Ailiak)");
                 ui.monospace("c         calendar (Desk days)");
-                ui.monospace("e         archive current message");
-                ui.monospace("# / Del   trash current message");
+                ui.monospace("e         archive (selection or current)");
+                ui.monospace("# / Del   trash (selection or current)");
                 ui.monospace(",         settings page");
-                ui.monospace("Esc       leave settings");
+                ui.monospace("Esc       leave settings / multi-select");
                 ui.monospace("?         this help");
                 ui.add_space(8.0);
                 ui.label(RichText::new("Todo / slash").strong());
@@ -1444,10 +1782,16 @@ Try again, or check that a keyring/secret-service is running."
         }
 
         let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        if escape && !ctx.wants_keyboard_input() && (self.show_todo || self.show_calendar) {
-            self.show_todo = false;
-            self.show_calendar = false;
-            return;
+        if escape && !ctx.wants_keyboard_input() {
+            if self.list_multi_select {
+                self.toggle_list_multi_select();
+                return;
+            }
+            if self.show_todo || self.show_calendar {
+                self.show_todo = false;
+                self.show_calendar = false;
+                return;
+            }
         }
 
         let slash = ctx.input(|i| {
@@ -1474,6 +1818,14 @@ Try again, or check that a keyring/secret-service is running."
             if i.key_pressed(egui::Key::Comma) {
                 self.open_settings(SettingsSection::Appearance);
             }
+            // Ctrl/Cmd+A — select all mid-list messages (not plain `a` = Todo).
+            if i.key_pressed(egui::Key::A)
+                && (i.modifiers.ctrl || i.modifiers.command)
+                && !i.modifiers.alt
+                && !i.modifiers.shift
+            {
+                self.select_all_visible_messages();
+            }
             if i.key_pressed(egui::Key::D) && !i.modifiers.any() {
                 self.open_desk();
             }
@@ -1484,41 +1836,42 @@ Try again, or check that a keyring/secret-service is running."
                 self.toggle_calendar();
             }
             if i.key_pressed(egui::Key::E) && !i.modifiers.any() {
-                self.move_current_message(SpecialFolderKind::Archive);
+                if self.list_multi_select && !self.list_selected.is_empty() {
+                    self.move_listed_messages(SpecialFolderKind::Archive);
+                } else {
+                    self.move_current_message(SpecialFolderKind::Archive);
+                }
             }
             let trash = i.key_pressed(egui::Key::Delete)
                 || i.events
                     .iter()
                     .any(|ev| matches!(ev, egui::Event::Text(t) if t == "#"));
             if trash {
-                self.move_current_message(SpecialFolderKind::Trash);
+                if self.list_multi_select && !self.list_selected.is_empty() {
+                    self.move_listed_messages(SpecialFolderKind::Trash);
+                } else {
+                    self.move_current_message(SpecialFolderKind::Trash);
+                }
             }
             if i.key_pressed(egui::Key::G) {
                 self.start_sync(i.modifiers.shift);
             }
         });
 
-        let delta = ctx.input(|i| {
-            if i.key_pressed(egui::Key::J) || i.key_pressed(egui::Key::ArrowDown) {
-                Some(1isize)
-            } else if i.key_pressed(egui::Key::K) || i.key_pressed(egui::Key::ArrowUp) {
-                Some(-1)
+        let (delta, extend) = ctx.input(|i| {
+            let down = i.key_pressed(egui::Key::J) || i.key_pressed(egui::Key::ArrowDown);
+            let up = i.key_pressed(egui::Key::K) || i.key_pressed(egui::Key::ArrowUp);
+            if down {
+                Some((1isize, i.modifiers.shift))
+            } else if up {
+                Some((-1isize, i.modifiers.shift))
             } else {
                 None
             }
-        });
+        })
+        .map_or((None, false), |(d, e)| (Some(d), e));
         if let Some(delta) = delta {
-            if self.envelopes.is_empty() {
-                return;
-            }
-            let cur = self
-                .selected_message
-                .as_ref()
-                .and_then(|id| self.envelopes.iter().position(|e| &e.id == id))
-                .unwrap_or(0);
-            let next = (cur as isize + delta).clamp(0, self.envelopes.len() as isize - 1) as usize;
-            let id = self.envelopes[next].id.clone();
-            let _ = self.open_id(&id);
+            self.navigate_list(delta, extend);
         }
     }
 }
@@ -1531,12 +1884,28 @@ impl App for MailboxApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Tear down WebKitGTK *before* winit destroys the host window — otherwise
+        // wry’s Drop (destroy + X11 child teardown) can freeze the process on close.
+        if self.exit_after_webview {
+            self.exit_after_webview = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.mail_webview.is_alive() {
+            self.mail_webview.destroy();
+            self.exit_after_webview = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.request_repaint();
+            return;
+        }
+
         self.poll_bg();
         self.poll_avatars(ctx);
         self.mail_images.poll(ctx);
         crate::mail_webview::MailWebView::pump_platform();
         theme::sync_system(ctx, self.config.ui.theme);
         self.handle_keys(ctx);
+        self.tick_auto_sync(ctx);
 
         // Reader sets this while painting; clear first so a missing request hides the view.
         self.mail_webview_req = None;
@@ -1556,6 +1925,7 @@ impl App for MailboxApp {
                 &req.msg_id,
                 &req.body_html,
                 req.load_images,
+                req.dark,
                 req.bounds,
             );
         } else {
@@ -1563,9 +1933,15 @@ impl App for MailboxApp {
         }
         self.mail_webview.poll_links();
 
-        if (!self.status.contains("Ready") && self.status.ends_with('…')) || self.calendar.loading
+        if self.busy.any()
+            || self.calendar.loading
+            || (!self.status.contains("Ready") && self.status.ends_with('…'))
         {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.mail_webview.destroy();
     }
 }

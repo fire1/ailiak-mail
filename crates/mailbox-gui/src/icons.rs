@@ -11,13 +11,16 @@ pub enum FolderIcon {
     Sent,
     Archive,
     Trash,
+    Snoozed,
     Folder,
 }
 
 impl FolderIcon {
     pub fn from_folder(path: &str, name: &str) -> Self {
         let key = format!("{path} {name}").to_lowercase();
-        if key.contains("inbox") {
+        if mailbox_core::is_snoozed_folder(path) {
+            Self::Snoozed
+        } else if key.contains("inbox") {
             Self::Inbox
         } else if key.contains("sent") {
             Self::Sent
@@ -36,6 +39,7 @@ impl FolderIcon {
             Self::Sent => ph::PAPER_PLANE_TILT,
             Self::Archive => ph::ARCHIVE,
             Self::Trash => ph::TRASH,
+            Self::Snoozed => ph::CLOCK_AFTERNOON,
             Self::Folder => ph::FOLDER,
         }
     }
@@ -46,6 +50,7 @@ pub enum ToolbarIcon {
     Sync,
     Archive,
     Trash,
+    Snooze,
 }
 
 impl ToolbarIcon {
@@ -54,12 +59,61 @@ impl ToolbarIcon {
             Self::Sync => ph::ARROWS_CLOCKWISE,
             Self::Archive => ph::ARCHIVE,
             Self::Trash => ph::TRASH,
+            Self::Snooze => ph::CLOCK_AFTERNOON,
         }
     }
 }
 
-/// Icon-only toolbar control (Archive / Trash next to Sync).
-pub fn toolbar_icon_button(ui: &mut Ui, kind: ToolbarIcon, tip: &str, enabled: bool) -> Response {
+/// Icon-only toolbar control (Archive / Trash / Snooze). Shows a spinner when `busy`.
+pub fn toolbar_icon_button(
+    ui: &mut Ui,
+    kind: ToolbarIcon,
+    tip: &str,
+    enabled: bool,
+    busy: bool,
+) -> Response {
+    let mute = theme::mute(ui.ctx());
+    let size = Vec2::splat(28.0);
+    let can_click = enabled && !busy;
+    let sense = if can_click {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let fill = if !can_click {
+        Color32::TRANSPARENT
+    } else if response.is_pointer_button_down_on() {
+        theme::select(ui.ctx())
+    } else if response.hovered() {
+        theme::chip(ui.ctx())
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 6.0, fill);
+    }
+    if busy {
+        ui.put(rect, egui::Spinner::new().size(14.0));
+        response.on_hover_text(format!("{tip} (working…)"))
+    } else {
+        let color = if enabled {
+            mute
+        } else {
+            mute.linear_multiply(0.4)
+        };
+        paint_glyph(ui, rect.shrink(6.0), kind.glyph(), color);
+        response.on_hover_text(tip)
+    }
+}
+
+/// Toggle remote images for the current sender (`IMAGE` on / `IMAGE_BROKEN` off).
+pub fn toolbar_remote_images_button(
+    ui: &mut Ui,
+    images_on: bool,
+    enabled: bool,
+    tip: &str,
+) -> Response {
     let mute = theme::mute(ui.ctx());
     let size = Vec2::splat(28.0);
     let sense = if enabled {
@@ -80,12 +134,17 @@ pub fn toolbar_icon_button(ui: &mut Ui, kind: ToolbarIcon, tip: &str, enabled: b
     if fill != Color32::TRANSPARENT {
         ui.painter().rect_filled(rect, 6.0, fill);
     }
+    let glyph = if images_on {
+        ph::IMAGE
+    } else {
+        ph::IMAGE_BROKEN
+    };
     let color = if enabled {
         mute
     } else {
         mute.linear_multiply(0.4)
     };
-    paint_glyph(ui, rect.shrink(6.0), kind.glyph(), color);
+    paint_glyph(ui, rect.shrink(6.0), glyph, color);
     response.on_hover_text(tip)
 }
 
@@ -110,8 +169,14 @@ pub fn paint_search(ui: &Ui, rect: egui::Rect, color: Color32) {
     paint_glyph(ui, rect, ph::MAGNIFYING_GLASS, color);
 }
 
-/// Top-bar Sync / Calendar: glyph + label.
-pub fn toolbar_button(ui: &mut Ui, kind: ToolbarIcon, label: &str, tip: &str) -> Response {
+/// Top-bar Sync: glyph + label (or spinner while busy).
+pub fn toolbar_button(
+    ui: &mut Ui,
+    kind: ToolbarIcon,
+    label: &str,
+    tip: &str,
+    busy: bool,
+) -> Response {
     let mute = theme::mute(ui.ctx());
     let ink = ui.visuals().text_color();
     let pad = egui::vec2(8.0, 4.0);
@@ -125,8 +190,11 @@ pub fn toolbar_button(ui: &mut Ui, kind: ToolbarIcon, label: &str, tip: &str) ->
         pad.x * 2.0 + icon + ui.spacing().icon_spacing + galley.size().x,
         (pad.y * 2.0 + icon.max(galley.size().y)).max(24.0),
     );
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let fill = if response.is_pointer_button_down_on() {
+    let sense = if busy { Sense::hover() } else { Sense::click() };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let fill = if busy {
+        theme::select(ui.ctx())
+    } else if response.is_pointer_button_down_on() {
         theme::select(ui.ctx())
     } else if response.hovered() {
         theme::chip(ui.ctx())
@@ -143,7 +211,11 @@ pub fn toolbar_button(ui: &mut Ui, kind: ToolbarIcon, label: &str, tip: &str) ->
         )),
         Vec2::splat(icon),
     );
-    paint_glyph(ui, icon_rect, kind.glyph(), mute);
+    if busy {
+        ui.put(icon_rect, egui::Spinner::new().size(icon));
+    } else {
+        paint_glyph(ui, icon_rect, kind.glyph(), mute);
+    }
     ui.painter().galley(
         ui.painter().round_pos_to_pixels(Pos2::new(
             icon_rect.right() + ui.spacing().icon_spacing,
@@ -152,16 +224,122 @@ pub fn toolbar_button(ui: &mut Ui, kind: ToolbarIcon, label: &str, tip: &str) ->
         galley,
         ink,
     );
-    response.on_hover_text(tip)
+    response.on_hover_text(if busy {
+        format!("{tip} (working…)")
+    } else {
+        tip.to_string()
+    })
+}
+
+/// Text button that shows a trailing spinner while `busy`.
+pub fn busy_text_button(ui: &mut Ui, label: &str, busy: bool) -> Response {
+    if busy {
+        ui.add_enabled_ui(false, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.label(label);
+            });
+        })
+        .response
+    } else {
+        ui.button(label)
+    }
 }
 
 pub fn paint_panel_toggle(ui: &Ui, rect: egui::Rect, collapsed: bool, color: Color32) {
+    // Caret direction: collapsed rail → expand; open rail → collapse.
     let glyph = if collapsed {
-        ph::SIDEBAR
+        ph::CARET_RIGHT
     } else {
-        ph::SIDEBAR_SIMPLE
+        ph::CARET_LEFT
     };
     paint_glyph(ui, rect, glyph, color);
+}
+
+/// Soft unread pill — same tint family as the selected-row background.
+pub fn paint_count_badge_at(ui: &Ui, badge_rect: egui::Rect, count: u32) {
+    if count == 0 {
+        return;
+    }
+    let label = if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
+    };
+    let fg = theme::accent(ui.ctx());
+    let font = FontId::proportional(10.0);
+    let galley = ui.fonts(|f| f.layout_no_wrap(label, font, fg));
+    ui.painter()
+        .rect_filled(badge_rect, badge_rect.height() * 0.5, theme::select(ui.ctx()));
+    let text_pos = ui
+        .painter()
+        .round_pos_to_pixels(badge_rect.center() - galley.size() * 0.5);
+    ui.painter().galley(text_pos, galley, fg);
+}
+
+pub fn count_badge_size(ui: &Ui, count: u32) -> Vec2 {
+    let label = if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
+    };
+    let font = FontId::proportional(10.0);
+    let galley = ui.fonts(|f| f.layout_no_wrap(label, font, Color32::WHITE));
+    let pad_x = 5.0;
+    let pad_y = 1.0;
+    Vec2::new(
+        (galley.size().x + pad_x * 2.0).max(16.0),
+        (galley.size().y + pad_y * 2.0).max(14.0),
+    )
+}
+
+/// Unread count pill — right side when expanded, top-right corner when collapsed.
+pub fn paint_count_badge(ui: &Ui, row: egui::Rect, count: u32, collapsed: bool) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    let size = count_badge_size(ui, count);
+    let badge_rect = if collapsed {
+        egui::Rect::from_center_size(
+            Pos2::new(row.right() - size.x * 0.35, row.top() + size.y * 0.35),
+            size,
+        )
+    } else {
+        egui::Rect::from_center_size(
+            Pos2::new(row.right() - 6.0 - size.x * 0.5, row.center().y),
+            size,
+        )
+    };
+    paint_count_badge_at(ui, badge_rect, count);
+    if collapsed {
+        0.0
+    } else {
+        size.x + 10.0
+    }
+}
+
+/// Paint a checkbox glyph into `rect` (no interaction).
+pub fn paint_selection_checkbox(ui: &Ui, rect: egui::Rect, checked: bool) {
+    let accent = theme::accent(ui.ctx());
+    let mute = theme::mute(ui.ctx());
+    let box_size = rect.width().min(rect.height()) * 0.85;
+    let box_rect = egui::Rect::from_center_size(rect.center(), Vec2::splat(box_size));
+    if checked {
+        ui.painter().rect_filled(box_rect, 3.0, accent);
+        let ink = Color32::WHITE;
+        let s = box_size;
+        let c = box_rect.center();
+        let p1 = Pos2::new(c.x - s * 0.22, c.y + s * 0.02);
+        let p2 = Pos2::new(c.x - s * 0.04, c.y + s * 0.18);
+        let p3 = Pos2::new(c.x + s * 0.24, c.y - s * 0.16);
+        ui.painter()
+            .line_segment([p1, p2], egui::Stroke::new(1.8_f32, ink));
+        ui.painter()
+            .line_segment([p2, p3], egui::Stroke::new(1.8_f32, ink));
+    } else {
+        ui.painter()
+            .rect_stroke(box_rect, 3.0, egui::Stroke::new(1.5_f32, mute));
+    }
 }
 
 /// Icon-only or icon+label nav button spanning the full column width.
@@ -169,6 +347,7 @@ pub fn folder_nav_button(
     ui: &mut Ui,
     kind: FolderIcon,
     label: &str,
+    badge: u32,
     selected: bool,
     collapsed: bool,
 ) -> Response {
@@ -200,22 +379,25 @@ pub fn folder_nav_button(
     );
     paint(ui, icon_rect, kind, icon_color);
 
+    let badge_reserve = paint_count_badge(ui, rect, badge, collapsed);
+
     if !collapsed {
         let text_pos = ui
             .painter()
             .round_pos_to_pixels(Pos2::new(rect.left() + 30.0, rect.center().y));
         let font = theme::nav_font(12.0);
-        let color = if selected {
-            accent
-        } else {
-            ui.visuals().text_color()
-        };
-        ui.painter()
-            .text(text_pos, Align2::LEFT_CENTER, label, font, color);
+        let color = if selected { accent } else { mute };
+        let text_max_w = (rect.right() - badge_reserve - 4.0 - text_pos.x).max(0.0);
+        theme::paint_truncated_line(ui, text_pos, label, font, color, text_max_w);
     }
 
-    if collapsed {
-        response.on_hover_text(label)
+    let tip = if badge > 0 {
+        format!("{label} · {badge} unread")
+    } else {
+        label.to_string()
+    };
+    if collapsed || badge > 0 {
+        response.on_hover_text(tip)
     } else {
         response
     }
@@ -307,7 +489,7 @@ fn nav_action_row(
         } else if selected {
             accent
         } else {
-            ui.visuals().text_color()
+            mute
         };
         ui.painter()
             .text(text_pos, Align2::LEFT_CENTER, label, font, text_color);
@@ -377,6 +559,7 @@ pub fn help_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
 pub fn stak_nav_button(
     ui: &mut Ui,
     label: &str,
+    badge: u32,
     selected: bool,
     collapsed: bool,
     brand: Option<&egui::TextureHandle>,
@@ -397,10 +580,11 @@ pub fn stak_nav_button(
     ui.painter().rect_filled(rect, 6.0, fill);
 
     let icon_size = crate::brand_logos::DISPLAY_SIZE;
+    let icon_left = 10.0;
     let icon_center = if collapsed {
         rect.center()
     } else {
-        Pos2::new(rect.left() + 10.0 + icon_size * 0.5, rect.center().y)
+        Pos2::new(rect.left() + icon_left + icon_size * 0.5, rect.center().y)
     };
     let icon_rect = egui::Rect::from_center_size(
         ui.painter().round_pos_to_pixels(icon_center),
@@ -415,19 +599,24 @@ pub fn stak_nav_button(
         paint_glyph(ui, icon_rect, ph::STACK, icon_color);
     }
 
+    let badge_reserve = paint_count_badge(ui, rect, badge, collapsed);
+
     if !collapsed {
+        // Gap between brand mark and label (was ~2px; needs room to breathe).
+        let text_left = icon_left + icon_size + 10.0;
         let text_pos = ui
             .painter()
-            .round_pos_to_pixels(Pos2::new(rect.left() + 30.0, rect.center().y));
+            .round_pos_to_pixels(Pos2::new(rect.left() + text_left, rect.center().y));
         let font = theme::nav_font(12.0);
-        let color = if selected {
-            accent
-        } else {
-            ui.visuals().text_color()
-        };
-        let text_max_w = (rect.right() - 8.0 - text_pos.x).max(0.0);
+        let color = if selected { accent } else { mute };
+        let text_max_w = (rect.right() - badge_reserve.max(8.0) - text_pos.x).max(0.0);
         theme::paint_truncated_line(ui, text_pos, label, font, color, text_max_w);
     }
 
-    response.on_hover_text(label)
+    let tip = if badge > 0 {
+        format!("{label} · {badge} unread")
+    } else {
+        label.to_string()
+    };
+    response.on_hover_text(tip)
 }

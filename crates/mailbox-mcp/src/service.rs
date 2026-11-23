@@ -120,7 +120,8 @@ impl MailboxService {
         if store.get_message(&id)?.is_none() {
             return Err(anyhow!("message not found: {id}"));
         }
-        store.mark_seen(&id, seen)
+        store.mark_seen(&id, seen)?;
+        Ok(())
     }
 
     pub fn sync_folder(

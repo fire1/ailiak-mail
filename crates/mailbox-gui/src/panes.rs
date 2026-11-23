@@ -28,10 +28,11 @@ impl MailboxApp {
         ui.allocate_new_ui(UiBuilder::new().max_rect(left), |ui| {
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 // SVG wordmark — mark box follows accent (same as ailiak.com).
+                // Keep shorter than the bar so Align::Center can sit it optically mid-row.
                 let accent = theme::resolve_accent(&self.config.ui.accent).color;
                 let dark = ui.visuals().dark_mode;
                 self.ailiak_logo.sync(accent, dark);
-                let h = 28.0_f32.min(row_h);
+                let h = 22.0_f32.min((row_h - 6.0).max(16.0));
                 let w = h * (292.0 / 72.0);
                 let resp = ui
                     .add(
@@ -46,9 +47,9 @@ impl MailboxApp {
             });
         });
 
-        // Right: Archive / Trash (current message) + Sync
+        // Right: Archive / Trash / remote images / Sync
         let right = Rect::from_min_max(
-            egui::pos2(bar.right() - (bar.width() * 0.28).max(200.0), bar.top()),
+            egui::pos2(bar.right() - (bar.width() * 0.28).max(248.0), bar.top()),
             bar.right_bottom(),
         );
         ui.allocate_new_ui(UiBuilder::new().max_rect(right), |ui| {
@@ -58,17 +59,56 @@ impl MailboxApp {
                     icons::ToolbarIcon::Sync,
                     "Sync",
                     "List folders + download the selected folder (g)",
+                    self.busy.sync,
                 )
                 .clicked()
                 {
                     self.start_sync(false);
                 }
                 let has_msg = self.open_message.is_some();
+                let images_on = self.load_remote_images;
+                let from = self
+                    .open_message
+                    .as_ref()
+                    .map(|m| m.envelope.from_addr.clone())
+                    .unwrap_or_default();
+                let threat_n = self
+                    .cached_mail_body()
+                    .map(|b| b.image_threats.len())
+                    .unwrap_or(0);
+                let threat_note = if threat_n > 0 {
+                    format!(
+                        "\n{threat_n} tracking-like image(s) stay blocked for privacy"
+                    )
+                } else {
+                    String::new()
+                };
+                let images_tip = if !has_msg {
+                    "Open a message to allow or block remote images for its sender".to_string()
+                } else if images_on {
+                    format!(
+                        "Remote images ON for {from}\nClick to block images from this sender (including later mail){threat_note}"
+                    )
+                } else {
+                    format!(
+                        "Remote images OFF for {from}\nClick to always load images from this sender (benign images only; tracking-like stay blocked){threat_note}"
+                    )
+                };
+                if icons::toolbar_remote_images_button(ui, images_on, has_msg, &images_tip)
+                    .clicked()
+                {
+                    if images_on {
+                        self.block_remote_images_for_sender();
+                    } else {
+                        self.allow_remote_images_for_sender();
+                    }
+                }
                 if icons::toolbar_icon_button(
                     ui,
                     icons::ToolbarIcon::Trash,
                     "Trash current message (#)",
-                    has_msg,
+                    has_msg && !self.busy.moving(),
+                    self.busy.trash,
                 )
                 .clicked()
                 {
@@ -78,11 +118,28 @@ impl MailboxApp {
                     ui,
                     icons::ToolbarIcon::Archive,
                     "Archive current message (e)",
-                    has_msg,
+                    has_msg && !self.busy.moving(),
+                    self.busy.archive,
                 )
                 .clicked()
                 {
                     self.move_current_message(mailbox_core::SpecialFolderKind::Archive);
+                }
+                let snooze_tip = if mailbox_core::is_snoozed_folder(&self.selected_folder) {
+                    "Unsnooze — put back in its folder (stays as-is)"
+                } else {
+                    "Snooze — hide for later without marking read"
+                };
+                if icons::toolbar_icon_button(
+                    ui,
+                    icons::ToolbarIcon::Snooze,
+                    snooze_tip,
+                    has_msg && !self.busy.snooze,
+                    self.busy.snooze,
+                )
+                .clicked()
+                {
+                    self.snooze_current_message();
                 }
             });
         });
@@ -186,7 +243,8 @@ impl MailboxApp {
         let body_h = (ui.available_height() - footer_h).max(48.0);
 
         let paper = theme::paper(ui.ctx());
-        let side_inset = 8.0; // match SidePanel left/right margin + footer bleed
+        // Match SidePanel left margin; right is 0 so the scrollbar sits on the seam.
+        let side_inset = 8.0;
 
         ScrollArea::vertical()
             .id_salt("nav_scroll_v5")
@@ -206,8 +264,8 @@ impl MailboxApp {
                         bottom: 8.0,
                     })
                     .outer_margin(egui::Margin {
-                        left: -side_inset,
-                        right: -side_inset,
+                        left: -side_inset, // cancel SidePanel left margin → paper to edge
+                        right: 0.0,
                         top: -8.0, // cancel SidePanel top margin so paper hits the edge
                         bottom: 0.0,
                     })
@@ -231,7 +289,8 @@ impl MailboxApp {
                                         .family(theme::nav_family())
                                         .color(mute),
                                 );
-                                ui.add_space(ui.available_width() - 28.0);
+                                // Leave 8px so the collapse control isn't flush to the edge.
+                                ui.add_space((ui.available_width() - 28.0 - 8.0).max(0.0));
                                 if icons::collapse_button(ui, false, mute).clicked() {
                                     toggle_collapse = true;
                                 }
@@ -308,108 +367,121 @@ impl MailboxApp {
 
                 ui.add_space(8.0);
 
-                // Staks — sender/domain stacks from the current folder cache.
+                // Staks / Folders — accordion (only one open). Honored in icon rail too.
                 let selected_stak = self.selected_stak.clone();
-                if !self.staks_cache.is_empty() {
-                    if !collapsed {
-                        ui.label(
-                            RichText::new("Staks")
-                                .small()
-                                .family(theme::nav_family())
-                                .color(mute),
-                        );
-                        ui.add_space(4.0);
-                    }
-                    for stak in &self.staks_cache {
-                        let selected = selected_stak.as_deref() == Some(stak.id.as_str());
-                        let label = if stak.unread > 0 {
-                            format!("{} {}", stak.label, stak.unread)
+                let folders_unread: u32 = folders.iter().map(|f| f.unread).sum();
+                let has_staks = !self.staks_cache.is_empty();
+
+                if has_staks {
+                    let open = self.staks_section_open;
+                    let header = nav_accordion_header(
+                        ui,
+                        "Staks",
+                        open,
+                        0, // no section badge — counts clutter the rail
+                        mute,
+                        collapsed,
+                        None,
+                    );
+                    if header.toggle {
+                        if open {
+                            self.staks_section_open = false;
                         } else {
-                            stak.label.clone()
-                        };
-                        let brand = brand_logos::texture(ui.ctx(), &stak.id);
-                        if icons::stak_nav_button(
-                            ui,
-                            &label,
-                            selected,
-                            collapsed,
-                            brand.as_ref(),
-                        )
-                        .clicked()
-                        {
-                            clicked_stak = Some(stak.id.clone());
+                            self.staks_section_open = true;
+                            self.folders_section_open = false;
                         }
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(2.0);
+                    if self.staks_section_open {
+                        for stak in &self.staks_cache {
+                            let selected = selected_stak.as_deref() == Some(stak.id.as_str());
+                            let brand = brand_logos::texture(ui.ctx(), &stak.id);
+                            if icons::stak_nav_button(
+                                ui,
+                                &stak.label,
+                                0, // no per-stak badge
+                                selected,
+                                collapsed,
+                                brand.as_ref(),
+                            )
+                            .clicked()
+                            {
+                                clicked_stak = Some(stak.id.clone());
+                            }
+                        }
+                        ui.add_space(8.0);
+                    } else {
+                        ui.add_space(4.0);
+                    }
                 }
 
-                if !collapsed {
+                {
                     let (is_pop3, is_abv) = self
                         .selected_account()
                         .map(|a| (a.is_pop3(), a.looks_like_abv()))
                         .unwrap_or((false, false));
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Folders")
-                                .small()
-                                .family(theme::nav_family())
-                                .color(mute),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let manage = ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new(egui_phosphor::regular::GEAR)
-                                            .family(theme::icon_family())
-                                            .size(12.0)
-                                            .color(mute),
-                                    )
-                                    .frame(false),
-                                )
-                                .on_hover_text("Manage folders");
-                            if manage.clicked() {
-                                open_folders_settings = true;
-                            }
-                            let sync_tip = mailbox_core::nav_sync_tip(is_pop3, is_abv);
-                            let sync = ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new(egui_phosphor::regular::ARROWS_CLOCKWISE)
-                                            .family(theme::icon_family())
-                                            .size(12.0)
-                                            .color(mute),
-                                    )
-                                    .frame(false),
-                                )
-                                .on_hover_text(sync_tip);
-                            if sync.clicked() {
-                                sync_folders = Some(!is_pop3);
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
+                    let sync_tip = mailbox_core::nav_sync_tip(is_pop3, is_abv);
+                    let open = self.folders_section_open;
+                    let header = nav_accordion_header(
+                        ui,
+                        "Folders",
+                        open,
+                        folders_unread,
+                        mute,
+                        collapsed,
+                        if collapsed {
+                            None
+                        } else {
+                            Some(FolderHeaderActions {
+                                sync_tip,
+                                sync_busy: self.busy.sync,
+                            })
+                        },
+                    );
+                    if header.toggle {
+                        if open {
+                            self.folders_section_open = false;
+                        } else {
+                            self.folders_section_open = true;
+                            self.staks_section_open = false;
+                        }
+                    }
+                    if header.manage {
+                        open_folders_settings = true;
+                    }
+                    if header.sync {
+                        sync_folders = Some(!is_pop3);
+                    }
+                    ui.add_space(2.0);
                 }
 
-                for folder in &folders {
-                    let selected = folder.path == selected_folder;
-                    let label = if folder.unread > 0 {
-                        format!("{} ({})", folder.name, folder.unread)
-                    } else {
-                        folder.name.clone()
-                    };
-                    let kind = FolderIcon::from_folder(&folder.path, &folder.name);
-                    if icons::folder_nav_button(ui, kind, &label, selected, collapsed).clicked() {
-                        clicked_folder = Some(folder.path.clone());
+                if self.folders_section_open {
+                    for folder in &folders {
+                        let selected = folder.path == selected_folder;
+                        let kind = FolderIcon::from_folder(&folder.path, &folder.name);
+                        if icons::folder_nav_button(
+                            ui,
+                            kind,
+                            &folder.name,
+                            folder.unread,
+                            selected,
+                            collapsed,
+                        )
+                        .clicked()
+                        {
+                            clicked_folder = Some(folder.path.clone());
+                        }
                     }
                 }
             });
 
         // Tools strip — same paper as the accounts band / mail reader.
+        // Bleed left into the SidePanel margin; right is already flush (margin 0).
         let max = ui.max_rect();
         let top = ui.cursor().top();
         let footer_bg = Rect::from_min_max(
             egui::pos2(max.left() - side_inset, top),
-            egui::pos2(max.right() + side_inset, max.bottom()),
+            egui::pos2(max.right(), max.bottom()),
         );
         ui.painter().rect_filled(footer_bg, 0.0, paper);
 
@@ -440,12 +512,14 @@ impl MailboxApp {
             self.folders_collapsed = !self.folders_collapsed;
         }
         if let Some(id) = switch_to {
-            self.switch_account(&id);
+            self.on_account_avatar_click(&id);
         }
         if add_account {
+            self.clear_list_multi_select();
             self.start_new_account();
         }
         if let Some(path) = clicked_folder {
+            self.clear_list_multi_select();
             self.selected_folder = path;
             self.selected_stak = None;
             self.selected_message = None;
@@ -457,6 +531,7 @@ impl MailboxApp {
             }
         }
         if let Some(stak_id) = clicked_stak {
+            self.clear_list_multi_select();
             if self.selected_stak.as_deref() == Some(stak_id.as_str()) {
                 self.selected_stak = None;
             } else {
@@ -533,21 +608,53 @@ impl MailboxApp {
         } else {
             self.envelopes.len()
         };
+        let multi = self.list_multi_select;
+        let selected_n = if multi {
+            self.list_selected.len()
+        } else {
+            0
+        };
         ui.horizontal(|ui| {
+            let title = if multi {
+                if selected_n == 0 {
+                    format!("{list_title} · select")
+                } else {
+                    format!("{list_title} · {selected_n} selected")
+                }
+            } else {
+                list_title.clone()
+            };
             ui.label(
-                RichText::new(&list_title)
+                RichText::new(title)
                     .strong()
                     .size(14.0)
                     .family(theme::nav_family())
                     .color(theme::ink(ui.ctx())),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let enabled = list_count > 0;
+                // Panel right margin is 0 (scrollbar flush); keep header icons inset.
+                ui.add_space(10.0);
+                let enabled = if multi {
+                    selected_n > 0 && !self.busy.moving()
+                } else {
+                    list_count > 0 && !self.busy.moving()
+                };
+                let trash_tip = if multi {
+                    "Trash selected messages"
+                } else {
+                    "Trash all messages in this list"
+                };
+                let archive_tip = if multi {
+                    "Archive selected messages"
+                } else {
+                    "Archive all messages in this list"
+                };
                 if icons::toolbar_icon_button(
                     ui,
                     icons::ToolbarIcon::Trash,
-                    "Trash all messages in this list",
+                    trash_tip,
                     enabled,
+                    self.busy.trash,
                 )
                 .clicked()
                 {
@@ -556,8 +663,9 @@ impl MailboxApp {
                 if icons::toolbar_icon_button(
                     ui,
                     icons::ToolbarIcon::Archive,
-                    "Archive all messages in this list",
+                    archive_tip,
                     enabled,
+                    self.busy.archive,
                 )
                 .clicked()
                 {
@@ -578,12 +686,17 @@ impl MailboxApp {
             (0..self.envelopes.len()).collect()
         };
         let selected = self.selected_message.clone();
+        let multi = self.list_multi_select;
         let mut open: Option<MessageId> = None;
+        let mut toggle_sel: Option<MessageId> = None;
+        // Avatar click while not in multi-select → enter mode and check this id.
+        let mut start_multi: Option<MessageId> = None;
 
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.set_max_width(col_w);
+                // Stay within the ScrollArea inner width (solid bar already
+                // reserved a gutter). Never force the outer panel `col_w`.
                 if env_indices.is_empty() {
                     ui.label(RichText::new("No messages").color(theme::mute(ui.ctx())));
                     ui.add_space(6.0);
@@ -605,12 +718,11 @@ impl MailboxApp {
                         .map(|a| a.protocol == mailbox_core::config::MailProtocol::Pop3)
                         .unwrap_or(false);
                     ui.horizontal(|ui| {
-                        if ui.button("Sync now").clicked() {
+                        if icons::busy_text_button(ui, "Sync now", self.busy.sync).clicked() {
                             self.start_sync(false);
                         }
                         if !is_pop3
-                            && ui
-                                .button("Sync all folders")
+                            && icons::busy_text_button(ui, "Sync all folders", self.busy.sync)
                                 .on_hover_text("Download every IMAP folder")
                                 .clicked()
                         {
@@ -651,6 +763,7 @@ impl MailboxApp {
                     }
 
                     let is_sel = selected.as_ref() == Some(&env_id);
+                    let is_checked = multi && self.list_selected.contains(&env_id);
                     let from = if from_name.is_empty() {
                         from_addr.as_str()
                     } else {
@@ -685,53 +798,154 @@ impl MailboxApp {
                         self.resolve_avatar(ui.ctx(), &from_addr, &from_name)
                     };
 
-                    let row = egui::Frame::none()
-                        .fill(if is_sel {
-                            theme::select(ui.ctx())
-                        } else {
-                            Color32::TRANSPARENT
-                        })
+                    let row_fill = if multi && is_checked {
+                        theme::select(ui.ctx())
+                    } else if is_sel && !multi {
+                        theme::select(ui.ctx())
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+
+                    let mut avatar_clicked = false;
+                    let mut body_clicked = false;
+                    let _row = egui::Frame::none()
+                        .fill(row_fill)
                         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                         .rounding(8.0)
                         .show(ui, |ui| {
-                            ui.set_width(col_w - 4.0);
+                            // available_width is already inside this Frame's margins —
+                            // do not use outer `col_w` or rows overflow and egui shifts
+                            // the floating scrollbar inward (gap before the panel edge).
+                            ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
-                                avatars::avatar_widget(ui, &avatar, brand_logos::LIST_SIZE);
+                                let size = brand_logos::LIST_SIZE;
+                                // Own click target — must not share Sense with the row body,
+                                // or Frame.interact steals the avatar click.
+                                let (av_rect, av_resp) =
+                                    ui.allocate_exact_size(egui::vec2(size, size), Sense::click());
+                                // Only checked rows become checkboxes; others keep sender pictures.
+                                if is_checked {
+                                    icons::paint_selection_checkbox(ui, av_rect, true);
+                                } else {
+                                    match &avatar {
+                                        crate::avatars::AvatarView::Image(tex) => {
+                                            egui::Image::new((tex.id(), egui::vec2(size, size)))
+                                                .rounding(egui::Rounding::same(
+                                                    (size * 0.22).clamp(4.0, 8.0),
+                                                ))
+                                                .paint_at(ui, av_rect);
+                                        }
+                                        crate::avatars::AvatarView::Initials { letters, fill } => {
+                                            ui.painter().rect_filled(
+                                                av_rect,
+                                                egui::Rounding::same(
+                                                    (size * 0.22).clamp(4.0, 8.0),
+                                                ),
+                                                *fill,
+                                            );
+                                            ui.painter().text(
+                                                av_rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                letters,
+                                                egui::FontId::proportional(
+                                                    (size * 0.4).clamp(8.0, 12.0),
+                                                ),
+                                                if fill.r() as u16
+                                                    + fill.g() as u16
+                                                    + fill.b() as u16
+                                                    > 400
+                                                {
+                                                    Color32::from_rgb(0x2a, 0x35, 0x31)
+                                                } else {
+                                                    Color32::from_rgb(0xf4, 0xf8, 0xf6)
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                                let tip = if is_checked {
+                                    "Uncheck message"
+                                } else {
+                                    "Click picture to multi-select messages"
+                                };
+                                if av_resp.on_hover_text(tip).clicked() {
+                                    avatar_clicked = true;
+                                }
+
                                 ui.add_space(6.0);
-                                ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.add(egui::Label::new(name_style).truncate());
+                                // Labels must be hover-only — default Label sense steals
+                                // clicks so row open only fired on padding gaps.
+                                let label_sense = Sense::hover();
+                                let body = ui
+                                    .vertical(|ui| {
+                                        // Date first (right), then name fills leftover and truncates —
+                                        // avoids the date overflowing into the scrollbar gutter.
                                         ui.with_layout(
                                             Layout::right_to_left(Align::Center),
                                             |ui| {
-                                                ui.label(
-                                                    RichText::new(&date)
-                                                        .small()
-                                                        .color(theme::mute(ui.ctx())),
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(&date)
+                                                            .small()
+                                                            .color(theme::mute(ui.ctx())),
+                                                    )
+                                                    .sense(label_sense),
+                                                );
+                                                ui.add(
+                                                    egui::Label::new(name_style)
+                                                        .truncate()
+                                                        .sense(label_sense),
                                                 );
                                             },
                                         );
-                                    });
-                                    ui.add(egui::Label::new(subject).truncate());
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&snippet)
-                                                .small()
-                                                .color(theme::mute(ui.ctx())),
-                                        )
-                                        .truncate(),
-                                    );
-                                });
+                                        ui.add(
+                                            egui::Label::new(subject)
+                                                .truncate()
+                                                .sense(label_sense),
+                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&snippet)
+                                                    .small()
+                                                    .color(theme::mute(ui.ctx())),
+                                            )
+                                            .truncate()
+                                            .sense(label_sense),
+                                        );
+                                    })
+                                    .response
+                                    .interact(Sense::click());
+                                if body.clicked() {
+                                    body_clicked = true;
+                                }
                             });
                         });
 
-                    if row.response.interact(Sense::click()).clicked() {
-                        open = Some(env_id);
+                    if avatar_clicked {
+                        if multi {
+                            toggle_sel = Some(env_id);
+                        } else {
+                            start_multi = Some(env_id);
+                        }
+                    } else if body_clicked {
+                        if multi {
+                            toggle_sel = Some(env_id);
+                        } else {
+                            open = Some(env_id);
+                        }
                     }
                     ui.add_space(2.0);
                 }
             });
 
+        if let Some(id) = start_multi {
+            if !self.list_multi_select {
+                self.toggle_list_multi_select();
+            }
+            self.toggle_list_message_selected(&id);
+        } else if let Some(id) = toggle_sel {
+            self.toggle_list_message_selected(&id);
+        }
         if let Some(id) = open {
             if let Err(e) = self.open_id(&id) {
                 self.status = e.to_string();
@@ -780,45 +994,35 @@ impl MailboxApp {
 
         let html = msg.body_html.trim();
         let use_webview = !html.is_empty();
-        let has_remote = if use_webview {
-            crate::mail_webview::MailWebView::has_remote_images(html)
-        } else {
-            self.cached_mail_body()
-                .map(|b| b.has_remote_images)
-                .unwrap_or(false)
-        };
-        if has_remote {
-            let from = msg.envelope.from_addr.clone();
-            ui.horizontal(|ui| {
-                if self.load_remote_images {
-                    if ui
-                        .button("Block images from sender")
-                        .on_hover_text(format!(
-                            "Stop loading remote images from {from} (including later mail)"
-                        ))
-                        .clicked()
-                    {
-                        self.block_remote_images_for_sender();
-                    }
-                    ui.label(
-                        RichText::new(format!("Images allowed for {from}"))
-                            .small()
-                            .color(theme::mute(ui.ctx())),
-                    );
-                } else if ui
-                    .button("Always load images from sender…")
-                    .on_hover_text(format!(
-                        "Allow remote images for {from} on this and future messages (may include tracking pixels)"
-                    ))
-                    .clicked()
-                {
-                    self.allow_remote_images_for_sender();
-                }
-            });
-            ui.add_space(8.0);
-        }
-
         let load_images = self.load_remote_images;
+        let threat_n = self
+            .cached_mail_body()
+            .map(|b| b.image_threats.len())
+            .unwrap_or(0);
+        if threat_n > 0 {
+            ui.label(
+                RichText::new(format!(
+                    "{threat_n} tracking-like image(s) blocked for privacy"
+                ))
+                .small()
+                .color(theme::mute(ui.ctx())),
+            );
+            ui.add_space(6.0);
+        } else if use_webview && !load_images {
+            let has_remote = self
+                .cached_mail_body()
+                .is_some_and(|b| b.has_remote_images);
+            if has_remote {
+                ui.label(
+                    RichText::new(
+                        "Remote images blocked until you allow this sender (toolbar image icon).",
+                    )
+                    .small()
+                    .color(theme::mute(ui.ctx())),
+                );
+                ui.add_space(6.0);
+            }
+        }
         if use_webview {
             if let Some(err) = self.mail_webview.last_error.as_ref() {
                 ui.label(
@@ -844,15 +1048,38 @@ impl MailboxApp {
                         }
                     });
             } else {
-                let (rect, _) =
-                    ui.allocate_exact_size(ui.available_size(), Sense::hover());
+                // Use the full remaining reader rect (not a one-shot available_size that
+                // can be tiny before SidePanels finish settling).
+                let rect = ui.available_rect_before_wrap();
+                ui.allocate_rect(rect, Sense::hover());
+                // Theme-matched underlay so recreate/load doesn't flash the wrong color.
+                let dark = ui.visuals().dark_mode;
+                let underlay = if dark {
+                    Color32::BLACK
+                } else {
+                    Color32::WHITE
+                };
+                ui.painter().rect_filled(rect, 0.0, underlay);
+                let loading = self.mail_webview.is_loading(&msg.envelope.id);
+                if loading {
+                    ui.put(
+                        rect,
+                        egui::Spinner::new().size(22.0).color(theme::mute(ui.ctx())),
+                    );
+                    ui.ctx().request_repaint();
+                }
                 // Root viewport points → wry child bounds (logical pixels).
                 self.mail_webview_req = Some(crate::mail_webview::MailWebViewRequest {
                     bounds: rect,
                     msg_id: msg.envelope.id.clone(),
                     body_html: msg.body_html.clone(),
                     load_images,
+                    dark,
                 });
+                // Keep painting until the webview has a stable non-tiny rect.
+                if rect.width() < 80.0 || rect.height() < 80.0 {
+                    ui.ctx().request_repaint();
+                }
             }
         } else {
             let body = self.cached_mail_body().cloned();
@@ -899,7 +1126,12 @@ impl MailboxApp {
                 if close.clicked() {
                     self.show_calendar = false;
                 }
-                if ui
+                if self.busy.ailiak || self.calendar.loading {
+                    let size = egui::vec2(18.0, 18.0);
+                    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+                    ui.put(rect, egui::Spinner::new().size(12.0));
+                    let _ = resp.on_hover_text("Refreshing Desk…");
+                } else if ui
                     .small_button("↻")
                     .on_hover_text("Refresh Desk")
                     .clicked()
@@ -1022,7 +1254,16 @@ impl MailboxApp {
 
         ui.add_space(14.0);
         ui.horizontal(|ui| {
-            if ui
+            if self.busy.ailiak {
+                ui.add_enabled_ui(false, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(
+                            RichText::new("Create on Desk").color(theme::mute(ui.ctx())),
+                        );
+                    });
+                });
+            } else if ui
                 .add(
                     egui::Button::new(RichText::new("Create on Desk").color(Color32::WHITE))
                         .fill(theme::accent(ui.ctx())),
@@ -1128,13 +1369,15 @@ impl MailboxApp {
         {
             let collapsed = self.folders_collapsed;
             // Bottom margin is 0 so the tools strip (Desk/Todo/…) can paint paper to the edge.
+            // Right margin 0 so the ScrollArea scrollbar sits on the panel edge
+            // (content keeps its own side_inset padding inside the scroll).
             let mut side = egui::SidePanel::left("nav_v4")
                 .resizable(!collapsed)
                 .show_separator_line(false)
                 .frame(layout::panel_frame(
                     egui::Margin {
                         left: 8.0,
-                        right: 8.0,
+                        right: 0.0,
                         top: 8.0,
                         bottom: 0.0,
                     },
@@ -1166,11 +1409,20 @@ impl MailboxApp {
         let list_range = 280.0_f32..=520.0;
         self.list_width = self.list_width.clamp(*list_range.start(), *list_range.end());
 
+        // Right margin 0: floating scrollbar flush with the list/reader seam.
         let list_response = egui::SidePanel::left(Id::new("list_v4"))
             .resizable(false)
             .exact_width(self.list_width)
             .show_separator_line(false)
-            .frame(layout::panel_frame(egui::Margin::symmetric(10.0, 8.0), panel))
+            .frame(layout::panel_frame(
+                egui::Margin {
+                    left: 10.0,
+                    right: 0.0,
+                    top: 8.0,
+                    bottom: 8.0,
+                },
+                panel,
+            ))
             .show(ctx, |ui| {
                 layout::begin_panel(ui, panel);
                 self.list_pane(ui);
@@ -1179,9 +1431,12 @@ impl MailboxApp {
 
         self.list_panel_left = list_response.response.rect.left();
         let list_rect = list_response.response.rect;
+        // Seam from exact_width — not response.rect.right(), which can grow if
+        // content overflows and would leave a fake gap past the scrollbar.
+        let seam_x = self.list_panel_left + self.list_width;
         let grab = ctx.style().interaction.resize_grab_radius_side.max(6.0);
         let resize_rect = Rect::from_x_y_ranges(
-            (list_rect.right() - grab)..=(list_rect.right() + grab),
+            (seam_x - grab)..=(seam_x + grab),
             list_rect.y_range(),
         );
 
@@ -1193,7 +1448,7 @@ impl MailboxApp {
                 let (_, response) =
                     ui.allocate_exact_size(resize_rect.size(), Sense::click_and_drag());
                 // Hairline affordance on the seam.
-                let x = ui.painter().round_to_pixel_center(list_rect.right() - 0.5);
+                let x = ui.painter().round_to_pixel_center(seam_x - 0.5);
                 ui.painter().vline(
                     x,
                     list_rect.y_range(),
@@ -1247,4 +1502,149 @@ impl MailboxApp {
                 self.reader_pane(ui);
             });
     }
+}
+
+struct FolderHeaderActions {
+    sync_tip: &'static str,
+    sync_busy: bool,
+}
+
+struct NavAccordionResult {
+    toggle: bool,
+    manage: bool,
+    sync: bool,
+}
+
+/// Collapsible section title with optional unread badge and folder action icons.
+/// In the icon rail (`collapsed`), only a centered caret (+ badge) is shown.
+fn nav_accordion_header(
+    ui: &mut Ui,
+    title: &str,
+    open: bool,
+    unread: u32,
+    mute: Color32,
+    collapsed: bool,
+    folder_actions: Option<FolderHeaderActions>,
+) -> NavAccordionResult {
+    let mut result = NavAccordionResult {
+        toggle: false,
+        manage: false,
+        sync: false,
+    };
+
+    let caret = if open {
+        egui_phosphor::regular::CARET_DOWN
+    } else {
+        egui_phosphor::regular::CARET_RIGHT
+    };
+    let tip = if open {
+        format!("Collapse {title}")
+    } else {
+        format!("Expand {title}")
+    };
+
+    if collapsed {
+        ui.horizontal(|ui| {
+            let btn = 28.0;
+            ui.add_space((ui.available_width() - btn).max(0.0) * 0.5);
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(btn, btn), Sense::click());
+            if resp.hovered() {
+                ui.painter().rect_filled(rect, 6.0, theme::chip(ui.ctx()));
+            }
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                caret,
+                theme::icon_font(14.0),
+                mute,
+            );
+            if unread > 0 {
+                icons::paint_count_badge(ui, rect, unread, true);
+            }
+            if resp.on_hover_text(tip).clicked() {
+                result.toggle = true;
+            }
+        });
+        return result;
+    }
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        // Phosphor caret must use icon_family — nav_family (Roboto Mono) shows tofu.
+        let caret_resp = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(caret)
+                        .family(theme::icon_family())
+                        .size(11.0)
+                        .color(mute),
+                )
+                .frame(false),
+            )
+            .on_hover_text(&tip);
+        let title_resp = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(title)
+                        .small()
+                        .family(theme::nav_family())
+                        .color(mute),
+                )
+                .frame(false),
+            )
+            .on_hover_text(&tip);
+        if caret_resp.clicked() || title_resp.clicked() {
+            result.toggle = true;
+        }
+
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // Nav panel right margin is 0 (scrollbar flush); keep action icons inset.
+            ui.add_space(8.0);
+            if let Some(actions) = folder_actions {
+                let manage = ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(egui_phosphor::regular::GEAR)
+                                .family(theme::icon_family())
+                                .size(12.0)
+                                .color(mute),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Manage folders");
+                if manage.clicked() {
+                    result.manage = true;
+                }
+                if actions.sync_busy {
+                    let size = egui::vec2(16.0, 16.0);
+                    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+                    ui.put(rect, egui::Spinner::new().size(12.0));
+                    let _ = resp.on_hover_text(format!("{} (working…)", actions.sync_tip));
+                } else {
+                    let sync = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                                    .family(theme::icon_family())
+                                    .size(12.0)
+                                    .color(mute),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text(actions.sync_tip);
+                    if sync.clicked() {
+                        result.sync = true;
+                    }
+                }
+            }
+
+            if unread > 0 {
+                let size = icons::count_badge_size(ui, unread);
+                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                icons::paint_count_badge_at(ui, rect, unread);
+            }
+        });
+    });
+
+    result
 }

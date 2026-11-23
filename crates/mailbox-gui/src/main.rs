@@ -4,6 +4,7 @@ mod app;
 mod avatars;
 mod brand;
 mod brand_logos;
+mod busy;
 mod calendar;
 mod icons;
 mod layout;
@@ -23,11 +24,28 @@ fn main() -> Result<()> {
     // Local OAuth overrides (gitignored `.env`) — never commit real values.
     let _ = dotenvy::dotenv();
 
-    // Quiet sctk-adwaita: GNOME button-layout may include "icon", which CSD ignores.
+    // Linux + XWayland: wry WebKitGTK child views need matching X11 for winit and GDK.
+    // If GDK stays on Wayland while the window is X11, wry panics on Display downcast.
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("DISPLAY").is_some() {
+            // SAFETY: process startup, before gtk/winit init.
+            unsafe {
+                std::env::set_var("GDK_BACKEND", "x11");
+            }
+        }
+    }
+
+    // Quiet noisy deps:
+    // - sctk-adwaita: GNOME button-layout may include "icon", which CSD ignores
+    // - html5ever: ammonia mail sanitize hits unimplemented foster-parenting on
+    //   malformed tables ("foster parenting not implemented")
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive("sctk_adwaita=error".parse().expect("directive"))
+        .add_directive("html5ever=error".parse().expect("directive"));
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("info,sctk_adwaita=error")
-        }))
+        .with_env_filter(filter)
         .with_target(false)
         .init();
 
@@ -47,6 +65,19 @@ fn main() -> Result<()> {
             // Must match packaging/com.ailiak.AiliakMail.desktop (StartupWMClass / file id).
             .with_app_id("com.ailiak.AiliakMail")
             .with_icon(icon),
+        // wry’s WebKitGTK child webview only accepts X11 handles. On Wayland sessions
+        // with XWayland (DISPLAY set), prefer X11 so HTML mail renders instead of
+        // falling back to plain text with “window handle kind is not supported”.
+        event_loop_builder: Some(Box::new(|builder| {
+            #[cfg(target_os = "linux")]
+            {
+                if std::env::var_os("DISPLAY").is_some() {
+                    use winit::platform::x11::EventLoopBuilderExtX11;
+                    builder.with_x11();
+                }
+            }
+            let _ = builder;
+        })),
         ..Default::default()
     };
 

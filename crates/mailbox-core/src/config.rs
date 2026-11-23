@@ -327,6 +327,9 @@ pub struct UiConfig {
     /// Account id opened on launch. Empty → first configured account.
     #[serde(default)]
     pub default_account_id: String,
+    /// Minutes between automatic syncs. `0` disables auto sync. Default: 60 (1 hour).
+    #[serde(default = "default_auto_sync_mins")]
+    pub auto_sync_mins: u32,
     /// Lowercased `From` addresses allowed to load remote images (privacy allowlist).
     #[serde(default)]
     pub remote_image_senders: Vec<String>,
@@ -369,6 +372,10 @@ fn default_accent() -> String {
     "teal".into()
 }
 
+fn default_auto_sync_mins() -> u32 {
+    60
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -376,6 +383,7 @@ impl Default for UiConfig {
             theme: ThemeMode::System,
             accent: default_accent(),
             default_account_id: String::new(),
+            auto_sync_mins: default_auto_sync_mins(),
             remote_image_senders: Vec::new(),
         }
     }

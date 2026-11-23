@@ -6,6 +6,25 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::types::{AccountId, Envelope, Folder, Message, MessageId};
 
+fn envelope_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Envelope> {
+    let date_s: String = row.get(7)?;
+    let date = DateTime::parse_from_rfc3339(&date_s)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    Ok(Envelope {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        folder_path: row.get(2)?,
+        message_id: row.get(3)?,
+        subject: row.get(4)?,
+        from_name: row.get(5)?,
+        from_addr: row.get(6)?,
+        date,
+        seen: row.get::<_, i64>(8)? != 0,
+        snippet: row.get(9)?,
+    })
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -76,6 +95,7 @@ impl Store {
                 from_addr TEXT NOT NULL,
                 date_rfc3339 TEXT NOT NULL,
                 seen INTEGER NOT NULL DEFAULT 0,
+                snoozed INTEGER NOT NULL DEFAULT 0,
                 snippet TEXT NOT NULL,
                 body_text TEXT NOT NULL,
                 body_html TEXT NOT NULL DEFAULT '',
@@ -91,7 +111,8 @@ impl Store {
             );
             "#,
         )?;
-        // Older DBs created before `hidden` existed.
+        // Older DBs created before `hidden` / `body_html` / `snoozed` existed.
+        // ALTER must run before indexes that reference those columns.
         let _ = self
             .conn
             .execute("ALTER TABLE folders ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0", []);
@@ -99,6 +120,15 @@ impl Store {
         let _ = self
             .conn
             .execute("ALTER TABLE messages ADD COLUMN body_html TEXT NOT NULL DEFAULT ''", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE messages ADD COLUMN snoozed INTEGER NOT NULL DEFAULT 0", []);
+        self.conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_messages_snoozed
+                ON messages(account_id, snoozed, date_rfc3339 DESC);
+            "#,
+        )?;
         Ok(())
     }
 
@@ -235,34 +265,90 @@ impl Store {
     }
 
     pub fn list_envelopes(&self, account_id: &str, folder_path: &str) -> Result<Vec<Envelope>> {
+        if crate::types::is_snoozed_folder(folder_path) {
+            return self.list_snoozed_envelopes(account_id);
+        }
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, account_id, folder_path, message_id, subject,
                    from_name, from_addr, date_rfc3339, seen, snippet
             FROM messages
-            WHERE account_id = ?1 AND folder_path = ?2
+            WHERE account_id = ?1 AND folder_path = ?2 AND snoozed = 0
             ORDER BY date_rfc3339 DESC
             "#,
         )?;
-        let rows = stmt.query_map(params![account_id, folder_path], |row| {
-            let date_s: String = row.get(7)?;
-            let date = DateTime::parse_from_rfc3339(&date_s)
-                .map(|d| d.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            Ok(Envelope {
-                id: row.get(0)?,
-                account_id: row.get(1)?,
-                folder_path: row.get(2)?,
-                message_id: row.get(3)?,
-                subject: row.get(4)?,
-                from_name: row.get(5)?,
-                from_addr: row.get(6)?,
-                date,
-                seen: row.get::<_, i64>(8)? != 0,
-                snippet: row.get(9)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![account_id, folder_path], envelope_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// All snoozed messages for an account (local “Snoozed” view).
+    pub fn list_snoozed_envelopes(&self, account_id: &str) -> Result<Vec<Envelope>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, account_id, folder_path, message_id, subject,
+                   from_name, from_addr, date_rfc3339, seen, snippet
+            FROM messages
+            WHERE account_id = ?1 AND snoozed = 1
+            ORDER BY date_rfc3339 DESC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![account_id], envelope_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn snoozed_counts(&self, account_id: &str) -> Result<(u32, u32)> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT COUNT(*),
+                   COALESCE(SUM(CASE WHEN seen = 0 THEN 1 ELSE 0 END), 0)
+            FROM messages
+            WHERE account_id = ?1 AND snoozed = 1
+            "#,
+        )?;
+        let (total, unread) = stmt.query_row(params![account_id], |row| {
+            Ok((row.get::<_, i64>(0)? as u32, row.get::<_, i64>(1)? as u32))
+        })?;
+        Ok((total, unread))
+    }
+
+    pub fn is_snoozed(&self, id: &MessageId) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT snoozed FROM messages WHERE id = ?1")?;
+        let v = stmt
+            .query_row(params![id], |row| row.get::<_, i64>(0))
+            .optional()?;
+        Ok(v.unwrap_or(0) != 0)
+    }
+
+    /// Hide / restore a message locally. Does not change `seen` by itself.
+    /// Unread snoozed mail is removed from the source folder’s unread badge.
+    pub fn set_snoozed(&self, id: &MessageId, snoozed: bool) -> Result<bool> {
+        let Some(msg) = self.get_message(id)? else {
+            return Ok(false);
+        };
+        let was = self.is_snoozed(id)?;
+        if was == snoozed {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "UPDATE messages SET snoozed = ?1 WHERE id = ?2",
+            params![snoozed as i64, id],
+        )?;
+        if !msg.envelope.seen {
+            if snoozed {
+                self.conn.execute(
+                    "UPDATE folders SET unread = MAX(0, unread - 1) WHERE account_id = ?1 AND path = ?2",
+                    params![msg.envelope.account_id, msg.envelope.folder_path],
+                )?;
+            } else {
+                self.conn.execute(
+                    "UPDATE folders SET unread = unread + 1 WHERE account_id = ?1 AND path = ?2",
+                    params![msg.envelope.account_id, msg.envelope.folder_path],
+                )?;
+            }
+        }
+        Ok(true)
     }
 
     pub fn get_message(&self, id: &MessageId) -> Result<Option<Message>> {
@@ -308,12 +394,31 @@ impl Store {
         Ok(msg)
     }
 
-    pub fn mark_seen(&self, id: &MessageId, seen: bool) -> Result<()> {
+    /// Set local seen flag. Returns `true` when the value actually changed.
+    /// Also adjusts the folder unread badge count.
+    pub fn mark_seen(&self, id: &MessageId, seen: bool) -> Result<bool> {
+        let Some(msg) = self.get_message(id)? else {
+            return Ok(false);
+        };
+        if msg.envelope.seen == seen {
+            return Ok(false);
+        }
         self.conn.execute(
             "UPDATE messages SET seen = ?1 WHERE id = ?2",
             params![seen as i64, id],
         )?;
-        Ok(())
+        if seen {
+            self.conn.execute(
+                "UPDATE folders SET unread = MAX(0, unread - 1) WHERE account_id = ?1 AND path = ?2",
+                params![msg.envelope.account_id, msg.envelope.folder_path],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE folders SET unread = unread + 1 WHERE account_id = ?1 AND path = ?2",
+                params![msg.envelope.account_id, msg.envelope.folder_path],
+            )?;
+        }
+        Ok(true)
     }
 
     pub fn delete_message(&self, id: &MessageId) -> Result<()> {
@@ -368,30 +473,14 @@ impl Store {
                    from_name, from_addr, date_rfc3339, seen, snippet
             FROM messages
             WHERE account_id = ?1
+              AND snoozed = 0
               AND (subject LIKE ?2 OR from_name LIKE ?2 OR from_addr LIKE ?2
                    OR snippet LIKE ?2 OR body_text LIKE ?2)
             ORDER BY date_rfc3339 DESC
             LIMIT 200
             "#,
         )?;
-        let rows = stmt.query_map(params![account_id, q], |row| {
-            let date_s: String = row.get(7)?;
-            let date = DateTime::parse_from_rfc3339(&date_s)
-                .map(|d| d.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            Ok(Envelope {
-                id: row.get(0)?,
-                account_id: row.get(1)?,
-                folder_path: row.get(2)?,
-                message_id: row.get(3)?,
-                subject: row.get(4)?,
-                from_name: row.get(5)?,
-                from_addr: row.get(6)?,
-                date,
-                seen: row.get::<_, i64>(8)? != 0,
-                snippet: row.get(9)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![account_id, q], envelope_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -477,6 +566,55 @@ mod tests {
         assert_eq!(list[0].subject, "Hello");
         let msg = store.get_message(&"m1".into()).unwrap().unwrap();
         assert!(msg.body_text.contains("Ada"));
+    }
+
+    #[test]
+    fn snooze_hides_from_folder_and_keeps_unread() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .upsert_folder(&Folder {
+                account_id: "demo".into(),
+                name: "Inbox".into(),
+                path: "INBOX".into(),
+                unread: 1,
+                hidden: false,
+            })
+            .unwrap();
+        store.upsert_message(&sample()).unwrap();
+        assert_eq!(store.list_envelopes("demo", "INBOX").unwrap().len(), 1);
+        assert!(store.set_snoozed(&"m1".into(), true).unwrap());
+        assert!(store.list_envelopes("demo", "INBOX").unwrap().is_empty());
+        assert_eq!(
+            store.list_envelopes("demo", crate::types::SNOOZED_FOLDER_PATH)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!store.get_message(&"m1".into()).unwrap().unwrap().envelope.seen);
+        assert_eq!(store.list_folders("demo").unwrap()[0].unread, 0);
+        assert!(store.set_snoozed(&"m1".into(), false).unwrap());
+        assert_eq!(store.list_envelopes("demo", "INBOX").unwrap().len(), 1);
+        assert_eq!(store.list_folders("demo").unwrap()[0].unread, 1);
+    }
+
+    #[test]
+    fn mark_seen_updates_folder_unread() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .upsert_folder(&Folder {
+                account_id: "demo".into(),
+                name: "Inbox".into(),
+                path: "INBOX".into(),
+                unread: 1,
+                hidden: false,
+            })
+            .unwrap();
+        store.upsert_message(&sample()).unwrap();
+        assert!(store.mark_seen(&"m1".into(), true).unwrap());
+        assert!(!store.mark_seen(&"m1".into(), true).unwrap());
+        let folders = store.list_folders("demo").unwrap();
+        assert_eq!(folders[0].unread, 0);
+        assert!(store.get_message(&"m1".into()).unwrap().unwrap().envelope.seen);
     }
 
     #[test]

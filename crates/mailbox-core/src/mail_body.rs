@@ -4,6 +4,7 @@
 //! - No scripts / event handlers / iframes (ammonia allowlist)
 //! - Links only `http` / `https` / `mailto`
 //! - Remote images omitted unless `load_remote_images` (tracking pixels / privacy)
+//! - Tracking-like images are always blocked (heuristics), even when loading is allowed
 
 use ammonia::Builder;
 
@@ -16,11 +17,37 @@ pub enum InlineSeg {
     Link { text: String, url: String },
 }
 
+/// Why a remote image looks like a privacy / tracking threat (static HTML only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageThreatKind {
+    /// Width/height ≤ 2px (classic open-tracking pixel).
+    TinySize,
+    /// Hidden via CSS (`display:none`, `visibility:hidden`, near-zero opacity).
+    Hidden,
+    /// URL path/query matches common open-tracking tokens.
+    KnownPattern,
+    /// Host is on a short denylist of known trackers.
+    SuspiciousHost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteImageRisk {
+    pub url: String,
+    pub alt: String,
+    pub threats: Vec<ImageThreatKind>,
+}
+
+impl RemoteImageRisk {
+    pub fn has_threats(&self) -> bool {
+        !self.threats.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BodyBlock {
     Paragraph(Vec<InlineSeg>),
     Heading { level: u8, spans: Vec<InlineSeg> },
-    /// Shown only when remote images are enabled.
+    /// Shown only when remote images are enabled and not flagged as a threat.
     Image { alt: String, url: String },
     ImageBlocked { alt: String },
     Bullet(Vec<InlineSeg>),
@@ -32,6 +59,14 @@ pub enum BodyBlock {
 pub struct MailBody {
     pub blocks: Vec<BodyBlock>,
     pub has_remote_images: bool,
+    /// Remote images that matched tracking / privacy heuristics (always blocked).
+    pub image_threats: Vec<RemoteImageRisk>,
+}
+
+impl MailBody {
+    pub fn has_image_threats(&self) -> bool {
+        !self.image_threats.is_empty()
+    }
 }
 
 /// Build a reader body from stored plain + optional HTML.
@@ -103,6 +138,7 @@ fn from_plain(text: &str) -> MailBody {
     MailBody {
         blocks,
         has_remote_images: false,
+        image_threats: Vec::new(),
     }
 }
 
@@ -325,7 +361,88 @@ fn take_bare_url(s: &str) -> Option<(String, usize)> {
     }
 }
 
+/// CSS properties emails commonly need for layout (LinkedIn, marketing digests, …).
+/// Kept as an allowlist so `position` / `behavior` / etc. stay blocked.
+fn mail_style_properties() -> std::collections::HashSet<&'static str> {
+    [
+        // Box model / layout
+        "width",
+        "height",
+        "max-width",
+        "min-width",
+        "max-height",
+        "min-height",
+        "display",
+        "visibility",
+        "overflow",
+        "overflow-x",
+        "overflow-y",
+        "float",
+        "clear",
+        "box-sizing",
+        "vertical-align",
+        "opacity",
+        // Spacing
+        "padding",
+        "padding-top",
+        "padding-right",
+        "padding-bottom",
+        "padding-left",
+        "margin",
+        "margin-top",
+        "margin-right",
+        "margin-bottom",
+        "margin-left",
+        // Border / table
+        "border",
+        "border-top",
+        "border-right",
+        "border-bottom",
+        "border-left",
+        "border-width",
+        "border-style",
+        "border-color",
+        "border-radius",
+        "border-collapse",
+        "border-spacing",
+        "table-layout",
+        "empty-cells",
+        // Type
+        "color",
+        "font",
+        "font-family",
+        "font-size",
+        "font-weight",
+        "font-style",
+        "line-height",
+        "letter-spacing",
+        "text-align",
+        "text-decoration",
+        "text-transform",
+        "white-space",
+        "word-break",
+        "word-wrap",
+        "overflow-wrap",
+        "list-style",
+        "list-style-type",
+        "list-style-position",
+        // Background (url() still constrained by ammonia URL schemes + CSP)
+        "background",
+        "background-color",
+        "background-image",
+        "background-repeat",
+        "background-position",
+        "background-size",
+    ]
+    .into_iter()
+    .collect()
+}
+
 /// Sanitize untrusted mail HTML (scripts/handlers stripped; safe tags only).
+///
+/// Email HTML (LinkedIn, newsletters) depends on inline `style` plus `width` /
+/// `height` on images and tables. Stripping those makes URLs leak out of
+/// `display:none` wrappers and images render at intrinsic size.
 pub fn sanitize_mail_html(html: &str) -> String {
     let truncated = if html.len() > 512 * 1024 {
         &html[..512 * 1024]
@@ -333,9 +450,22 @@ pub fn sanitize_mail_html(html: &str) -> String {
         html
     };
     Builder::default()
-        .add_tags(["img", "table", "thead", "tbody", "tr", "td", "th", "h1", "h2", "h3", "h4"])
-        .add_tag_attributes("img", ["src", "alt"])
-        .add_tag_attributes("a", ["href", "title"])
+        .add_tags([
+            "img", "table", "thead", "tbody", "tfoot", "tr", "td", "th", "col", "colgroup", "font",
+            "h1", "h2", "h3", "h4",
+        ])
+        .add_generic_attributes([
+            "style", "bgcolor", "background", "align", "valign", "width", "height", "border",
+            "cellpadding", "cellspacing",
+        ])
+        .add_tag_attributes("img", ["src", "alt", "width", "height", "align", "border"])
+        .add_tag_attributes("a", ["href", "title", "name", "target"])
+        .add_tag_attributes("font", ["color", "face", "size"])
+        .add_tag_attributes("table", ["width", "height", "align", "bgcolor", "border", "cellpadding", "cellspacing"])
+        .add_tag_attributes("td", ["width", "height", "align", "valign", "bgcolor", "colspan", "rowspan"])
+        .add_tag_attributes("th", ["width", "height", "align", "valign", "bgcolor", "colspan", "rowspan", "scope"])
+        .add_tag_attributes("tr", ["align", "valign", "bgcolor"])
+        .filter_style_properties(mail_style_properties())
         .link_rel(Some("noopener noreferrer"))
         .clean(truncated)
         .to_string()
@@ -344,35 +474,356 @@ pub fn sanitize_mail_html(html: &str) -> String {
 /// True when sanitized HTML still contains a remote `http(s)` image.
 pub fn mail_html_has_remote_images(html: &str) -> bool {
     let clean = sanitize_mail_html(html);
-    let lower = clean.to_ascii_lowercase();
-    // Rough but sufficient: img tags whose src is http(s) after sanitize.
-    let mut rest = lower.as_str();
-    while let Some(idx) = rest.find("<img") {
-        let after = &rest[idx..];
-        let end = after.find('>').unwrap_or(after.len());
-        let tag = &after[..end];
-        if tag.contains("src=\"http://")
-            || tag.contains("src=\"https://")
-            || tag.contains("src='http://")
-            || tag.contains("src='https://")
+    for_each_img_tag(&clean, |tag| {
+        let src = attr(tag, "src").unwrap_or_default();
+        matches!(
+            safe_url(&src).as_deref(),
+            Some(u) if u.starts_with("http://") || u.starts_with("https://")
+        )
+    })
+}
+
+/// Scan sanitized HTML for remote images and classify tracking / privacy risks.
+/// Always safe to call — does not fetch anything.
+pub fn analyze_remote_image_threats(html: &str) -> Vec<RemoteImageRisk> {
+    let clean = sanitize_mail_html(html);
+    let mut out = Vec::new();
+    for_each_img_tag(&clean, |tag| {
+        let src = attr(tag, "src").unwrap_or_default();
+        let Some(url) = safe_url(&src) else {
+            return false;
+        };
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return false;
+        }
+        let alt = attr(tag, "alt").unwrap_or_else(|| "Image".into());
+        let style = attr(tag, "style").unwrap_or_default();
+        let threats = classify_remote_image_threats(&url, tag, &style);
+        if !threats.is_empty() {
+            out.push(RemoteImageRisk { url, alt, threats });
+        }
+        false
+    });
+    // Remote background= / background-image in style on any tag.
+    for_each_tag_with_remote_background(&clean, |url, style_or_attr| {
+        let threats = classify_remote_image_threats(&url, style_or_attr, style_or_attr);
+        if !threats.is_empty()
+            && !out.iter().any(|r| r.url == url)
         {
+            out.push(RemoteImageRisk {
+                url,
+                alt: "Background".into(),
+                threats,
+            });
+        }
+    });
+    out
+}
+
+fn for_each_img_tag(html: &str, mut f: impl FnMut(&str) -> bool) -> bool {
+    let lower = html.to_ascii_lowercase();
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest_lower = &lower[i..];
+        let Some(rel) = rest_lower.find("<img") else {
+            break;
+        };
+        let start = i + rel;
+        let after = &html[start..];
+        let end_rel = after.find('>').unwrap_or(after.len());
+        let tag = &after[..=end_rel.min(after.len().saturating_sub(1))];
+        if f(tag) {
             return true;
         }
-        rest = &after[end.min(after.len().saturating_sub(1)).saturating_add(1)..];
-        if rest.is_empty() {
-            break;
+        i = start + end_rel + 1;
+    }
+    false
+}
+
+fn for_each_tag_with_remote_background(html: &str, mut f: impl FnMut(String, &str)) {
+    let lower = html.to_ascii_lowercase();
+    let mut search = lower.as_str();
+    let mut base = 0usize;
+    while let Some(rel) = search.find("background") {
+        let abs = base + rel;
+        // Find enclosing tag start.
+        let before = &html[..abs];
+        let tag_start = before.rfind('<').unwrap_or(0);
+        let after = &html[tag_start..];
+        let tag_end = after.find('>').map(|n| tag_start + n).unwrap_or(html.len());
+        let tag = &html[tag_start..tag_end.min(html.len())];
+        if let Some(url) = background_remote_url(tag) {
+            f(url, tag);
+        }
+        let next = (abs + 10).min(html.len());
+        base = next;
+        search = &lower[next..];
+    }
+}
+
+fn background_remote_url(tag: &str) -> Option<String> {
+    if let Some(bg) = attr(tag, "background") {
+        if let Some(u) = safe_url(&bg) {
+            if u.starts_with("http://") || u.starts_with("https://") {
+                return Some(u);
+            }
+        }
+    }
+    let style = attr(tag, "style").unwrap_or_default();
+    let lower = style.to_ascii_lowercase();
+    for key in ["background-image:", "background:"] {
+        if let Some(idx) = lower.find(key) {
+            let rest = &style[idx + key.len()..];
+            if let Some(url) = extract_css_url(rest) {
+                if let Some(u) = safe_url(&url) {
+                    if u.starts_with("http://") || u.starts_with("https://") {
+                        return Some(u);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_css_url(s: &str) -> Option<String> {
+    let lower = s.to_ascii_lowercase();
+    let idx = lower.find("url(")?;
+    let rest = s[idx + 4..].trim_start();
+    let rest = rest.trim_start_matches(['\'', '"']);
+    let end = rest
+        .find(|c: char| c == ')' || c == '\'' || c == '"' || c == ';')
+        .unwrap_or(rest.len());
+    let url = rest[..end].trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
+}
+
+/// Classify a single remote image from its URL + raw tag/style snippets.
+pub fn classify_remote_image_threats(url: &str, tag: &str, style: &str) -> Vec<ImageThreatKind> {
+    let mut threats = Vec::new();
+    if is_tiny_size(tag, style) {
+        threats.push(ImageThreatKind::TinySize);
+    }
+    if is_hidden_style(tag, style) {
+        threats.push(ImageThreatKind::Hidden);
+    }
+    if url_has_tracking_pattern(url) {
+        threats.push(ImageThreatKind::KnownPattern);
+    }
+    if url_has_suspicious_host(url) {
+        threats.push(ImageThreatKind::SuspiciousHost);
+    }
+    threats
+}
+
+fn is_tiny_size(tag: &str, style: &str) -> bool {
+    let w = dim_attr(tag, "width").or_else(|| dim_from_style(style, "width"));
+    let h = dim_attr(tag, "height").or_else(|| dim_from_style(style, "height"));
+    match (w, h) {
+        (Some(a), Some(b)) => a <= 2.0 && b <= 2.0,
+        (Some(a), None) => a <= 2.0,
+        (None, Some(b)) => b <= 2.0,
+        (None, None) => false,
+    }
+}
+
+fn dim_attr(tag: &str, name: &str) -> Option<f32> {
+    attr(tag, name).and_then(|v| parse_css_px(&v))
+}
+
+fn dim_from_style(style: &str, prop: &str) -> Option<f32> {
+    let lower = style.to_ascii_lowercase();
+    let key = format!("{prop}:");
+    let idx = lower.find(&key)?;
+    let rest = style[idx + key.len()..].trim_start();
+    let end = rest
+        .find(|c: char| c == ';' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    parse_css_px(&rest[..end])
+}
+
+fn parse_css_px(raw: &str) -> Option<f32> {
+    let s = raw.trim().trim_end_matches("px").trim();
+    if s.is_empty() {
+        return None;
+    }
+    s.parse::<f32>().ok().filter(|n| n.is_finite() && *n >= 0.0)
+}
+
+fn is_hidden_style(tag: &str, style: &str) -> bool {
+    let mut combined = style.to_ascii_lowercase();
+    if let Some(t) = attr(tag, "style") {
+        if !combined.is_empty() {
+            combined.push(';');
+        }
+        combined.push_str(&t.to_ascii_lowercase());
+    }
+    if combined.contains("display:none")
+        || combined.contains("display: none")
+        || combined.contains("visibility:hidden")
+        || combined.contains("visibility: hidden")
+    {
+        return true;
+    }
+    if let Some(op) = dim_from_style(&combined, "opacity") {
+        if op <= 0.01 {
+            return true;
+        }
+    }
+    if let Some(mh) = dim_from_style(&combined, "max-height") {
+        if mh <= 0.0 {
+            return true;
         }
     }
     false
 }
 
+fn url_has_tracking_pattern(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    const PATTERNS: &[&str] = &[
+        "/track",
+        "/tracking",
+        "open.gif",
+        "pixel.",
+        "/pixel",
+        "beacon",
+        "/beacon",
+        "utm_",
+        "/wf/open",
+        "list-manage.com/track",
+        "/open?",
+        "/open/",
+        "opened.gif",
+        "click.gif",
+        "spacer.gif",
+        "1x1",
+        "1x1.gif",
+        "blank.gif",
+        "/t/v/",
+        "mailgun",
+        "sendgrid.net/wf",
+        "doubleclick.net",
+    ];
+    PATTERNS.iter().any(|p| u.contains(p))
+}
+
+fn url_has_suspicious_host(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    let host = u
+        .strip_prefix("https://")
+        .or_else(|| u.strip_prefix("http://"))
+        .unwrap_or(&u);
+    let host = host.split('/').next().unwrap_or(host);
+    let host = host.split('@').next_back().unwrap_or(host);
+    const SUFFIXES: &[&str] = &[
+        "list-manage.com",
+        "mailchimp.com",
+        "sendgrid.net",
+        "mandrillapp.com",
+        "returnpath.net",
+        "mktoweb.com",
+        "exacttarget.com",
+        "exct.net",
+        "sailthru.com",
+        "cmail19.com",
+        "cmail20.com",
+        "rs6.net",
+        "pstmrk.it",
+    ];
+    SUFFIXES
+        .iter()
+        .any(|s| host == *s || host.ends_with(&format!(".{s}")))
+}
+
+fn url_is_threatened(url: &str, risks: &[RemoteImageRisk]) -> bool {
+    risks.iter().any(|r| r.url == url)
+}
+
+/// Strip `src` from threatened remote images / backgrounds so CSP cannot fetch them.
+fn strip_threatened_remote_assets(html: &str, risks: &[RemoteImageRisk]) -> String {
+    if risks.is_empty() {
+        return html.to_string();
+    }
+    let mut out = html.to_string();
+    // Rewrite img tags with threatened src.
+    let snapshot = out.clone();
+    let lower = snapshot.to_ascii_lowercase();
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < snapshot.len() {
+        let Some(rel) = lower[i..].find("<img") else {
+            break;
+        };
+        let start = i + rel;
+        let after = &snapshot[start..];
+        let end_rel = after.find('>').unwrap_or(after.len());
+        let end = start + end_rel;
+        let tag = &snapshot[start..=end.min(snapshot.len().saturating_sub(1))];
+        if let Some(src) = attr(tag, "src") {
+            if let Some(url) = safe_url(&src) {
+                if url_is_threatened(&url, risks) {
+                    let rewritten = rewrite_img_tag_block_src(tag);
+                    replacements.push((start, end + 1, rewritten));
+                }
+            }
+        }
+        i = end + 1;
+    }
+    // Apply from the end so indices stay valid.
+    for (start, end, rep) in replacements.into_iter().rev() {
+        out.replace_range(start..end.min(out.len()), &rep);
+    }
+
+    // Neutralize threatened background URLs in attributes/styles.
+    for risk in risks {
+        if out.contains(&risk.url) {
+            out = out.replace(&risk.url, "about:blank");
+        }
+    }
+    out
+}
+
+fn rewrite_img_tag_block_src(tag: &str) -> String {
+    // Drop src so the webview cannot fetch; keep alt for accessibility.
+    let mut out = String::from("<img");
+    if let Some(alt) = attr(tag, "alt") {
+        out.push_str(" alt=\"");
+        out.push_str(&alt.replace('"', "&quot;"));
+        out.push('"');
+    }
+    out.push_str(" data-ailiak-blocked=\"tracking\"");
+    if !tag.ends_with("/>") && !tag.ends_with(" />") {
+        out.push('>');
+    } else {
+        out.push_str(" />");
+    }
+    out
+}
+
 /// Full HTML document for the embedded webview (CSP + sanitized body).
-pub fn build_mail_html_document(html: &str, load_remote_images: bool) -> String {
-    let body = sanitize_mail_html(html);
+///
+/// `dark` picks chrome-matching page colors (white/black) so recreate/load
+/// flashes match the app theme; HTML emails often set their own backgrounds.
+pub fn build_mail_html_document(html: &str, load_remote_images: bool, dark: bool) -> String {
+    let risks = analyze_remote_image_threats(html);
+    let body = {
+        let clean = sanitize_mail_html(html);
+        strip_threatened_remote_assets(&clean, &risks)
+    };
     let img_src = if load_remote_images {
         "img-src https: http: data: cid:;"
     } else {
         "img-src 'none';"
+    };
+    let (bg, fg, link) = if dark {
+        ("#000000", "#e8eeeb", "#5ecfad")
+    } else {
+        ("#ffffff", "#1a1a1a", "#0b6e4f")
     };
     // Scripts always blocked. Styles allowed inline (email HTML relies on them).
     let csp = format!(
@@ -389,19 +840,37 @@ pub fn build_mail_html_document(html: &str, load_remote_images: bool) -> String 
 <meta http-equiv="Content-Security-Policy" content="{csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  html, body {{ margin: 0; padding: 0; background: transparent; }}
+  html, body {{
+    margin: 0;
+    padding: 0;
+    background: {bg};
+    max-width: 100%;
+  }}
   body {{
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     font-size: 14px;
     line-height: 1.45;
-    color: #1a1a1a;
+    color: {fg};
+    background: {bg};
     padding: 12px 16px 24px;
     word-wrap: break-word;
     overflow-wrap: anywhere;
+    overflow-x: auto;
+    box-sizing: border-box;
   }}
-  img {{ max-width: 100%; height: auto; }}
-  a {{ color: #0b6e4f; }}
-  table {{ max-width: 100%; }}
+  /* Cap runaway assets (LinkedIn icons often ship without useful CSS after sanitize). */
+  img, video {{
+    max-width: 100% !important;
+    height: auto !important;
+  }}
+  table {{
+    max-width: 100% !important;
+    border-collapse: collapse;
+  }}
+  td, th {{
+    max-width: 100%;
+  }}
+  a {{ color: {link}; }}
 </style>
 </head>
 <body>
@@ -435,10 +904,12 @@ pub fn classify_mail_navigation(url: &str) -> MailNavAction {
 }
 
 fn from_html(html: &str, load_remote_images: bool) -> MailBody {
+    let image_threats = analyze_remote_image_threats(html);
     let clean = sanitize_mail_html(html);
     let mut walker = Walker {
         load_remote_images,
         has_remote_images: false,
+        image_threats: image_threats.clone(),
         blocks: Vec::new(),
         inline: Vec::new(),
         text_buf: String::new(),
@@ -452,12 +923,14 @@ fn from_html(html: &str, load_remote_images: bool) -> MailBody {
     MailBody {
         blocks: walker.blocks,
         has_remote_images: walker.has_remote_images,
+        image_threats,
     }
 }
 
 struct Walker {
     load_remote_images: bool,
     has_remote_images: bool,
+    image_threats: Vec<RemoteImageRisk>,
     blocks: Vec<BodyBlock>,
     inline: Vec<InlineSeg>,
     text_buf: String,
@@ -515,7 +988,8 @@ impl Walker {
                 if url.starts_with("http://") || url.starts_with("https://") {
                     self.has_remote_images = true;
                     self.flush_paragraph();
-                    if self.load_remote_images {
+                    let threatened = url_is_threatened(&url, &self.image_threats);
+                    if self.load_remote_images && !threatened {
                         self.blocks.push(BodyBlock::Image { alt, url });
                     } else {
                         self.blocks.push(BodyBlock::ImageBlocked { alt });
@@ -758,13 +1232,97 @@ mod tests {
 
     #[test]
     fn blocks_images_by_default() {
-        let html = r#"<p>Logo</p><img src="https://evil.example/pixel.gif" alt="x">"#;
+        let html = r#"<p>Logo</p><img src="https://cdn.example/logo.png" alt="x" width="120" height="40">"#;
         let body = build_mail_body("", html, false);
         assert!(body.has_remote_images);
+        assert!(body.image_threats.is_empty());
         assert!(body
             .blocks
             .iter()
             .any(|b| matches!(b, BodyBlock::ImageBlocked { .. })));
+        let loaded = build_mail_body("", html, true);
+        assert!(loaded
+            .blocks
+            .iter()
+            .any(|b| matches!(b, BodyBlock::Image { .. })));
+    }
+
+    #[test]
+    fn tiny_pixel_is_threat_even_when_loading() {
+        let html = r#"<img src="https://cdn.example/spacer.png" width="1" height="1" alt="t">"#;
+        let risks = analyze_remote_image_threats(html);
+        assert!(
+            risks.iter().any(|r| r.threats.contains(&ImageThreatKind::TinySize)),
+            "{risks:?}"
+        );
+        let loaded = build_mail_body("", html, true);
+        assert!(loaded.has_image_threats());
+        assert!(loaded
+            .blocks
+            .iter()
+            .any(|b| matches!(b, BodyBlock::ImageBlocked { .. })));
+        assert!(!loaded
+            .blocks
+            .iter()
+            .any(|b| matches!(b, BodyBlock::Image { .. })));
+        let doc = build_mail_html_document(html, true, false);
+        assert!(
+            !doc.contains("https://cdn.example/spacer.png"),
+            "threatened src must be stripped: {doc}"
+        );
+        assert!(doc.contains("data-ailiak-blocked=\"tracking\""), "{doc}");
+    }
+
+    #[test]
+    fn hidden_and_known_pattern_threats() {
+        let hidden = r#"<img src="https://cdn.example/a.png" style="display:none" alt="h">"#;
+        let risks = analyze_remote_image_threats(hidden);
+        assert!(
+            risks.iter().any(|r| r.threats.contains(&ImageThreatKind::Hidden)),
+            "{risks:?}"
+        );
+
+        let patterned =
+            r#"<img src="https://cdn.example/track/open.gif?id=1" width="40" height="40" alt="p">"#;
+        let risks = analyze_remote_image_threats(patterned);
+        assert!(
+            risks
+                .iter()
+                .any(|r| r.threats.contains(&ImageThreatKind::KnownPattern)),
+            "{risks:?}"
+        );
+        let loaded = build_mail_body("", patterned, true);
+        assert!(loaded
+            .blocks
+            .iter()
+            .any(|b| matches!(b, BodyBlock::ImageBlocked { .. })));
+    }
+
+    #[test]
+    fn suspicious_host_blocked_when_loading() {
+        let html =
+            r#"<img src="https://us1.list-manage.com/track/open.png" width="80" height="80" alt="mc">"#;
+        let risks = analyze_remote_image_threats(html);
+        assert!(
+            risks
+                .iter()
+                .any(|r| r.threats.contains(&ImageThreatKind::SuspiciousHost)),
+            "{risks:?}"
+        );
+        let loaded = build_mail_body("", html, true);
+        assert!(loaded.has_image_threats());
+        assert!(loaded
+            .blocks
+            .iter()
+            .any(|b| matches!(b, BodyBlock::ImageBlocked { .. })));
+    }
+
+    #[test]
+    fn normal_logo_not_flagged() {
+        let html = r#"<img src="https://static.licdn.com/logo.png" width="84" height="21"
+             style="width:84px;height:21px;display:block" alt="LinkedIn">"#;
+        let risks = analyze_remote_image_threats(html);
+        assert!(risks.is_empty(), "{risks:?}");
         let loaded = build_mail_body("", html, true);
         assert!(loaded
             .blocks
@@ -821,13 +1379,58 @@ mod tests {
         assert!(!clean.to_ascii_lowercase().contains("<script"), "{clean}");
         assert!(mail_html_has_remote_images(html));
 
-        let blocked = build_mail_html_document(html, false);
+        let blocked = build_mail_html_document(html, false, false);
         assert!(blocked.contains("img-src 'none'"), "{blocked}");
         assert!(blocked.contains("script-src 'none'"), "{blocked}");
         assert!(!blocked.to_ascii_lowercase().contains("<script>alert"), "{blocked}");
 
-        let allowed = build_mail_html_document(html, true);
+        let allowed = build_mail_html_document(html, true, false);
         assert!(allowed.contains("img-src https:"), "{allowed}");
+    }
+
+    #[test]
+    fn sanitize_keeps_linkedin_like_layout_hints() {
+        // LinkedIn hides tracking/chrome URLs with display:none and sizes icons via style/attrs.
+        let html = r#"
+            <table width="600" style="width:600px;background-color:#f3f2ef">
+              <tr>
+                <td>
+                  <span style="display:none;font-size:0;line-height:0;max-height:0;overflow:hidden">
+                    https://www.linkedin.com/comm/feed/?trkEmail=eml
+                  </span>
+                  <a href="https://www.linkedin.com/">
+                    <img src="https://static.licdn.com/logo.png" width="84" height="21"
+                         style="width:84px;height:21px;display:block" alt="LinkedIn">
+                  </a>
+                  <img src="https://static.licdn.com/notif.png" style="width:48px;height:48px" alt="4">
+                </td>
+              </tr>
+            </table>
+            <p style="position:fixed;top:0">should lose position</p>
+        "#;
+        let clean = sanitize_mail_html(html);
+        assert!(
+            clean.contains("display:none") || clean.contains("display: none"),
+            "display:none must survive so hidden URLs stay hidden: {clean}"
+        );
+        assert!(
+            clean.contains("width=\"84\"") || clean.contains("width:84px"),
+            "image sizing must survive: {clean}"
+        );
+        assert!(
+            clean.contains("height=\"21\"") || clean.contains("height:21px"),
+            "image height must survive: {clean}"
+        );
+        assert!(
+            !clean.contains("position:fixed") && !clean.contains("position: fixed"),
+            "dangerous position must be stripped: {clean}"
+        );
+
+        let doc = build_mail_html_document(html, true, false);
+        assert!(
+            doc.contains("max-width: 100% !important"),
+            "document CSS must cap images: {doc}"
+        );
     }
 
     #[test]

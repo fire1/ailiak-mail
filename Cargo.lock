@@ -3073,6 +3073,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "winit",
  "winresource",
  "wry",
 ]

@@ -142,7 +142,23 @@ pub fn show_body(
     load_images: bool,
     images: &mut MailImageCache,
 ) {
-    if body.has_remote_images && !load_images {
+    if body.has_image_threats() {
+        let n = body.image_threats.len();
+        egui::Frame::none()
+            .fill(theme::chip(ui.ctx()))
+            .rounding(8.0)
+            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{n} tracking-like image(s) blocked for privacy (always, even if this sender is allowed)."
+                    ))
+                    .small()
+                    .color(theme::mute(ui.ctx())),
+                );
+            });
+        ui.add_space(10.0);
+    } else if body.has_remote_images && !load_images {
         egui::Frame::none()
             .fill(theme::chip(ui.ctx()))
             .rounding(8.0)

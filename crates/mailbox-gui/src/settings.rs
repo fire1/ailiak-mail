@@ -9,6 +9,7 @@ use mailbox_core::providers::MailProvider;
 use mailbox_core::secrets;
 
 use crate::app::MailboxApp;
+use crate::icons;
 use crate::provider_logos;
 use crate::theme;
 
@@ -57,7 +58,7 @@ impl SettingsSection {
         match self {
             Self::Appearance => "Theme and accent",
             Self::Accounts => "Mail accounts and avatars",
-            Self::Folders => "Show, hide, and sync",
+            Self::Folders => "Show, hide, and auto sync",
             Self::Ailiak => "Desk token and hashtag",
         }
     }
@@ -508,16 +509,28 @@ impl MailboxApp {
                         ui.add_space(8.0);
                     }
                     ui.horizontal(|ui| {
-                        let sign_in = ui.add_enabled(
-                            self.oauth_ready(oauth),
-                            egui::Button::new(
-                                RichText::new(p.oauth_button).color(Color32::WHITE),
-                            )
-                            .fill(theme::accent(ui.ctx())),
-                        );
-                        if sign_in.clicked() {
-                            let _ = self.config.save(&self.paths.config_file());
-                            self.start_oauth_sign_in(mail_p);
+                        if self.busy.oauth {
+                            ui.add_enabled_ui(false, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new().size(12.0));
+                                    ui.label(
+                                        RichText::new(p.oauth_button)
+                                            .color(theme::mute(ui.ctx())),
+                                    );
+                                });
+                            });
+                        } else {
+                            let sign_in = ui.add_enabled(
+                                self.oauth_ready(oauth),
+                                egui::Button::new(
+                                    RichText::new(p.oauth_button).color(Color32::WHITE),
+                                )
+                                .fill(theme::accent(ui.ctx())),
+                            );
+                            if sign_in.clicked() {
+                                let _ = self.config.save(&self.paths.config_file());
+                                self.start_oauth_sign_in(mail_p);
+                            }
                         }
                     });
                     ui.add_space(14.0);
@@ -618,7 +631,9 @@ impl MailboxApp {
                             Err(e) => self.status = e.to_string(),
                         }
                     }
-                    if ui.button("Test connection").clicked() {
+                    if icons::busy_text_button(ui, "Test connection", self.busy.mail_test)
+                        .clicked()
+                    {
                         if self.imap_user_input.trim().is_empty() {
                             self.imap_user_input = self.account_email_input.trim().to_string();
                         }
@@ -803,7 +818,14 @@ impl MailboxApp {
                 } else {
                     preset.oauth_button.to_string()
                 };
-                if ui
+                if self.busy.oauth {
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(12.0));
+                            ui.label(label);
+                        });
+                    });
+                } else if ui
                     .add_enabled(self.oauth_ready(oauth), egui::Button::new(label))
                     .clicked()
                 {
@@ -853,7 +875,7 @@ impl MailboxApp {
                 MailProtocol::Imap => "Test IMAP",
                 MailProtocol::Pop3 => "Test POP3",
             };
-            if ui.button(test_label).clicked() {
+            if icons::busy_text_button(ui, test_label, self.busy.mail_test).clicked() {
                 self.test_mail_connection();
             }
             if ui.button("Save account").clicked() {
@@ -861,7 +883,7 @@ impl MailboxApp {
                     self.status = e.to_string();
                 }
             }
-            if ui.button("Sync now").clicked() {
+            if icons::busy_text_button(ui, "Sync now", self.busy.sync).clicked() {
                 if let Err(e) = self.save_settings() {
                     self.status = e.to_string();
                 } else {
@@ -908,26 +930,33 @@ impl MailboxApp {
         ui.add_space(12.0);
 
         ui.horizontal(|ui| {
-            if ui
-                .button(if is_pop3 { "Sync Inbox" } else { "Sync this folder" })
-                .on_hover_text(if is_pop3 {
-                    "Download Inbox via POP3 (g)"
-                } else {
-                    "Refresh folder list + download the selected folder (g)"
-                })
+            let sync_label = if is_pop3 {
+                "Sync Inbox"
+            } else {
+                "Sync this folder"
+            };
+            let sync_tip = if is_pop3 {
+                "Download Inbox via POP3 (g)"
+            } else {
+                "Refresh folder list + download the selected folder (g)"
+            };
+            if icons::busy_text_button(ui, sync_label, self.busy.sync)
+                .on_hover_text(sync_tip)
                 .clicked()
             {
                 self.start_sync(false);
             }
             if !is_pop3
-                && ui
-                    .button("Sync all folders")
+                && icons::busy_text_button(ui, "Sync all folders", self.busy.sync)
                     .on_hover_text("Download mail for every IMAP folder (Shift+G)")
                     .clicked()
             {
                 self.start_sync(true);
             }
         });
+        ui.add_space(16.0);
+
+        self.auto_sync_panel(ui);
         ui.add_space(16.0);
 
         let all = match self.store.list_all_folders(&self.account_id) {
@@ -989,6 +1018,84 @@ impl MailboxApp {
         }
     }
 
+    fn auto_sync_panel(&mut self, ui: &mut Ui) {
+        const INTERVALS: &[(u32, &str)] = &[
+            (5, "5 minutes"),
+            (15, "15 minutes"),
+            (30, "30 minutes"),
+            (60, "1 hour"),
+            (120, "2 hours"),
+            (360, "6 hours"),
+            (720, "12 hours"),
+            (1440, "24 hours"),
+        ];
+
+        ui.label(
+            RichText::new("Auto sync")
+                .strong()
+                .size(13.0)
+                .family(theme::nav_family()),
+        );
+        ui.label(
+            RichText::new("Periodically refresh the selected folder in the background.")
+                .small()
+                .color(theme::mute(ui.ctx())),
+        );
+        ui.add_space(6.0);
+
+        let mut enabled = self.config.ui.auto_sync_mins > 0;
+        let mut mins = if enabled {
+            self.config.ui.auto_sync_mins
+        } else {
+            60
+        };
+        if !INTERVALS.iter().any(|(m, _)| *m == mins) {
+            mins = 60;
+        }
+
+        let mut changed = false;
+        if ui
+            .checkbox(&mut enabled, "Automatically sync mail")
+            .changed()
+        {
+            changed = true;
+        }
+        if enabled {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Every");
+                let label = INTERVALS
+                    .iter()
+                    .find(|(m, _)| *m == mins)
+                    .map(|(_, l)| *l)
+                    .unwrap_or("1 hour");
+                egui::ComboBox::from_id_salt("auto_sync_interval")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for &(m, l) in INTERVALS {
+                            if ui.selectable_label(mins == m, l).clicked() {
+                                mins = m;
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+        }
+
+        if changed {
+            self.config.ui.auto_sync_mins = if enabled { mins } else { 0 };
+            if let Err(e) = self.config.save(&self.paths.config_file()) {
+                self.status = e.to_string();
+            } else {
+                self.status = if enabled {
+                    format!("Auto sync every {mins} min")
+                } else {
+                    "Auto sync off".into()
+                };
+            }
+        }
+    }
+
     fn ailiak_panel(&mut self, ui: &mut Ui) {
         ui.label(
             RichText::new("Ailiak")
@@ -1023,7 +1130,7 @@ impl MailboxApp {
             });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button("Test whoami").clicked() {
+            if icons::busy_text_button(ui, "Test whoami", self.busy.ailiak).clicked() {
                 self.test_ailiak();
             }
             if ui.button("Clear token").clicked() {

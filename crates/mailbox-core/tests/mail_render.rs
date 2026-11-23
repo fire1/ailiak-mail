@@ -194,12 +194,19 @@ fn marketing_html_preserves_structure_and_blocks_images() {
         "{:?}",
         loaded.blocks
     );
+    // 1×1 /pixel.gif is a tracking threat — stays blocked even when loading is allowed.
     assert!(
-        !loaded
+        loaded.has_image_threats(),
+        "expected tracking pixel threat: {:?}",
+        loaded.image_threats
+    );
+    assert!(
+        loaded
             .blocks
             .iter()
-            .any(|b| matches!(b, BodyBlock::ImageBlocked { .. })),
-        "no ImageBlocked when images allowed"
+            .any(|b| matches!(b, BodyBlock::ImageBlocked { alt } if alt.contains("tracker"))),
+        "tracking pixel must stay ImageBlocked: {:?}",
+        loaded.blocks
     );
 }
 

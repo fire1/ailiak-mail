@@ -106,7 +106,8 @@ fn light_palette(accent: Color32) -> Palette {
     let panel = Color32::from_rgb(0xf0, 0xf1, 0xf2);
     Palette {
         accent,
-        mute: Color32::from_rgb(0x8e, 0x93, 0x91),
+        // Mid grey for nav icons/labels (Folders, Staks, Desk…) — between black and pale.
+        mute: Color32::from_rgb(0x6e, 0x74, 0x72),
         unread: accent,
         panel,
         select: mix(panel, accent, 0.16),
@@ -279,6 +280,14 @@ fn base_style() -> Style {
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.window_margin = egui::Margin::same(12.0);
     style.spacing.button_padding = egui::vec2(10.0, 6.0);
+    // Solid bars sit on the panel edge (bar_outer_margin 0) and reserve a gutter
+    // so list/nav content no longer paints under a floating handle.
+    style.spacing.scroll = egui::style::ScrollStyle {
+        bar_width: 8.0,
+        bar_inner_margin: 2.0,
+        bar_outer_margin: 0.0,
+        ..egui::style::ScrollStyle::solid()
+    };
     // Titles keep Roboto Mono; body/content use Lato (integer px sizes stay sharp).
     style
         .text_styles

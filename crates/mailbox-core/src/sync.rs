@@ -177,6 +177,33 @@ async fn sync_imap(
 /// Move messages to Archive or Trash.
 /// IMAP: UID MOVE on the server, then update the local cache.
 /// POP3: local folder move only (server has no Archive/Trash folders).
+/// Push `\Seen` to the IMAP server for one message (no-op for POP3 / missing UID).
+pub fn mark_seen_on_server(
+    account: &MailAccountConfig,
+    credential: &MailCredential,
+    message_id: &MessageId,
+    folder_path: &str,
+    seen: bool,
+) -> Result<()> {
+    if account.protocol != MailProtocol::Imap {
+        return Ok(());
+    }
+    let Some(uid) = parse_imap_uid(message_id, &account.id, folder_path) else {
+        return Ok(());
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("start tokio runtime")?;
+    rt.block_on(async {
+        let mut session = imap::connect_and_login(account, credential).await?;
+        imap::set_seen(&mut session, folder_path, uid, seen).await?;
+        session.logout().await.ok();
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
 pub fn move_messages(
     store: &Store,
     account: &MailAccountConfig,

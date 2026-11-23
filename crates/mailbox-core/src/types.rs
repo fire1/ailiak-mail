@@ -30,7 +30,14 @@ pub struct Folder {
     pub hidden: bool,
 }
 
-/// Display order: Inbox → Sent → Archive → Trash → everything else.
+/// Local-only virtual folder for snoozed mail (not an IMAP mailbox).
+pub const SNOOZED_FOLDER_PATH: &str = "Snoozed";
+
+pub fn is_snoozed_folder(path: &str) -> bool {
+    path.eq_ignore_ascii_case(SNOOZED_FOLDER_PATH)
+}
+
+/// Display order: Inbox → Sent → Archive → Trash → … → Snoozed → Gmail specials.
 pub fn folder_sort_key(path: &str) -> (u8, String) {
     let p = path.to_lowercase();
     let rank = if p == "inbox" || p.ends_with("/inbox") || p.ends_with(".inbox") {
@@ -41,6 +48,8 @@ pub fn folder_sort_key(path: &str) -> (u8, String) {
         2
     } else if p.contains("trash") || p.contains("bin") || p.contains("deleted") {
         3
+    } else if is_snoozed_folder(path) {
+        6
     } else if p.contains("[gmail]") {
         5
     } else {

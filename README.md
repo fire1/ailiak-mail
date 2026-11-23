@@ -29,7 +29,7 @@ sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
 cargo run -p mailbox-gui
 ```
 
-HTML messages render in an embedded OS webview (**wry**: WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows). Remote images stay blocked until **Load remote images…**. After upgrading, **Sync all** so messages get `body_html` stored. On Linux Wayland, child webviews need a working WebKitGTK stack; if the webview fails to create, the plain-text reader is used as fallback.
+HTML messages render in an embedded OS webview (**wry**: WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows). Remote images stay blocked until you allow them for a sender (toolbar image icon). After upgrading, **Sync all** so messages get `body_html` stored. On Linux, the app forces **X11/XWayland** for both winit and GDK (`GDK_BACKEND=x11`) because WebKitGTK child webviews do not support native Wayland handles; if the webview still fails to create, the plain-text reader is used as fallback.
 
 
 Or build a release binary for your OS:
