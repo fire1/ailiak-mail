@@ -13,7 +13,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["AiliakMail contributors"]
-repository = "https://github.com/fire1/ailiakmail"
+repository = "https://github.com/fire1/ailiak-mail"
 
 [workspace.dependencies]
 mailbox-core = { path = "crates/mailbox-core" }

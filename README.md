@@ -2,7 +2,7 @@
 
 **Calm email client for desktop** — Rust + egui. Mail stays local; optional [Ailiak](https://ailiak.com) Desk bridge turns messages into tasks.
 
-[![Release](https://github.com/fire1/ailiakmail/actions/workflows/release.yml/badge.svg)](https://github.com/fire1/ailiakmail/actions/workflows/release.yml)
+[![Release](https://github.com/fire1/ailiak-mail/actions/workflows/release.yml/badge.svg)](https://github.com/fire1/ailiak-mail/actions/workflows/release.yml)
 
 ## Features
 
@@ -18,8 +18,8 @@
 ## Quick start
 
 ```bash
-git clone https://github.com/fire1/ailiakmail.git
-cd ailiakmail
+git clone https://github.com/fire1/ailiak-mail.git
+cd ailiak-mail
 
 # Debian/Ubuntu deps for egui + HTML mail webview (WebKitGTK)
 sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
