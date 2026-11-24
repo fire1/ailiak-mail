@@ -222,13 +222,21 @@ pub async fn set_seen(
     Ok(())
 }
 
-/// Move one message by UID into `dest_folder` (UID MOVE, or COPY + delete fallback).
+/// Move one message by UID into `dest_folder`.
+///
+/// Order: `UID MOVE` → `UID COPY` + delete → (Trash / Chats only) in-place
+/// `\Deleted`+`EXPUNGE`. Gmail’s `[Gmail]/Chats` often rejects COPY to Trash;
+/// deleting in place removes the Chat label on the server.
 pub async fn move_uid(
     session: &mut ImapSession,
     from_folder: &str,
     uid: u32,
     dest_folder: &str,
 ) -> Result<()> {
+    if from_folder == dest_folder {
+        return Ok(());
+    }
+
     session
         .select(from_folder)
         .await
@@ -236,28 +244,59 @@ pub async fn move_uid(
 
     let uid_s = uid.to_string();
     match session.uid_mv(&uid_s, dest_folder).await {
-        Ok(()) => Ok(()),
+        Ok(()) => return Ok(()),
         Err(move_err) => {
             tracing::debug!(error = %move_err, "UID MOVE failed; trying COPY+delete");
-            session
-                .uid_copy(&uid_s, dest_folder)
-                .await
-                .with_context(|| format!("UID COPY → {dest_folder}"))?;
-            let _ = session
-                .uid_store(&uid_s, "+FLAGS (\\Deleted)")
-                .await
-                .context("UID STORE \\Deleted")?
-                .try_collect::<Vec<_>>()
-                .await;
-            let _ = session
-                .expunge()
-                .await
-                .context("EXPUNGE")?
-                .try_collect::<Vec<_>>()
-                .await;
-            Ok(())
         }
     }
+
+    match session.uid_copy(&uid_s, dest_folder).await {
+        Ok(()) => {
+            flag_deleted_and_expunge(session, &uid_s).await?;
+            return Ok(());
+        }
+        Err(copy_err) => {
+            let dest_l = dest_folder.to_lowercase();
+            let from_l = from_folder.to_lowercase();
+            let dest_is_trash = dest_l.contains("trash")
+                || dest_l.contains("bin")
+                || dest_l.contains("deleted");
+            let source_is_chats = from_l.contains("chats");
+            if dest_is_trash || source_is_chats {
+                tracing::debug!(
+                    error = %copy_err,
+                    from = from_folder,
+                    dest = dest_folder,
+                    "UID COPY failed; deleting in place (Gmail Chats / Trash)"
+                );
+                flag_deleted_and_expunge(session, &uid_s)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "UID COPY → {dest_folder} failed ({copy_err}); in-place delete also failed"
+                        )
+                    })?;
+                return Ok(());
+            }
+            Err(copy_err).with_context(|| format!("UID COPY → {dest_folder}"))?
+        }
+    }
+}
+
+async fn flag_deleted_and_expunge(session: &mut ImapSession, uid_s: &str) -> Result<()> {
+    let _ = session
+        .uid_store(uid_s, "+FLAGS (\\Deleted)")
+        .await
+        .context("UID STORE \\Deleted")?
+        .try_collect::<Vec<_>>()
+        .await;
+    let _ = session
+        .expunge()
+        .await
+        .context("EXPUNGE")?
+        .try_collect::<Vec<_>>()
+        .await;
+    Ok(())
 }
 
 pub async fn fetch_uid_body(
@@ -283,7 +322,7 @@ pub async fn fetch_uid_body(
         .find_map(|f| f.body().map(|b| b.to_vec())))
 }
 
-fn friendly_folder_name(path: &str) -> String {
+pub fn friendly_folder_name(path: &str) -> String {
     if path.eq_ignore_ascii_case("INBOX") {
         return "Inbox".into();
     }
@@ -298,9 +337,30 @@ fn friendly_folder_name(path: &str) -> String {
     decode_modified_utf7(&leaf)
 }
 
+/// Full mailbox path for status UI — each `/` segment decoded from Modified UTF-7.
+pub fn friendly_folder_path(path: &str) -> String {
+    if path.eq_ignore_ascii_case("INBOX") {
+        return "Inbox".into();
+    }
+    if !path.contains('/') {
+        return friendly_folder_name(path);
+    }
+    path.split('/')
+        .map(|seg| {
+            let cleaned = seg
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .replace("Gmail/", "");
+            decode_modified_utf7(&cleaned)
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Decode IMAP Modified UTF-7 to Unicode. Leaves ASCII paths unchanged.
 /// `&…-` shifts are Base64(UTF-16BE) with `,` instead of `/`; `&-` is a literal `&`.
-fn decode_modified_utf7(input: &str) -> String {
+pub fn decode_modified_utf7(input: &str) -> String {
     if !input.contains('&') {
         return input.to_string();
     }
@@ -409,5 +469,19 @@ mod tests {
         assert!(friends.starts_with("Приятел"), "{friends}");
         let saved = decode_modified_utf7("&BBcEMAQ,BDAENwQ1BD0E0A-");
         assert!(saved.starts_with("Запазен"), "{saved}");
+    }
+
+    #[test]
+    fn friendly_nested_path_decodes_utf7() {
+        let path = "&BBcEMAQ,BDAENwQ1BD0EOA-/website data";
+        let shown = friendly_folder_path(path);
+        assert!(
+            shown.contains("website data"),
+            "leaf kept: {shown}"
+        );
+        assert!(
+            !shown.contains('&'),
+            "UTF-7 parent decoded: {shown}"
+        );
     }
 }

@@ -205,6 +205,9 @@ mod tests {
             date: Utc::now(),
             seen,
             snippet: String::new(),
+            in_reply_to: String::new(),
+            references: String::new(),
+            thread_id: String::new(),
         }
     }
 

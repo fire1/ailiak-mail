@@ -19,6 +19,10 @@ pub fn parse_raw_message(
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("uid-{uid}@{folder_path}"));
 
+    let in_reply_to = header_ids(parsed.in_reply_to());
+    let references = header_ids(parsed.references());
+    let thread_id = Envelope::compute_thread_id(&message_id, &in_reply_to, &references);
+
     let subject = parsed.subject().unwrap_or("(no subject)").to_string();
 
     let (from_name, from_addr) = match parsed.from().and_then(|a| a.first()) {
@@ -60,12 +64,22 @@ pub fn parse_raw_message(
             date,
             seen,
             snippet,
+            in_reply_to,
+            references,
+            thread_id,
         },
         body_text,
         body_html,
         to,
         cc,
     })
+}
+
+fn header_ids(value: &mail_parser::HeaderValue<'_>) -> String {
+    if let Some(list) = value.as_text_list() {
+        return list.join(" ");
+    }
+    value.as_text().unwrap_or("").to_string()
 }
 
 fn addresses(list: Option<&mail_parser::Address<'_>>) -> Vec<String> {

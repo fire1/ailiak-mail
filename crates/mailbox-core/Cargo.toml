@@ -17,6 +17,7 @@ directories.workspace = true
 futures.workspace = true
 getrandom = "0.2"
 keyring.workspace = true
+lettre.workspace = true
 mail-parser.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 rusqlite.workspace = true

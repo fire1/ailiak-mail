@@ -37,25 +37,18 @@ pub fn is_snoozed_folder(path: &str) -> bool {
     path.eq_ignore_ascii_case(SNOOZED_FOLDER_PATH)
 }
 
-/// Display order: Inbox → Sent → Archive → Trash → … → Snoozed → Gmail specials.
+/// Display order via [`crate::folder_role::classify_mailbox`].
+///
+/// Prefer [`crate::folder_role::folder_sort_key`] with name when available.
 pub fn folder_sort_key(path: &str) -> (u8, String) {
-    let p = path.to_lowercase();
-    let rank = if p == "inbox" || p.ends_with("/inbox") || p.ends_with(".inbox") {
-        0
-    } else if p.contains("sent") {
-        1
-    } else if p.contains("archive") {
-        2
-    } else if p.contains("trash") || p.contains("bin") || p.contains("deleted") {
-        3
-    } else if is_snoozed_folder(path) {
-        6
-    } else if p.contains("[gmail]") {
-        5
-    } else {
-        4
-    };
-    (rank, p)
+    crate::folder_role::folder_sort_key(path, path_leaf_fallback(path))
+}
+
+fn path_leaf_fallback(path: &str) -> &str {
+    path.rsplit(['/', '.'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(path)
 }
 
 /// Target mailbox for quick Archive / Trash actions.
@@ -117,7 +110,7 @@ pub fn parse_imap_uid(id: &str, account_id: &str, folder_path: &str) -> Option<u
 }
 
 pub fn sort_folders(folders: &mut [Folder]) {
-    folders.sort_by_key(|a| folder_sort_key(&a.path));
+    crate::folder_role::sort_folders(folders);
 }
 
 #[cfg(test)]
@@ -188,6 +181,33 @@ pub struct Envelope {
     pub date: DateTime<Utc>,
     pub seen: bool,
     pub snippet: String,
+    /// RFC822 `In-Reply-To` (empty when none).
+    #[serde(default)]
+    pub in_reply_to: String,
+    /// RFC822 `References` header as stored (space-separated ids).
+    #[serde(default)]
+    pub references: String,
+    /// Conversation root Message-ID (first References entry, else In-Reply-To, else self).
+    #[serde(default)]
+    pub thread_id: String,
+}
+
+impl Envelope {
+    /// Root id for threading: first References token → In-Reply-To → own Message-ID.
+    pub fn compute_thread_id(message_id: &str, in_reply_to: &str, references: &str) -> String {
+        let first_ref = references
+            .split_whitespace()
+            .find(|t| !t.is_empty())
+            .map(str::to_string);
+        if let Some(r) = first_ref {
+            return r;
+        }
+        let irt = in_reply_to.trim();
+        if !irt.is_empty() {
+            return irt.to_string();
+        }
+        message_id.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

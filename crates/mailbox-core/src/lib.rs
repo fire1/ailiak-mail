@@ -20,9 +20,11 @@ pub mod pop3;
 pub mod providers;
 pub mod secrets;
 pub mod seed;
+pub mod smtp;
 pub mod store;
 pub mod sync;
 pub mod types;
+pub mod folder_role;
 
 pub use config::{
     folders_panel_help, looks_like_abv, nav_sync_tip, pop3_account_form_help,
@@ -36,9 +38,15 @@ pub use oauth::{
 pub use oauth_clients::{creds_ready as oauth_creds_ready, has_embedded_app, resolve_creds as resolve_oauth_creds};
 pub use providers::{MailProvider, ProviderPreset};
 pub use paths::AppPaths;
+pub use smtp::{
+    reply_references, reply_subject, send as send_mail, OutgoingAttachment, OutgoingMail,
+};
 pub use store::Store;
 pub use sync::{
     mark_seen_on_server, move_messages, sync_account, test_connection, SyncOptions, SyncReport,
+};
+pub use folder_role::{
+    build_label_tree, classify_mailbox, is_all_mail, LabelNode, MailboxRole,
 };
 pub use types::{
     date_group_label, is_snoozed_folder, resolve_special_folder, AccountId, Envelope, Folder,

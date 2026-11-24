@@ -8,38 +8,48 @@ use crate::theme;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FolderIcon {
     Inbox,
-    Sent,
-    Archive,
-    Trash,
+    Starred,
     Snoozed,
+    Important,
+    Sent,
+    Drafts,
+    Archive,
+    Spam,
+    Trash,
     Folder,
 }
 
 impl FolderIcon {
     pub fn from_folder(path: &str, name: &str) -> Self {
-        let key = format!("{path} {name}").to_lowercase();
-        if mailbox_core::is_snoozed_folder(path) {
-            Self::Snoozed
-        } else if key.contains("inbox") {
-            Self::Inbox
-        } else if key.contains("sent") {
-            Self::Sent
-        } else if key.contains("archive") {
-            Self::Archive
-        } else if key.contains("trash") || key.contains("bin") || key.contains("deleted") {
-            Self::Trash
-        } else {
-            Self::Folder
+        Self::from_role(mailbox_core::classify_mailbox(path, name))
+    }
+
+    pub fn from_role(role: mailbox_core::MailboxRole) -> Self {
+        match role {
+            mailbox_core::MailboxRole::Inbox => Self::Inbox,
+            mailbox_core::MailboxRole::Starred => Self::Starred,
+            mailbox_core::MailboxRole::Snoozed => Self::Snoozed,
+            mailbox_core::MailboxRole::Important => Self::Important,
+            mailbox_core::MailboxRole::Sent => Self::Sent,
+            mailbox_core::MailboxRole::Drafts => Self::Drafts,
+            mailbox_core::MailboxRole::Archive => Self::Archive,
+            mailbox_core::MailboxRole::Spam => Self::Spam,
+            mailbox_core::MailboxRole::Trash => Self::Trash,
+            mailbox_core::MailboxRole::User => Self::Folder,
         }
     }
 
     fn glyph(self) -> &'static str {
         match self {
             Self::Inbox => ph::TRAY,
-            Self::Sent => ph::PAPER_PLANE_TILT,
-            Self::Archive => ph::ARCHIVE,
-            Self::Trash => ph::TRASH,
+            Self::Starred => ph::STAR,
             Self::Snoozed => ph::CLOCK_AFTERNOON,
+            Self::Important => ph::TAG,
+            Self::Sent => ph::PAPER_PLANE_TILT,
+            Self::Drafts => ph::NOTE_PENCIL,
+            Self::Archive => ph::ARCHIVE,
+            Self::Spam => ph::WARNING_CIRCLE,
+            Self::Trash => ph::TRASH,
             Self::Folder => ph::FOLDER,
         }
     }
@@ -48,6 +58,9 @@ impl FolderIcon {
 #[derive(Clone, Copy)]
 pub enum ToolbarIcon {
     Sync,
+    Compose,
+    Reply,
+    ReplyAll,
     Archive,
     Trash,
     Snooze,
@@ -57,6 +70,10 @@ impl ToolbarIcon {
     fn glyph(self) -> &'static str {
         match self {
             Self::Sync => ph::ARROWS_CLOCKWISE,
+            Self::Compose => ph::NOTE_PENCIL,
+            // Classic curved reply arrow; double bend = reply-all.
+            Self::Reply => ph::ARROW_BEND_UP_LEFT,
+            Self::ReplyAll => ph::ARROW_BEND_DOUBLE_UP_LEFT,
             Self::Archive => ph::ARCHIVE,
             Self::Trash => ph::TRASH,
             Self::Snooze => ph::CLOCK_AFTERNOON,
@@ -351,6 +368,19 @@ pub fn folder_nav_button(
     selected: bool,
     collapsed: bool,
 ) -> Response {
+    folder_nav_button_indent(ui, kind, label, badge, selected, collapsed, 0)
+}
+
+/// Like [`folder_nav_button`], with horizontal indent for nested Labels.
+pub fn folder_nav_button_indent(
+    ui: &mut Ui,
+    kind: FolderIcon,
+    label: &str,
+    badge: u32,
+    selected: bool,
+    collapsed: bool,
+    indent_level: u8,
+) -> Response {
     let accent = theme::accent(ui.ctx());
     let mute = theme::mute(ui.ctx());
     let height = 28.0;
@@ -366,12 +396,20 @@ pub fn folder_nav_button(
     };
     ui.painter().rect_filled(rect, 6.0, fill);
 
+    let indent = if collapsed {
+        0.0
+    } else {
+        (indent_level as f32) * 12.0
+    };
     let icon_color = if selected { accent } else { mute };
     let icon_size = 15.0;
     let icon_center = if collapsed {
         rect.center()
     } else {
-        Pos2::new(rect.left() + 10.0 + icon_size * 0.5, rect.center().y)
+        Pos2::new(
+            rect.left() + 10.0 + indent + icon_size * 0.5,
+            rect.center().y,
+        )
     };
     let icon_rect = egui::Rect::from_center_size(
         ui.painter().round_pos_to_pixels(icon_center),
@@ -382,9 +420,10 @@ pub fn folder_nav_button(
     let badge_reserve = paint_count_badge(ui, rect, badge, collapsed);
 
     if !collapsed {
-        let text_pos = ui
-            .painter()
-            .round_pos_to_pixels(Pos2::new(rect.left() + 30.0, rect.center().y));
+        let text_pos = ui.painter().round_pos_to_pixels(Pos2::new(
+            rect.left() + 30.0 + indent,
+            rect.center().y,
+        ));
         let font = theme::nav_font(12.0);
         let color = if selected { accent } else { mute };
         let text_max_w = (rect.right() - badge_reserve - 4.0 - text_pos.x).max(0.0);

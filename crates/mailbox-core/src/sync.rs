@@ -154,6 +154,7 @@ async fn sync_imap(
 
     session.logout().await.ok();
 
+    let primary_label = crate::imap::friendly_folder_path(&primary);
     let detail = if opts.sync_all_folders {
         format!(
             "IMAP: refreshed {} folders, fetched {total_messages} message(s)",
@@ -161,7 +162,7 @@ async fn sync_imap(
         )
     } else {
         format!(
-            "IMAP: {} folders on server · synced “{primary}”",
+            "IMAP: {} folders on server · synced “{primary_label}”",
             folders.len()
         )
     };
@@ -254,7 +255,13 @@ pub fn move_messages(
             for (id, from, uid) in &jobs {
                 if let Some(uid) = uid {
                     if let Err(e) = imap::move_uid(&mut session, from, *uid, &dest).await {
-                        tracing::warn!(error = %e, msg = %id, "IMAP move failed; moving locally");
+                        tracing::warn!(
+                            error = format!("{e:#}"),
+                            msg = %id,
+                            from = %from,
+                            dest = %dest,
+                            "IMAP move failed; moving locally"
+                        );
                     }
                 }
                 store.move_message_local(id, &account.id, from, &dest)?;

@@ -90,6 +90,10 @@ pub struct Palette {
     pub paper: Color32,
     pub faint: Color32,
     pub chip: Color32,
+    /// Mid message-list card fill.
+    pub list_card: Color32,
+    /// Mail reader card fill.
+    pub reader_card: Color32,
 }
 
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -115,6 +119,9 @@ fn light_palette(accent: Color32) -> Palette {
         paper: Color32::from_rgb(0xf7, 0xf7, 0xf8),
         faint: Color32::from_rgb(0xe8, 0xe9, 0xea),
         chip: Color32::from_rgb(0xe4, 0xe6, 0xe7),
+        // Very light accent wash (Sass-like mix of white ← accent).
+        list_card: mix(Color32::WHITE, accent, 0.045),
+        reader_card: Color32::WHITE,
     }
 }
 
@@ -122,6 +129,8 @@ fn dark_palette(accent: Color32) -> Palette {
     // Slightly lighter accent on dark chrome for contrast (same ids as the site).
     let accent = lighten(accent, 0.18);
     let panel = Color32::from_rgb(0x3a, 0x42, 0x44);
+    let paper = Color32::from_rgb(0x32, 0x38, 0x3a);
+    let chip = Color32::from_rgb(0x45, 0x54, 0x4f);
     Palette {
         accent,
         mute: Color32::from_rgb(0x9a, 0xa8, 0xa2),
@@ -129,9 +138,12 @@ fn dark_palette(accent: Color32) -> Palette {
         panel,
         select: mix(panel, accent, 0.28),
         ink: Color32::from_rgb(0xe8, 0xee, 0xeb),
-        paper: Color32::from_rgb(0x32, 0x38, 0x3a),
+        paper,
         faint: Color32::from_rgb(0x2c, 0x32, 0x34),
-        chip: Color32::from_rgb(0x45, 0x54, 0x4f),
+        chip,
+        // Slightly darker than paper, with a touch of accent.
+        list_card: mix(mix(paper, Color32::BLACK, 0.08), accent, 0.08),
+        reader_card: paper,
     }
 }
 
@@ -280,8 +292,7 @@ fn base_style() -> Style {
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.window_margin = egui::Margin::same(12.0);
     style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    // Solid bars sit on the panel edge (bar_outer_margin 0) and reserve a gutter
-    // so list/nav content no longer paints under a floating handle.
+    // Default: solid gutters for nav. Mid list overrides with [`list_scroll_style`].
     style.spacing.scroll = egui::style::ScrollStyle {
         bar_width: 8.0,
         bar_inner_margin: 2.0,
@@ -520,4 +531,33 @@ pub fn select(ctx: &egui::Context) -> Color32 {
 
 pub fn chip(ctx: &egui::Context) -> Color32 {
     palette(ctx).chip
+}
+
+pub fn list_card(ctx: &egui::Context) -> Color32 {
+    palette(ctx).list_card
+}
+
+/// Thin floating scrollbar for the mid message list: slim thumb, widens on hover.
+pub fn list_scroll_style() -> egui::style::ScrollStyle {
+    egui::style::ScrollStyle {
+        floating: true,
+        bar_width: 8.0,
+        floating_width: 3.0,
+        floating_allocated_width: 0.0,
+        bar_inner_margin: 0.0,
+        bar_outer_margin: 2.0,
+        handle_min_length: 24.0,
+        foreground_color: true,
+        // Always show a faint handle so scroll position is visible.
+        dormant_background_opacity: 0.0,
+        dormant_handle_opacity: 0.45,
+        active_background_opacity: 0.2,
+        active_handle_opacity: 0.75,
+        interact_background_opacity: 0.35,
+        interact_handle_opacity: 1.0,
+    }
+}
+
+pub fn reader_card(ctx: &egui::Context) -> Color32 {
+    palette(ctx).reader_card
 }

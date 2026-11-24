@@ -42,6 +42,9 @@ pub fn seed_demo_if_empty(store: &Store) -> Result<bool> {
                 date: now - Duration::hours(2),
                 seen: false,
                 snippet: "A calm Rust email client for Linux…".into(),
+                in_reply_to: String::new(),
+                references: String::new(),
+                thread_id: String::new(),
             },
             body_text: "Welcome to Mailbox\n\n\
 Mailbox keeps mail local. Sync IMAP when you are ready, then send selected \
@@ -69,6 +72,9 @@ Tips:\n\
                 date: now - Duration::hours(5),
                 seen: false,
                 snippet: "When you wire an agent token…".into(),
+                in_reply_to: String::new(),
+                references: String::new(),
+                thread_id: String::new(),
             },
             body_text: "Hi,\n\n\
 When you wire an Ailiak agent token in Settings, open this message and choose \
@@ -92,6 +98,9 @@ Ada\n"
                 date: now - Duration::days(1),
                 seen: true,
                 snippet: "Messages live in a local SQLite store…".into(),
+                in_reply_to: String::new(),
+                references: String::new(),
+                thread_id: String::new(),
             },
             body_text: "Offline cache\n\n\
 After the first sync, envelopes and bodies stay in SQLite under your XDG data \
@@ -114,6 +123,9 @@ already fetched.\n"
                 date: now - Duration::days(2),
                 seen: true,
                 snippet: "Sounds good — see you Saturday.".into(),
+                in_reply_to: String::new(),
+                references: String::new(),
+                thread_id: String::new(),
             },
             body_text: "Sounds good — see you Saturday.\n".into(),
             body_html: String::new(),

@@ -54,6 +54,8 @@ enum BgMsg {
         kind: SpecialFolderKind,
         count: usize,
     },
+    /// SMTP send finished.
+    SendOk,
     Error(String),
 }
 
@@ -69,6 +71,18 @@ pub struct MailboxApp {
     pub(crate) selected_stak: Option<String>,
     /// Cached Staks for the current envelope list (rebuilt on refresh / mark-seen).
     pub(crate) staks_cache: Vec<crate::staks::Stak>,
+    /// Selected person email (People chat mode).
+    pub(crate) selected_person: Option<String>,
+    /// People derived from current envelopes.
+    pub(crate) people_cache: Vec<crate::people::Person>,
+    /// Messages in the open People conversation (oldest → newest).
+    pub(crate) chat_messages: Vec<Message>,
+    /// Chat dock reply draft.
+    pub(crate) chat_reply: String,
+    pub(crate) chat_reply_focused: bool,
+    pub(crate) chat_attachments: Vec<crate::compose::ComposeAttachment>,
+    /// Floating compose draft (None = closed).
+    pub(crate) compose: Option<crate::compose::ComposeDraft>,
     pub(crate) selected_message: Option<MessageId>,
     pub(crate) open_message: Option<Message>,
     /// Opt-in remote images for the open message (privacy default: off).
@@ -94,10 +108,16 @@ pub struct MailboxApp {
     pub(crate) show_todo: bool,
     /// Folder rail: icons only when true.
     pub(crate) folders_collapsed: bool,
-    /// Nav accordion: Staks section open.
+    /// Nav accordion: Staks section open (legacy; People replaces it in the rail).
     pub(crate) staks_section_open: bool,
-    /// Nav accordion: Folders section open.
+    /// Nav accordion: People section open.
+    pub(crate) people_section_open: bool,
+    /// Nav accordion: Folders (system) section open.
     pub(crate) folders_section_open: bool,
+    /// Nav accordion: Labels (user) section open.
+    pub(crate) labels_section_open: bool,
+    /// Expanded parent paths in the Labels tree.
+    pub(crate) label_expanded: std::collections::HashSet<String>,
     /// Avatar click → mid-list multi-select (checkboxes on messages).
     pub(crate) list_multi_select: bool,
     /// Message ids checked while `list_multi_select` is on.
@@ -195,6 +215,13 @@ impl MailboxApp {
             selected_folder: "INBOX".into(),
             selected_stak: None,
             staks_cache: Vec::new(),
+            selected_person: None,
+            people_cache: Vec::new(),
+            chat_messages: Vec::new(),
+            chat_reply: String::new(),
+            chat_reply_focused: false,
+            chat_attachments: Vec::new(),
+            compose: None,
             selected_message: None,
             open_message: None,
             load_remote_images: false,
@@ -214,7 +241,10 @@ impl MailboxApp {
             show_todo: false,
             folders_collapsed: false,
             staks_section_open: false,
+            people_section_open: true,
             folders_section_open: true,
+            labels_section_open: true,
+            label_expanded: std::collections::HashSet::new(),
             list_multi_select: false,
             list_selected: std::collections::HashSet::new(),
             list_select_anchor: None,
@@ -672,6 +702,7 @@ impl MailboxApp {
         self.selected_stak = None;
         self.selected_message = None;
         self.open_message = None;
+        self.label_expanded.clear();
         self.mail_webview.destroy();
         self.mail_webview_req = None;
         self.search.clear();
@@ -1025,7 +1056,7 @@ and paste it here."
         self.ailiak_token_input.clear();
     }
 
-    fn refresh_folders(&mut self) -> Result<()> {
+    pub(crate) fn refresh_folders(&mut self) -> Result<()> {
         self.folders = self.store.list_folders(&self.account_id)?;
         // Local virtual folder — snoozed mail stays unread until opened later.
         let (_, snoozed_unread) = self.store.snoozed_counts(&self.account_id)?;
@@ -1036,12 +1067,26 @@ and paste it here."
             unread: snoozed_unread,
             hidden: false,
         });
-        self.folders
-            .sort_by_key(|f| mailbox_core::types::folder_sort_key(&f.path));
+        mailbox_core::folder_role::sort_folders(&mut self.folders);
+        // Prefer a visible system folder when the selection vanished or is All Mail (hidden).
+        let show_all = self.config.ui.show_all_mail;
+        let visible = |f: &mailbox_core::Folder| {
+            !f.hidden
+                && (show_all || !mailbox_core::is_all_mail(&f.path, &f.name))
+        };
         if self.folders.is_empty() {
             self.selected_folder = "INBOX".into();
-        } else if !self.folders.iter().any(|f| f.path == self.selected_folder) {
-            self.selected_folder = self.folders[0].path.clone();
+        } else if !self
+            .folders
+            .iter()
+            .any(|f| f.path == self.selected_folder && visible(f))
+        {
+            self.selected_folder = self
+                .folders
+                .iter()
+                .find(|f| visible(f))
+                .map(|f| f.path.clone())
+                .unwrap_or_else(|| "INBOX".into());
         }
         Ok(())
     }
@@ -1114,23 +1159,228 @@ and paste it here."
                 .search_local(&self.account_id, self.search.trim())?
         };
         self.rebuild_staks_cache();
+        self.rebuild_people_cache();
         Ok(())
     }
 
     pub(crate) fn rebuild_staks_cache(&mut self) {
         let had_staks = !self.staks_cache.is_empty();
         self.staks_cache = crate::staks::build_staks(&self.envelopes);
-        // Staks cleared → open Folders so the rail isn’t left collapsed/empty.
+        // Staks cleared → open Folders/Labels so the rail isn’t left empty.
         if had_staks && self.staks_cache.is_empty() {
             self.folders_section_open = true;
+            self.labels_section_open = true;
             self.staks_section_open = false;
         }
+    }
+
+    pub(crate) fn rebuild_people_cache(&mut self) {
+        self.people_cache = crate::people::build_people(&self.envelopes);
+    }
+
+    pub(crate) fn account_email(&self) -> String {
+        self.config
+            .accounts
+            .iter()
+            .find(|a| a.id == self.account_id)
+            .map(|a| a.email.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn open_compose_new(&mut self) {
+        let mut draft = crate::compose::ComposeDraft::new_blank();
+        draft.from_email = self.account_email();
+        self.compose = Some(draft);
+    }
+
+    pub(crate) fn open_reply(&mut self, all: bool) {
+        let Some(msg) = self.open_message.clone() else {
+            self.status = "Open a message to reply".into();
+            return;
+        };
+        let email = self.account_email();
+        self.compose = Some(crate::compose::ComposeDraft::from_reply(&msg, all, &email));
+    }
+
+    pub(crate) fn open_person_chat(&mut self, addr: &str) {
+        self.selected_person = Some(addr.to_lowercase());
+        self.selected_stak = None;
+        if self.compose.as_ref().is_some_and(|c| c.inline) {
+            self.compose = None;
+        }
+        self.chat_reply.clear();
+        self.chat_reply_focused = false;
+        self.chat_attachments.clear();
+        match self
+            .store
+            .list_messages_with_peer(&self.account_id, addr)
+        {
+            Ok(msgs) => {
+                self.chat_messages = msgs;
+                if let Some(last) = self.chat_messages.last() {
+                    self.selected_message = Some(last.envelope.id.clone());
+                    self.open_message = Some(last.clone());
+                }
+                self.status = format!("Chat with {addr}");
+            }
+            Err(e) => {
+                self.status = e.to_string();
+                self.chat_messages.clear();
+            }
+        }
+    }
+
+    pub(crate) fn submit_compose(&mut self) {
+        let Some(draft) = self.compose.clone() else {
+            return;
+        };
+        let Some(account) = self
+            .config
+            .accounts
+            .iter()
+            .find(|a| a.id == self.account_id)
+            .cloned()
+        else {
+            self.status = "Add an account in Settings before sending".into();
+            return;
+        };
+        let attachments = match load_outgoing_attachments(&draft.attachments) {
+            Ok(a) => a,
+            Err(e) => {
+                self.status = e;
+                return;
+            }
+        };
+        let mail = mailbox_core::OutgoingMail {
+            to: crate::compose::ComposeDraft::parse_recipients(&draft.to),
+            cc: crate::compose::ComposeDraft::parse_recipients(&draft.cc),
+            bcc: crate::compose::ComposeDraft::parse_recipients(&draft.bcc),
+            subject: draft.subject.clone(),
+            body_text: draft.body_for_send(),
+            in_reply_to: draft.in_reply_to.clone(),
+            references: draft.references.clone(),
+            attachments,
+        };
+        if mail.to.is_empty() {
+            self.status = "Add at least one To recipient".into();
+            return;
+        }
+        self.busy.send = true;
+        self.status = "Sending…".into();
+        let tx = self.bg_tx.clone();
+        let oauth = self.config.oauth.clone();
+        thread::spawn(move || {
+            let result = (|| {
+                let cred = mailbox_core::resolve_mail_credential(&account, &oauth, None)?;
+                mailbox_core::send_mail(&account, &cred, &mail)?;
+                Ok::<(), anyhow::Error>(())
+            })();
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(BgMsg::SendOk);
+                }
+                Err(e) => {
+                    let _ = tx.send(BgMsg::Error(e.to_string()));
+                }
+            }
+        });
+    }
+
+    pub(crate) fn submit_chat_reply(&mut self) {
+        let body = self.chat_reply.trim().to_string();
+        if body.is_empty() && self.chat_attachments.is_empty() {
+            return;
+        }
+        let Some(peer) = self.selected_person.clone() else {
+            return;
+        };
+        let Some(account) = self
+            .config
+            .accounts
+            .iter()
+            .find(|a| a.id == self.account_id)
+            .cloned()
+        else {
+            self.status = "Add an account in Settings before sending".into();
+            return;
+        };
+        let (subject, in_reply_to, references) = self
+            .chat_messages
+            .last()
+            .map(|m| {
+                (
+                    mailbox_core::reply_subject(&m.envelope.subject),
+                    Some(m.envelope.message_id.clone()),
+                    Some(mailbox_core::reply_references(
+                        &m.envelope.references,
+                        &m.envelope.message_id,
+                    )),
+                )
+            })
+            .unwrap_or_else(|| ("Hi".into(), None, None));
+        let attachments = match load_outgoing_attachments(&self.chat_attachments) {
+            Ok(a) => a,
+            Err(e) => {
+                self.status = e;
+                return;
+            }
+        };
+        let mail = mailbox_core::OutgoingMail {
+            to: vec![peer],
+            cc: vec![],
+            bcc: vec![],
+            subject,
+            body_text: body,
+            in_reply_to,
+            references,
+            attachments,
+        };
+        self.busy.send = true;
+        self.status = "Sending…".into();
+        let tx = self.bg_tx.clone();
+        let oauth = self.config.oauth.clone();
+        thread::spawn(move || {
+            let result = (|| {
+                let cred = mailbox_core::resolve_mail_credential(&account, &oauth, None)?;
+                mailbox_core::send_mail(&account, &cred, &mail)?;
+                Ok::<(), anyhow::Error>(())
+            })();
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(BgMsg::SendOk);
+                }
+                Err(e) => {
+                    let _ = tx.send(BgMsg::Error(e.to_string()));
+                }
+            }
+        });
     }
 
     pub(crate) fn open_id(&mut self, id: &MessageId) -> Result<()> {
         // Same message already open — skip SQLite + list reload (fast click path).
         if self.selected_message.as_ref() == Some(id) && self.open_message.is_some() {
+            // Still leave People chat if the mid-list was used to open mail.
+            if self.selected_person.is_some() {
+                self.selected_person = None;
+                self.chat_messages.clear();
+                self.chat_reply.clear();
+                self.chat_reply_focused = false;
+                self.chat_attachments.clear();
+            }
             return Ok(());
+        }
+
+        // Switching messages dismisses an in-reader reply (floating New can stay).
+        if self.compose.as_ref().is_some_and(|c| c.inline) {
+            self.compose = None;
+        }
+        // Mid-list selection always shows classic mail — leave People chat.
+        if self.selected_person.is_some() {
+            self.selected_person = None;
+            self.chat_messages.clear();
+            self.chat_reply.clear();
+            self.chat_reply_focused = false;
+            self.chat_attachments.clear();
         }
 
         if let Some(mut msg) = self.store.get_message(id)? {
@@ -1256,6 +1506,17 @@ and paste it here."
                         }
                     }
                 }
+                BgMsg::SendOk => {
+                    self.busy.send = false;
+                    self.status = "Message sent".into();
+                    self.compose = None;
+                    self.chat_reply.clear();
+                    self.chat_reply_focused = false;
+                    self.chat_attachments.clear();
+                    if let Some(peer) = self.selected_person.clone() {
+                        self.open_person_chat(&peer);
+                    }
+                }
                 BgMsg::MailMoved { kind, count } => {
                     self.busy.clear_move();
                     let label = kind.label();
@@ -1347,6 +1608,7 @@ and paste it here."
                     self.calendar.tasks = tasks;
                 }
                 BgMsg::Error(e) => {
+                    self.busy.send = false;
                     self.calendar.loading = false;
                     if self.busy.sync {
                         self.last_sync_at = Instant::now();
@@ -1738,10 +2000,13 @@ Try again, or check that a keyring/secret-service is running."
                 ui.monospace("d         open Desk in browser");
                 ui.monospace("a         Todo (mail → Ailiak)");
                 ui.monospace("c         calendar (Desk days)");
+                ui.monospace("n         new message (compose)");
+                ui.monospace("r         reply (or focus chat reply)");
+                ui.monospace("Shift+R   reply all");
                 ui.monospace("e         archive (selection or current)");
                 ui.monospace("# / Del   trash (selection or current)");
                 ui.monospace(",         settings page");
-                ui.monospace("Esc       leave settings / multi-select");
+                ui.monospace("Esc       leave settings / multi-select / compose");
                 ui.monospace("?         this help");
                 ui.add_space(8.0);
                 ui.label(RichText::new("Todo / slash").strong());
@@ -1783,6 +2048,10 @@ Try again, or check that a keyring/secret-service is running."
 
         let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         if escape && !ctx.wants_keyboard_input() {
+            if self.compose.is_some() {
+                self.compose = None;
+                return;
+            }
             if self.list_multi_select {
                 self.toggle_list_multi_select();
                 return;
@@ -1790,6 +2059,12 @@ Try again, or check that a keyring/secret-service is running."
             if self.show_todo || self.show_calendar {
                 self.show_todo = false;
                 self.show_calendar = false;
+                return;
+            }
+            if self.selected_person.is_some() {
+                self.selected_person = None;
+                self.chat_messages.clear();
+                self.chat_reply_focused = false;
                 return;
             }
         }
@@ -1835,6 +2110,19 @@ Try again, or check that a keyring/secret-service is running."
             if i.key_pressed(egui::Key::C) && !i.modifiers.any() {
                 self.toggle_calendar();
             }
+            if i.key_pressed(egui::Key::N) && !i.modifiers.any() {
+                self.open_compose_new();
+            }
+            if i.key_pressed(egui::Key::R) && !i.modifiers.shift && !i.modifiers.ctrl {
+                if self.selected_person.is_some() {
+                    self.chat_reply_focused = true;
+                } else {
+                    self.open_reply(false);
+                }
+            }
+            if i.key_pressed(egui::Key::R) && i.modifiers.shift {
+                self.open_reply(true);
+            }
             if i.key_pressed(egui::Key::E) && !i.modifiers.any() {
                 if self.list_multi_select && !self.list_selected.is_empty() {
                     self.move_listed_messages(SpecialFolderKind::Archive);
@@ -1874,6 +2162,25 @@ Try again, or check that a keyring/secret-service is running."
             self.navigate_list(delta, extend);
         }
     }
+}
+
+fn load_outgoing_attachments(
+    items: &[crate::compose::ComposeAttachment],
+) -> Result<Vec<mailbox_core::OutgoingAttachment>, String> {
+    let mut out = Vec::with_capacity(items.len());
+    for att in items {
+        let bytes = std::fs::read(&att.path)
+            .map_err(|e| format!("Could not read attachment {}: {e}", att.name))?;
+        if bytes.len() > 25 * 1024 * 1024 {
+            return Err(format!("Attachment {} is larger than 25 MB", att.name));
+        }
+        out.push(mailbox_core::OutgoingAttachment {
+            filename: att.name.clone(),
+            mime: crate::compose::mime_for_path(&att.path),
+            bytes,
+        });
+    }
+    Ok(out)
 }
 
 impl App for MailboxApp {
@@ -1916,7 +2223,25 @@ impl App for MailboxApp {
 
         self.show_shell(ctx);
 
-        let hide_mail = self.show_settings || self.show_help;
+        // Floating compose for New (and reply promoted to full via ⤢).
+        if let Some(mut draft) = self.compose.take() {
+            if draft.inline {
+                self.compose = Some(draft);
+            } else {
+                let res = crate::compose::show_floating_compose(ctx, &mut draft, self.busy.send);
+                if res.send {
+                    self.compose = Some(draft);
+                    self.submit_compose();
+                } else if !res.close {
+                    self.compose = Some(draft);
+                }
+            }
+        }
+
+        // wry child views always sit above egui — hide whenever composing.
+        let hide_mail = self.show_settings
+            || self.show_help
+            || self.compose.is_some();
         if hide_mail {
             self.mail_webview.hide();
         } else if let Some(req) = self.mail_webview_req.take() {

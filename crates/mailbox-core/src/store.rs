@@ -11,17 +11,26 @@ fn envelope_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Envelope> {
     let date = DateTime::parse_from_rfc3339(&date_s)
         .map(|d| d.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
+    let message_id: String = row.get(3)?;
+    let in_reply_to: String = row.get(10).unwrap_or_default();
+    let references: String = row.get(11).unwrap_or_default();
+    let thread_id: String = row.get(12).unwrap_or_else(|_| {
+        Envelope::compute_thread_id(&message_id, &in_reply_to, &references)
+    });
     Ok(Envelope {
         id: row.get(0)?,
         account_id: row.get(1)?,
         folder_path: row.get(2)?,
-        message_id: row.get(3)?,
+        message_id,
         subject: row.get(4)?,
         from_name: row.get(5)?,
         from_addr: row.get(6)?,
         date,
         seen: row.get::<_, i64>(8)? != 0,
         snippet: row.get(9)?,
+        in_reply_to,
+        references,
+        thread_id,
     })
 }
 
@@ -100,7 +109,10 @@ impl Store {
                 body_text TEXT NOT NULL,
                 body_html TEXT NOT NULL DEFAULT '',
                 to_addrs TEXT NOT NULL DEFAULT '[]',
-                cc_addrs TEXT NOT NULL DEFAULT '[]'
+                cc_addrs TEXT NOT NULL DEFAULT '[]',
+                in_reply_to TEXT NOT NULL DEFAULT '',
+                references_hdr TEXT NOT NULL DEFAULT '',
+                thread_id TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_messages_folder
                 ON messages(account_id, folder_path, date_rfc3339 DESC);
@@ -123,10 +135,26 @@ impl Store {
         let _ = self
             .conn
             .execute("ALTER TABLE messages ADD COLUMN snoozed INTEGER NOT NULL DEFAULT 0", []);
+        let _ = self.conn.execute(
+            "ALTER TABLE messages ADD COLUMN in_reply_to TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE messages ADD COLUMN references_hdr TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''",
+            [],
+        );
         self.conn.execute_batch(
             r#"
             CREATE INDEX IF NOT EXISTS idx_messages_snoozed
                 ON messages(account_id, snoozed, date_rfc3339 DESC);
+            CREATE INDEX IF NOT EXISTS idx_messages_thread
+                ON messages(account_id, thread_id, date_rfc3339 ASC);
+            CREATE INDEX IF NOT EXISTS idx_messages_from
+                ON messages(account_id, from_addr);
             "#,
         )?;
         Ok(())
@@ -224,8 +252,9 @@ impl Store {
             INSERT INTO messages (
                 id, account_id, folder_path, message_id, subject,
                 from_name, from_addr, date_rfc3339, seen, snippet,
-                body_text, body_html, to_addrs, cc_addrs
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                body_text, body_html, to_addrs, cc_addrs,
+                in_reply_to, references_hdr, thread_id
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
             ON CONFLICT(id) DO UPDATE SET
                 subject = excluded.subject,
                 from_name = excluded.from_name,
@@ -242,7 +271,10 @@ impl Store {
                     ELSE messages.body_html
                 END,
                 to_addrs = excluded.to_addrs,
-                cc_addrs = excluded.cc_addrs
+                cc_addrs = excluded.cc_addrs,
+                in_reply_to = excluded.in_reply_to,
+                references_hdr = excluded.references_hdr,
+                thread_id = excluded.thread_id
             "#,
             params![
                 e.id,
@@ -259,6 +291,9 @@ impl Store {
                 msg.body_html,
                 to,
                 cc,
+                e.in_reply_to,
+                e.references,
+                e.thread_id,
             ],
         )?;
         Ok(())
@@ -271,7 +306,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, account_id, folder_path, message_id, subject,
-                   from_name, from_addr, date_rfc3339, seen, snippet
+                   from_name, from_addr, date_rfc3339, seen, snippet,
+                   in_reply_to, references_hdr, thread_id
             FROM messages
             WHERE account_id = ?1 AND folder_path = ?2 AND snoozed = 0
             ORDER BY date_rfc3339 DESC
@@ -286,7 +322,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, account_id, folder_path, message_id, subject,
-                   from_name, from_addr, date_rfc3339, seen, snippet
+                   from_name, from_addr, date_rfc3339, seen, snippet,
+                   in_reply_to, references_hdr, thread_id
             FROM messages
             WHERE account_id = ?1 AND snoozed = 1
             ORDER BY date_rfc3339 DESC
@@ -294,6 +331,80 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![account_id], envelope_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Messages in a thread, oldest first (for chat view).
+    pub fn list_thread_messages(
+        &self,
+        account_id: &str,
+        thread_id: &str,
+    ) -> Result<Vec<Message>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id FROM messages
+            WHERE account_id = ?1 AND thread_id = ?2
+            ORDER BY date_rfc3339 ASC
+            "#,
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(params![account_id, thread_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(msg) = self.get_message(&id)? {
+                out.push(msg);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Messages exchanged with a peer address (from them or to them), across folders.
+    pub fn list_messages_with_peer(
+        &self,
+        account_id: &str,
+        peer_addr: &str,
+    ) -> Result<Vec<Message>> {
+        let peer = peer_addr.trim().to_lowercase();
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, from_addr, to_addrs, cc_addrs, date_rfc3339
+            FROM messages
+            WHERE account_id = ?1 AND snoozed = 0
+            ORDER BY date_rfc3339 ASC
+            "#,
+        )?;
+        let candidates: Vec<(String, String, String, String)> = stmt
+            .query_map(params![account_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut out = Vec::new();
+        for (id, from, to_s, cc_s) in candidates {
+            let from_l = from.to_lowercase();
+            if from_l == peer || from_l.contains(&peer) {
+                if let Some(msg) = self.get_message(&id)? {
+                    out.push(msg);
+                }
+                continue;
+            }
+            let to: Vec<String> = serde_json::from_str(&to_s).unwrap_or_default();
+            let cc: Vec<String> = serde_json::from_str(&cc_s).unwrap_or_default();
+            let hit = to
+                .iter()
+                .chain(cc.iter())
+                .any(|a| a.to_lowercase().contains(&peer));
+            if hit {
+                if let Some(msg) = self.get_message(&id)? {
+                    out.push(msg);
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn snoozed_counts(&self, account_id: &str) -> Result<(u32, u32)> {
@@ -356,7 +467,8 @@ impl Store {
             r#"
             SELECT id, account_id, folder_path, message_id, subject,
                    from_name, from_addr, date_rfc3339, seen, snippet,
-                   body_text, to_addrs, cc_addrs, body_html
+                   body_text, to_addrs, cc_addrs, body_html,
+                   in_reply_to, references_hdr, thread_id
             FROM messages WHERE id = ?1
             "#,
         )?;
@@ -371,18 +483,27 @@ impl Store {
                 let to: Vec<String> = serde_json::from_str(&to_s).unwrap_or_default();
                 let cc: Vec<String> = serde_json::from_str(&cc_s).unwrap_or_default();
                 let body_html: String = row.get(13).unwrap_or_default();
+                let message_id: String = row.get(3)?;
+                let in_reply_to: String = row.get(14).unwrap_or_default();
+                let references: String = row.get(15).unwrap_or_default();
+                let thread_id: String = row.get(16).unwrap_or_else(|_| {
+                    Envelope::compute_thread_id(&message_id, &in_reply_to, &references)
+                });
                 Ok(Message {
                     envelope: Envelope {
                         id: row.get(0)?,
                         account_id: row.get(1)?,
                         folder_path: row.get(2)?,
-                        message_id: row.get(3)?,
+                        message_id,
                         subject: row.get(4)?,
                         from_name: row.get(5)?,
                         from_addr: row.get(6)?,
                         date,
                         seen: row.get::<_, i64>(8)? != 0,
                         snippet: row.get(9)?,
+                        in_reply_to,
+                        references,
+                        thread_id,
                     },
                     body_text: row.get(10)?,
                     body_html,
@@ -470,7 +591,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, account_id, folder_path, message_id, subject,
-                   from_name, from_addr, date_rfc3339, seen, snippet
+                   from_name, from_addr, date_rfc3339, seen, snippet,
+                   in_reply_to, references_hdr, thread_id
             FROM messages
             WHERE account_id = ?1
               AND snoozed = 0
@@ -540,6 +662,9 @@ mod tests {
                 date: Utc.with_ymd_and_hms(2026, 11, 21, 8, 0, 0).unwrap(),
                 seen: false,
                 snippet: "Hi there".into(),
+                in_reply_to: String::new(),
+                references: String::new(),
+                thread_id: String::new(),
             },
             body_text: "Hi there\n\n— Ada".into(),
             body_html: String::new(),

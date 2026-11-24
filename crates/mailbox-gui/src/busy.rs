@@ -11,6 +11,7 @@ pub struct BusyFlags {
     pub mail_test: bool,
     pub oauth: bool,
     pub ailiak: bool,
+    pub send: bool,
 }
 
 impl BusyFlags {
@@ -22,6 +23,7 @@ impl BusyFlags {
             || self.mail_test
             || self.oauth
             || self.ailiak
+            || self.send
     }
 
     pub fn moving(self) -> bool {
@@ -46,5 +48,6 @@ impl BusyFlags {
         self.mail_test = false;
         self.oauth = false;
         self.ailiak = false;
+        self.send = false;
     }
 }

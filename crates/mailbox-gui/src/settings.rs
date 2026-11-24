@@ -984,14 +984,48 @@ impl MailboxApp {
                 .size(13.0)
                 .family(theme::nav_family()),
         );
+        ui.label(
+            RichText::new("System folders and user labels appear as separate sections in the left rail.")
+                .small()
+                .color(theme::mute(ui.ctx())),
+        );
         ui.add_space(6.0);
 
-        let mut toggle: Option<(String, bool)> = None;
+        let mut show_all = self.config.ui.show_all_mail;
+        if ui
+            .checkbox(&mut show_all, "Show All Mail in Folders")
+            .on_hover_text(
+                "Gmail’s All Mail is hidden by default (Archive still works). Turn on to list it under Folders.",
+            )
+            .changed()
+        {
+            self.config.ui.show_all_mail = show_all;
+            self.persist_ui_prefs(ui.ctx());
+            let _ = self.refresh_folders();
+        }
+        ui.add_space(10.0);
+
+        let mut system: Vec<&mailbox_core::Folder> = Vec::new();
+        let mut labels: Vec<&mailbox_core::Folder> = Vec::new();
         for folder in &all {
+            if mailbox_core::classify_mailbox(&folder.path, &folder.name).is_system() {
+                system.push(folder);
+            } else {
+                labels.push(folder);
+            }
+        }
+
+        let mut toggle: Option<(String, bool)> = None;
+        let mut row = |ui: &mut Ui, folder: &mailbox_core::Folder| {
             ui.horizontal(|ui| {
                 let mut visible = !folder.hidden;
+                let label = if mailbox_core::is_all_mail(&folder.path, &folder.name) {
+                    format!("{} (All Mail)", folder.name)
+                } else {
+                    folder.name.clone()
+                };
                 if ui
-                    .checkbox(&mut visible, &folder.name)
+                    .checkbox(&mut visible, label)
                     .on_hover_text(&folder.path)
                     .changed()
                 {
@@ -1012,6 +1046,38 @@ impl MailboxApp {
                     );
                 }
             });
+        };
+
+        ui.label(
+            RichText::new("Folders")
+                .strong()
+                .size(12.0)
+                .family(theme::nav_family())
+                .color(theme::mute(ui.ctx())),
+        );
+        ui.add_space(4.0);
+        for folder in &system {
+            row(ui, folder);
+        }
+        ui.add_space(12.0);
+        ui.label(
+            RichText::new("Labels")
+                .strong()
+                .size(12.0)
+                .family(theme::nav_family())
+                .color(theme::mute(ui.ctx())),
+        );
+        ui.add_space(4.0);
+        if labels.is_empty() {
+            ui.label(
+                RichText::new("No custom labels yet.")
+                    .small()
+                    .color(theme::mute(ui.ctx())),
+            );
+        } else {
+            for folder in &labels {
+                row(ui, folder);
+            }
         }
         if let Some((path, hidden)) = toggle {
             self.set_folder_hidden(&path, hidden);

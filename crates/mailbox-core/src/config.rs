@@ -333,6 +333,9 @@ pub struct UiConfig {
     /// Lowercased `From` addresses allowed to load remote images (privacy allowlist).
     #[serde(default)]
     pub remote_image_senders: Vec<String>,
+    /// Show Gmail “All Mail” in the Folders rail (hidden by default — use Archive).
+    #[serde(default)]
+    pub show_all_mail: bool,
 }
 
 /// Normalize a mail address for allowlist lookup (trim + lowercase).
@@ -385,6 +388,7 @@ impl Default for UiConfig {
             default_account_id: String::new(),
             auto_sync_mins: default_auto_sync_mins(),
             remote_image_senders: Vec::new(),
+            show_all_mail: false,
         }
     }
 }
