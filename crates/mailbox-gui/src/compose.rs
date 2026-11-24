@@ -637,7 +637,7 @@ pub fn show_floating_compose(
         .show(ctx, |ui| {
             Frame::popup(ui.style())
                 .fill(theme::paper(ctx))
-                .stroke(egui::Stroke::new(1.0, theme::mute(ctx).linear_multiply(0.35)))
+                .stroke(egui::Stroke::new(1.0_f32, theme::mute(ctx).linear_multiply(0.35)))
                 .rounding(10.0)
                 .inner_margin(egui::Margin::same(12.0))
                 .show(ui, |ui| {

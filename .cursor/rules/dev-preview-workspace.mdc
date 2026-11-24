@@ -1,0 +1,17 @@
+---
+description: When building/running the GUI for a full preview, pick an Omarchy workspace with -o
+alwaysApply: true
+---
+
+# Dev preview on Omarchy
+
+When you need to **build and run the app to test a full GUI preview**, do not launch it on the current coding workspace. Use `bin/build-dev.sh` with `-o` / `--omarchy` so the window opens on a chosen Hyprland workspace (screen).
+
+```bash
+bin/build-dev.sh -o 3          # workspace 3 (typical preview screen)
+bin/build-dev.sh --omarchy 5   # any workspace N
+bin/build-dev.sh -o            # defaults to workspace 3
+```
+
+- Prefer asking which workspace to use if the user has not said; otherwise default to `-o 3`.
+- Plain `cargo run` / `bin/build-dev.sh` without `-o` is fine for compile-only checks, not for interactive full-app preview on Omarchy.

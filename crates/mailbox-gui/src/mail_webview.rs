@@ -10,6 +10,9 @@ use mailbox_core::oauth::open_url;
 use mailbox_core::{
     build_mail_html_document, classify_mail_navigation, MailNavAction, MessageId,
 };
+#[cfg(target_os = "linux")]
+use wry::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
+#[cfg(not(target_os = "linux"))]
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
 use wry::raw_window_handle::HasWindowHandle;
 use wry::{NewWindowResponse, Rect as WryRect, WebView, WebViewBuilder};
@@ -22,6 +25,9 @@ enum ExtLink {
 #[derive(Clone)]
 pub struct MailWebViewRequest {
     pub bounds: Rect,
+    /// egui `pixels_per_point` — needed on Linux where wry's X11 DPI (~1.0 from
+    /// screen mm) disagrees with winit's guessed scale (~1.17).
+    pub pixels_per_point: f32,
     pub msg_id: MessageId,
     pub body_html: String,
     pub load_images: bool,
@@ -33,6 +39,9 @@ pub struct MailWebView {
     /// (msg_id, load_images, dark)
     loaded: Option<(MessageId, bool, bool)>,
     last_bounds: Option<Rect>,
+    /// Scale used at last create — recreate when the window moves to a
+    /// different-DPI monitor (bounds in points can stay similar).
+    last_ppp: f32,
     dark: bool,
     visible: bool,
     link_tx: Sender<ExtLink>,
@@ -48,6 +57,7 @@ impl Default for MailWebView {
             webview: None,
             loaded: None,
             last_bounds: None,
+            last_ppp: 0.0,
             dark: false,
             visible: false,
             link_tx,
@@ -88,8 +98,13 @@ impl MailWebView {
     }
 
     pub fn hide(&mut self) {
+        if !self.visible {
+            return;
+        }
         self.visible = false;
         if let Some(wv) = &self.webview {
+            // gtk_widget_hide can assert on a dead GdkFrameClock for X11 child
+            // views; ignore errors and avoid repeat hide calls.
             let _ = wv.set_visible(false);
         }
     }
@@ -98,10 +113,14 @@ impl MailWebView {
     /// Calling this on window-close avoids a common Linux hang where wry’s
     /// `Drop` runs after the parent X11 window is already gone.
     pub fn destroy(&mut self) {
-        self.webview = None;
+        // Take + drop without an extra set_visible(false): that path freezes the
+        // GDK frame clock and asserts when the foreign X11 window is mid-teardown.
+        let wv = self.webview.take();
         self.loaded = None;
         self.last_bounds = None;
+        self.last_ppp = 0.0;
         self.visible = false;
+        drop(wv);
         Self::pump_platform();
     }
 
@@ -124,6 +143,7 @@ impl MailWebView {
         load_images: bool,
         dark: bool,
         bounds: Rect,
+        pixels_per_point: f32,
     ) {
         Self::pump_platform();
 
@@ -133,6 +153,8 @@ impl MailWebView {
             return;
         }
 
+        let ppp = pixels_per_point.max(0.1);
+
         let needs_reload = self
             .loaded
             .as_ref()
@@ -141,22 +163,19 @@ impl MailWebView {
             })
             .unwrap_or(true);
 
-        // Theme flip: recreate so WebKit chrome matches (set_background_color alone
-        // is unreliable after the first paint on some Linux builds).
-        if self.webview.is_some() && self.dark != dark {
-            self.destroy();
-        }
-
-        // WebKitGTK child `set_bounds` often fails to grow an already-created view.
-        // Recreate when the reader area changes meaningfully so size sticks.
-        if self.webview.is_some() && self.needs_recreate_for_bounds(bounds) {
-            self.destroy();
-        }
-
+        // Mail document + native chrome are always light; theme flips don't need recreate.
         self.dark = dark;
 
+        // On Linux, prefer recreate over set_bounds: wry sizes the X11 child at create,
+        // but set_bounds uses GTK's scale (often 1.0) and shrinks/misplaces the view.
+        // Elsewhere, set_bounds is fine for small moves. Also recreate on DPI/scale change
+        // (e.g. dragged to another monitor) — physical pixels depend on ppp.
+        if self.webview.is_some() && self.needs_recreate_for_bounds(bounds, ppp) {
+            self.destroy();
+        }
+
         if self.webview.is_none() {
-            match self.create(window, bounds) {
+            match self.create(window, bounds, ppp) {
                 Ok(()) => self.last_error = None,
                 Err(e) => {
                     self.last_error = Some(e);
@@ -166,10 +185,20 @@ impl MailWebView {
         }
 
         if let Some(wv) = &self.webview {
-            // Always push bounds — Linux does not auto-resize child webviews.
-            let _ = wv.set_bounds(to_wry_rect(bounds));
-            self.last_bounds = Some(bounds);
-            Self::pump_platform();
+            #[cfg(not(target_os = "linux"))]
+            {
+                let drifted = self.last_bounds.is_none_or(|prev| {
+                    (prev.min.x - bounds.min.x).abs() > 0.5
+                        || (prev.min.y - bounds.min.y).abs() > 0.5
+                        || (prev.width() - bounds.width()).abs() > 0.5
+                        || (prev.height() - bounds.height()).abs() > 0.5
+                });
+                if drifted {
+                    let _ = wv.set_bounds(to_wry_rect(bounds, ppp));
+                    self.last_bounds = Some(bounds);
+                }
+            }
+            // Linux: create() already applied bounds; set_bounds fights GTK vs winit scale.
             if !self.visible {
                 let _ = wv.set_visible(true);
                 self.visible = true;
@@ -185,36 +214,43 @@ impl MailWebView {
         }
     }
 
-    fn needs_recreate_for_bounds(&self, bounds: Rect) -> bool {
+    fn needs_recreate_for_bounds(&self, bounds: Rect, ppp: f32) -> bool {
+        if self.last_ppp > 0.0 && (self.last_ppp - ppp).abs() > 0.01 {
+            return true;
+        }
         let Some(prev) = self.last_bounds else {
             return false;
         };
-        // Recreate on large size jumps (panel resize / first good layout after a tiny frame).
-        (prev.width() - bounds.width()).abs() > 8.0
-            || (prev.height() - bounds.height()).abs() > 8.0
-            || (prev.min.x - bounds.min.x).abs() > 8.0
-            || (prev.min.y - bounds.min.y).abs() > 8.0
+        // Linux: recreate on drift (set_bounds fights X11 DPI). Slightly larger
+        // threshold cuts recreate thrash that trips Gdk frame-clock asserts.
+        // Elsewhere: only large jumps; small moves use set_bounds.
+        let thresh = if cfg!(target_os = "linux") { 8.0 } else { 8.0 };
+        (prev.width() - bounds.width()).abs() > thresh
+            || (prev.height() - bounds.height()).abs() > thresh
+            || (prev.min.x - bounds.min.x).abs() > thresh
+            || (prev.min.y - bounds.min.y).abs() > thresh
     }
 
-    fn create(&mut self, window: &impl HasWindowHandle, bounds: Rect) -> Result<(), String> {
+    fn create(
+        &mut self,
+        window: &impl HasWindowHandle,
+        bounds: Rect,
+        pixels_per_point: f32,
+    ) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         ensure_gtk();
 
         let tx = self.link_tx.clone();
-        let (bg_rgba, bg_css) = if self.dark {
-            ((0, 0, 0, 255), "#000")
-        } else {
-            ((255, 255, 255, 255), "#fff")
-        };
-        let placeholder = format!(
-            "<!DOCTYPE html><html><body style=\"background:{bg_css};margin:0\"></body></html>"
-        );
+        // HTML mail always paints on a light canvas (see build_mail_html_document).
+        // Keep the native view white too so dark app chrome doesn't letterbox the body.
+        let bg_rgba = (255, 255, 255, 255);
+        let placeholder =
+            "<!DOCTYPE html><html><body style=\"background:#fff;margin:0\"></body></html>";
         let builder = WebViewBuilder::new()
-            // Match app theme so recreate/load doesn't flash the wrong chrome color.
             .with_transparent(false)
             .with_background_color(bg_rgba)
             .with_html(placeholder)
-            .with_bounds(to_wry_rect(bounds))
+            .with_bounds(to_wry_rect(bounds, pixels_per_point))
             .with_navigation_handler(move |url| match classify_mail_navigation(&url) {
                 MailNavAction::Stay => true,
                 MailNavAction::OpenExternal(safe) => {
@@ -267,21 +303,47 @@ set GDK_BACKEND=x11 or restart AiliakMail)"
         let _ = webview.set_background_color(bg_rgba);
         self.webview = Some(webview);
         self.last_bounds = Some(bounds);
+        self.last_ppp = pixels_per_point.max(0.1);
         self.visible = true;
         Ok(())
     }
 }
 
-fn to_wry_rect(bounds: Rect) -> WryRect {
-    WryRect {
-        position: Position::Logical(LogicalPosition::new(
-            bounds.min.x as f64,
-            bounds.min.y as f64,
-        )),
-        size: Size::Logical(LogicalSize::new(
-            bounds.width().max(1.0) as f64,
-            bounds.height().max(1.0) as f64,
-        )),
+fn to_wry_rect(bounds: Rect, pixels_per_point: f32) -> WryRect {
+    // Linux/X11: wry's create path uses scale_factor_from_x11 (screen mm → often
+    // ~1.0 on XWayland) while winit/egui guess ~1.17. Passing Logical egui points
+    // under-sizes/shifts the child left. Physical pixels (= points * ppp) match
+    // egui's paint coordinates. Do not also call set_bounds on Linux — GTK's
+    // scale_factor (1.0) would fight this.
+    //
+    // Elsewhere: Logical egui points; wry applies the window scale factor.
+    #[cfg(target_os = "linux")]
+    {
+        let ppp = pixels_per_point.max(0.1) as f64;
+        WryRect {
+            position: Position::Physical(PhysicalPosition::new(
+                (bounds.min.x as f64 * ppp).round() as i32,
+                (bounds.min.y as f64 * ppp).round() as i32,
+            )),
+            size: Size::Physical(PhysicalSize::new(
+                (bounds.width().max(1.0) as f64 * ppp).round() as u32,
+                (bounds.height().max(1.0) as f64 * ppp).round() as u32,
+            )),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pixels_per_point;
+        WryRect {
+            position: Position::Logical(LogicalPosition::new(
+                bounds.min.x as f64,
+                bounds.min.y as f64,
+            )),
+            size: Size::Logical(LogicalSize::new(
+                bounds.width().max(1.0) as f64,
+                bounds.height().max(1.0) as f64,
+            )),
+        }
     }
 }
 

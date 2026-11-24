@@ -807,9 +807,11 @@ fn rewrite_img_tag_block_src(tag: &str) -> String {
 
 /// Full HTML document for the embedded webview (CSP + sanitized body).
 ///
-/// `dark` picks chrome-matching page colors (white/black) so recreate/load
-/// flashes match the app theme; HTML emails often set their own backgrounds.
-pub fn build_mail_html_document(html: &str, load_remote_images: bool, dark: bool) -> String {
+/// Always use a light reading canvas. HTML mail is authored for light
+/// backgrounds; a dark `body { color }` inherits into white tables (LinkedIn,
+/// etc.) and washes text out. `dark` is kept for API stability / callers that
+/// still theme the native webview chrome around this document.
+pub fn build_mail_html_document(html: &str, load_remote_images: bool, _dark: bool) -> String {
     let risks = analyze_remote_image_threats(html);
     let body = {
         let clean = sanitize_mail_html(html);
@@ -820,11 +822,7 @@ pub fn build_mail_html_document(html: &str, load_remote_images: bool, dark: bool
     } else {
         "img-src 'none';"
     };
-    let (bg, fg, link) = if dark {
-        ("#000000", "#e8eeeb", "#5ecfad")
-    } else {
-        ("#ffffff", "#1a1a1a", "#0b6e4f")
-    };
+    let (bg, fg, link) = ("#ffffff", "#1a1a1a", "#0b6e4f");
     // Scripts always blocked. Styles allowed inline (email HTML relies on them).
     let csp = format!(
         "default-src 'none'; style-src 'unsafe-inline'; {img_src} \

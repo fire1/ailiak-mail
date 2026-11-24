@@ -108,7 +108,7 @@ pub struct MailboxApp {
     pub(crate) show_todo: bool,
     /// Folder rail: icons only when true.
     pub(crate) folders_collapsed: bool,
-    /// Nav accordion: Staks section open (legacy; People replaces it in the rail).
+    /// Nav accordion: Staks (brand/domain stacks) section open.
     pub(crate) staks_section_open: bool,
     /// Nav accordion: People section open.
     pub(crate) people_section_open: bool,
@@ -126,6 +126,8 @@ pub struct MailboxApp {
     list_select_anchor: Option<usize>,
     /// Mid-column width — owned by us (not egui PanelState).
     pub(crate) list_width: f32,
+    /// Last shell width used to proportion `list_width` (~30% mid / ≥50% reader).
+    pub(crate) last_shell_width: f32,
     /// Left edge of the list panel (for manual resize math).
     pub(crate) list_panel_left: f32,
     pub(crate) todo_line: String,
@@ -240,7 +242,7 @@ impl MailboxApp {
             show_calendar: false,
             show_todo: false,
             folders_collapsed: false,
-            staks_section_open: false,
+            staks_section_open: true,
             people_section_open: true,
             folders_section_open: true,
             labels_section_open: true,
@@ -249,6 +251,7 @@ impl MailboxApp {
             list_selected: std::collections::HashSet::new(),
             list_select_anchor: None,
             list_width: 340.0,
+            last_shell_width: 0.0,
             list_panel_left: 0.0,
             todo_line: String::new(),
             todo_detail: String::new(),
@@ -834,6 +837,10 @@ and paste it here."
 
     /// Archive or trash the open message (conversation).
     pub(crate) fn move_current_message(&mut self, kind: SpecialFolderKind) {
+        if self.selected_person.is_some() {
+            self.move_person_conversation(kind);
+            return;
+        }
         let Some(id) = self.selected_message.clone() else {
             self.status = "Select a message first".into();
             return;
@@ -841,8 +848,39 @@ and paste it here."
         self.start_move_messages(vec![id], kind);
     }
 
+    /// Archive/trash every active message with the open People peer.
+    pub(crate) fn move_person_conversation(&mut self, kind: SpecialFolderKind) {
+        let Some(peer) = self.selected_person.clone() else {
+            self.status = "Select a person first".into();
+            return;
+        };
+        let ids: Vec<MessageId> = match self.store.list_messages_with_peer(&self.account_id, &peer)
+        {
+            Ok(msgs) => msgs.into_iter().map(|m| m.envelope.id).collect(),
+            Err(e) => {
+                self.status = e.to_string();
+                return;
+            }
+        };
+        if ids.is_empty() {
+            // Nothing left to move — drop them from People immediately.
+            self.selected_person = None;
+            self.chat_messages.clear();
+            self.selected_message = None;
+            self.open_message = None;
+            self.rebuild_people_cache();
+            self.status = format!("No messages left with {peer}");
+            return;
+        }
+        self.start_move_messages(ids, kind);
+    }
+
     /// Archive or trash mid-list selection (multi-select) or every visible row.
     pub(crate) fn move_listed_messages(&mut self, kind: SpecialFolderKind) {
+        if self.selected_person.is_some() && !self.list_multi_select {
+            self.move_person_conversation(kind);
+            return;
+        }
         let ids: Vec<MessageId> = if self.list_multi_select {
             let visible: std::collections::HashSet<&MessageId> =
                 if let Some(stak_id) = self.selected_stak.as_deref() {
@@ -1176,6 +1214,13 @@ and paste it here."
 
     pub(crate) fn rebuild_people_cache(&mut self) {
         self.people_cache = crate::people::build_people(&self.envelopes);
+        if let Some(peer) = self.selected_person.as_deref() {
+            if !self.people_cache.iter().any(|p| p.addr == peer) {
+                // Peer no longer in this folder’s People list (e.g. trashed).
+                self.selected_person = None;
+                self.chat_messages.clear();
+            }
+        }
     }
 
     pub(crate) fn account_email(&self) -> String {
@@ -1530,10 +1575,49 @@ and paste it here."
                     self.selected_message = None;
                     self.mail_webview_req = None;
                     self.mail_body_cache = None;
+                    let peer = self.selected_person.clone();
                     if let Err(e) = self.refresh_folders() {
                         self.status = e.to_string();
                     } else if let Err(e) = self.refresh_envelopes() {
                         self.status = e.to_string();
+                    }
+                    // People conversation: leave the chat when nothing active remains.
+                    if let Some(peer) = peer {
+                        match self.store.list_messages_with_peer(&self.account_id, &peer) {
+                            Ok(msgs) if msgs.is_empty() => {
+                                self.selected_person = None;
+                                self.chat_messages.clear();
+                                self.rebuild_people_cache();
+                                self.status = format!("Conversation moved to {label}");
+                                if let Some(first) =
+                                    self.envelopes.first().map(|e| e.id.clone())
+                                {
+                                    let _ = self.open_id(&first);
+                                }
+                            }
+                            Ok(msgs) => {
+                                self.chat_messages = msgs;
+                                self.rebuild_people_cache();
+                                if !self.people_cache.iter().any(|p| p.addr == peer) {
+                                    // No Inbox (current-folder) presence left — drop from People.
+                                    self.selected_person = None;
+                                    self.chat_messages.clear();
+                                    if let Some(first) =
+                                        self.envelopes.first().map(|e| e.id.clone())
+                                    {
+                                        let _ = self.open_id(&first);
+                                    }
+                                } else if let Some(last) = self.chat_messages.last() {
+                                    self.selected_message = Some(last.envelope.id.clone());
+                                    self.open_message = Some(last.clone());
+                                }
+                            }
+                            Err(e) => {
+                                self.status = e.to_string();
+                                self.selected_person = None;
+                                self.chat_messages.clear();
+                            }
+                        }
                     } else if let Some(first) = self.envelopes.first().map(|e| e.id.clone()) {
                         let _ = self.open_id(&first);
                     }
@@ -2252,6 +2336,7 @@ impl App for MailboxApp {
                 req.load_images,
                 req.dark,
                 req.bounds,
+                req.pixels_per_point,
             );
         } else {
             self.mail_webview.hide();

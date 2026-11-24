@@ -359,6 +359,7 @@ impl Store {
     }
 
     /// Messages exchanged with a peer address (from them or to them), across folders.
+    /// Trash and Spam are excluded so a trashed conversation leaves People/chat.
     pub fn list_messages_with_peer(
         &self,
         account_id: &str,
@@ -367,24 +368,32 @@ impl Store {
         let peer = peer_addr.trim().to_lowercase();
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, from_addr, to_addrs, cc_addrs, date_rfc3339
+            SELECT id, from_addr, to_addrs, cc_addrs, folder_path, date_rfc3339
             FROM messages
             WHERE account_id = ?1 AND snoozed = 0
             ORDER BY date_rfc3339 ASC
             "#,
         )?;
-        let candidates: Vec<(String, String, String, String)> = stmt
+        let candidates: Vec<(String, String, String, String, String)> = stmt
             .query_map(params![account_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         let mut out = Vec::new();
-        for (id, from, to_s, cc_s) in candidates {
+        for (id, from, to_s, cc_s, folder_path) in candidates {
+            let role = crate::folder_role::classify_mailbox(&folder_path, &folder_path);
+            if matches!(
+                role,
+                crate::folder_role::MailboxRole::Trash | crate::folder_role::MailboxRole::Spam
+            ) {
+                continue;
+            }
             let from_l = from.to_lowercase();
             if from_l == peer || from_l.contains(&peer) {
                 if let Some(msg) = self.get_message(&id)? {

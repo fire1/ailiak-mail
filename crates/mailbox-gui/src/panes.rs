@@ -140,10 +140,20 @@ impl MailboxApp {
                         self.allow_remote_images_for_sender();
                     }
                 }
+                let trash_tip = if self.selected_person.is_some() {
+                    "Trash this People conversation (#)"
+                } else {
+                    "Trash current message (#)"
+                };
+                let archive_tip = if self.selected_person.is_some() {
+                    "Archive this People conversation (e)"
+                } else {
+                    "Archive current message (e)"
+                };
                 if icons::toolbar_icon_button(
                     ui,
                     icons::ToolbarIcon::Trash,
-                    "Trash current message (#)",
+                    trash_tip,
                     has_msg && !self.busy.moving(),
                     self.busy.trash,
                 )
@@ -154,7 +164,7 @@ impl MailboxApp {
                 if icons::toolbar_icon_button(
                     ui,
                     icons::ToolbarIcon::Archive,
-                    "Archive current message (e)",
+                    archive_tip,
                     has_msg && !self.busy.moving(),
                     self.busy.archive,
                 )
@@ -259,6 +269,7 @@ impl MailboxApp {
         let mut switch_to: Option<String> = None;
         let mut add_account = false;
         let mut clicked_folder: Option<String> = None;
+        let mut clicked_stak: Option<String> = None;
         let mut clicked_person: Option<String> = None;
         let mut open_folders_settings = false;
         let mut sync_folders: Option<bool> = None; // Some(true) = all IMAP folders
@@ -407,8 +418,8 @@ impl MailboxApp {
 
                 ui.add_space(8.0);
 
-                // People / Folders / Labels. Folders+Labels can both stay open;
-                // opening People closes them (and vice versa).
+                // Staks / People / Folders / Labels. Staks + People can both stay
+                // open; opening either closes Folders/Labels (and vice versa).
                 let show_all_mail = self.config.ui.show_all_mail;
                 let system_folders: Vec<_> = folders
                     .iter()
@@ -431,9 +442,55 @@ impl MailboxApp {
                 let label_tree = mailbox_core::build_label_tree(&user_folders);
                 let folders_unread: u32 = system_folders.iter().map(|f| f.unread).sum();
                 let labels_unread: u32 = label_tree.iter().map(|n| n.unread_sum).sum();
+                let has_staks = !self.staks_cache.is_empty();
                 let has_people = !self.people_cache.is_empty();
                 let has_labels = !label_tree.is_empty();
+                let selected_stak = self.selected_stak.clone();
                 let selected_person = self.selected_person.clone();
+
+                if has_staks {
+                    let open = self.staks_section_open;
+                    let header = nav_accordion_header(
+                        ui,
+                        "Staks",
+                        open,
+                        0,
+                        mute,
+                        collapsed,
+                        None,
+                    );
+                    if header.toggle {
+                        if open {
+                            self.staks_section_open = false;
+                        } else {
+                            self.staks_section_open = true;
+                            self.folders_section_open = false;
+                            self.labels_section_open = false;
+                        }
+                    }
+                    ui.add_space(2.0);
+                    if self.staks_section_open {
+                        for stak in &self.staks_cache {
+                            let selected = selected_stak.as_deref() == Some(stak.id.as_str());
+                            let brand = brand_logos::texture(ui.ctx(), &stak.id);
+                            if icons::stak_nav_button(
+                                ui,
+                                &stak.label,
+                                0,
+                                selected,
+                                collapsed,
+                                brand.as_ref(),
+                            )
+                            .clicked()
+                            {
+                                clicked_stak = Some(stak.id.clone());
+                            }
+                        }
+                        ui.add_space(8.0);
+                    } else {
+                        ui.add_space(4.0);
+                    }
+                }
 
                 if has_people {
                     let open = self.people_section_open;
@@ -454,7 +511,6 @@ impl MailboxApp {
                             self.people_section_open = true;
                             self.folders_section_open = false;
                             self.labels_section_open = false;
-                            self.staks_section_open = false;
                         }
                     }
                     ui.add_space(2.0);
@@ -571,6 +627,7 @@ impl MailboxApp {
                         } else {
                             self.labels_section_open = true;
                             self.staks_section_open = false;
+                            self.people_section_open = false;
                         }
                     }
                     if header.manage {
@@ -661,8 +718,33 @@ impl MailboxApp {
                 let _ = self.open_id(&first);
             }
         }
+        if let Some(stak_id) = clicked_stak {
+            self.clear_list_multi_select();
+            self.selected_person = None;
+            self.chat_messages.clear();
+            if self.selected_stak.as_deref() == Some(stak_id.as_str()) {
+                self.selected_stak = None;
+            } else {
+                self.selected_stak = Some(stak_id);
+            }
+            self.selected_message = None;
+            self.open_message = None;
+            if let Some(first) = self
+                .envelopes
+                .iter()
+                .find(|e| {
+                    self.selected_stak
+                        .as_ref()
+                        .is_none_or(|id| staks::envelope_in_stak(e, id))
+                })
+                .map(|e| e.id.clone())
+            {
+                let _ = self.open_id(&first);
+            }
+        }
         if let Some(person) = clicked_person {
             self.clear_list_multi_select();
+            self.selected_stak = None;
             self.open_person_chat(&person);
         }
         if open_desk {
@@ -723,16 +805,33 @@ impl MailboxApp {
         } else {
             0
         };
-        ui.horizontal(|ui| {
-            let title = if multi {
-                if selected_n == 0 {
-                    format!("{list_title} · select")
-                } else {
-                    format!("{list_title} · {selected_n} selected")
-                }
+        let title = if multi {
+            if selected_n == 0 {
+                format!("{list_title} · select")
             } else {
-                list_title
-            };
+                format!("{list_title} · {selected_n} selected")
+            }
+        } else {
+            list_title
+        };
+        let enabled = if multi {
+            selected_n > 0 && !self.busy.moving()
+        } else {
+            list_count > 0 && !self.busy.moving()
+        };
+        let trash_tip = if multi {
+            "Trash selected messages"
+        } else {
+            "Trash all messages in this list"
+        };
+        let archive_tip = if multi {
+            "Archive selected messages"
+        } else {
+            "Archive all messages in this list"
+        };
+        // Title left, actions flush right — allocate remaining width so RTL
+        // doesn't pack the buttons beside the title.
+        ui.horizontal(|ui| {
             ui.label(
                 RichText::new(title)
                     .strong()
@@ -740,46 +839,34 @@ impl MailboxApp {
                     .family(theme::nav_family())
                     .color(theme::ink(ui.ctx())),
             );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(10.0);
-                let enabled = if multi {
-                    selected_n > 0 && !self.busy.moving()
-                } else {
-                    list_count > 0 && !self.busy.moving()
-                };
-                let trash_tip = if multi {
-                    "Trash selected messages"
-                } else {
-                    "Trash all messages in this list"
-                };
-                let archive_tip = if multi {
-                    "Archive selected messages"
-                } else {
-                    "Archive all messages in this list"
-                };
-                if icons::toolbar_icon_button(
-                    ui,
-                    icons::ToolbarIcon::Trash,
-                    trash_tip,
-                    enabled,
-                    self.busy.trash,
-                )
-                .clicked()
-                {
-                    self.move_listed_messages(mailbox_core::SpecialFolderKind::Trash);
-                }
-                if icons::toolbar_icon_button(
-                    ui,
-                    icons::ToolbarIcon::Archive,
-                    archive_tip,
-                    enabled,
-                    self.busy.archive,
-                )
-                .clicked()
-                {
-                    self.move_listed_messages(mailbox_core::SpecialFolderKind::Archive);
-                }
-            });
+            ui.allocate_ui_with_layout(
+                ui.available_size(),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    if icons::toolbar_icon_button(
+                        ui,
+                        icons::ToolbarIcon::Trash,
+                        trash_tip,
+                        enabled,
+                        self.busy.trash,
+                    )
+                    .clicked()
+                    {
+                        self.move_listed_messages(mailbox_core::SpecialFolderKind::Trash);
+                    }
+                    if icons::toolbar_icon_button(
+                        ui,
+                        icons::ToolbarIcon::Archive,
+                        archive_tip,
+                        enabled,
+                        self.busy.archive,
+                    )
+                    .clicked()
+                    {
+                        self.move_listed_messages(mailbox_core::SpecialFolderKind::Archive);
+                    }
+                },
+            );
         });
     }
 
@@ -923,7 +1010,9 @@ impl MailboxApp {
                             // do not use outer `col_w` or rows overflow and egui shifts
                             // the floating scrollbar inward (gap before the panel edge).
                             ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
+                            // Top-align avatar with the sender title (not centered on the
+                            // whole name+subject+snippet block).
+                            ui.horizontal_top(|ui| {
                                 let size = brand_logos::LIST_SIZE;
                                 // Own click target — must not share Sense with the row body,
                                 // or Frame.interact steals the avatar click.
@@ -983,43 +1072,58 @@ impl MailboxApp {
                                 // Labels must be hover-only — default Label sense steals
                                 // clicks so row open only fired on padding gaps.
                                 let label_sense = Sense::hover();
-                                ui.vertical(|ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    // Date first (right), then name fills leftover and truncates —
-                                    // avoids the date overflowing into the scrollbar gutter.
-                                    ui.with_layout(
-                                        Layout::right_to_left(Align::Center),
-                                        |ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(&date)
-                                                        .small()
-                                                        .color(theme::mute(ui.ctx())),
-                                                )
+                                let text_w = ui.available_width();
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(text_w, 0.0),
+                                    Layout::top_down(Align::Min),
+                                    |ui| {
+                                        ui.set_width(text_w);
+                                        // Name left (truncate), date natural width on the right.
+                                        // Avoid RTL+truncate — it right-aligns the name text.
+                                        ui.horizontal(|ui| {
+                                            let date_w = 52.0_f32;
+                                            let name_w = (ui.available_width() - date_w).max(40.0);
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(name_w, ui.spacing().interact_size.y),
+                                                Layout::left_to_right(Align::Center),
+                                                |ui| {
+                                                    ui.add(
+                                                        egui::Label::new(name_style)
+                                                            .truncate()
+                                                            .sense(label_sense),
+                                                    );
+                                                },
+                                            );
+                                            ui.with_layout(
+                                                Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&date)
+                                                                .small()
+                                                                .color(theme::mute(ui.ctx())),
+                                                        )
+                                                        .sense(label_sense),
+                                                    );
+                                                },
+                                            );
+                                        });
+                                        ui.add(
+                                            egui::Label::new(subject)
+                                                .truncate()
                                                 .sense(label_sense),
-                                            );
-                                            ui.add(
-                                                egui::Label::new(name_style)
-                                                    .truncate()
-                                                    .sense(label_sense),
-                                            );
-                                        },
-                                    );
-                                    ui.add(
-                                        egui::Label::new(subject)
+                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&snippet)
+                                                    .small()
+                                                    .color(theme::mute(ui.ctx())),
+                                            )
                                             .truncate()
                                             .sense(label_sense),
-                                    );
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&snippet)
-                                                .small()
-                                                .color(theme::mute(ui.ctx())),
-                                        )
-                                        .truncate()
-                                        .sense(label_sense),
-                                    );
-                                });
+                                        );
+                                    },
+                                );
                             });
                         });
 
@@ -1432,10 +1536,11 @@ impl MailboxApp {
                 // can be tiny before SidePanels finish settling).
                 let rect = ui.available_rect_before_wrap();
                 ui.allocate_rect(rect, Sense::hover());
-                // Match reader card so recreate/load doesn't flash chrome through.
+                // Light underlay matches the HTML mail canvas (dark body colors wash out
+                // marketing mail that sits on white tables).
                 let dark = ui.visuals().dark_mode;
-                let underlay = theme::reader_card(ui.ctx());
-                ui.painter().rect_filled(rect, 0.0, underlay);
+                ui.painter()
+                    .rect_filled(rect, 0.0, egui::Color32::WHITE);
                 let loading = self.mail_webview.is_loading(&msg.envelope.id);
                 if loading {
                     ui.put(
@@ -1444,9 +1549,10 @@ impl MailboxApp {
                     );
                     ui.ctx().request_repaint();
                 }
-                // Root viewport points → wry child bounds (logical pixels).
+                // Root viewport points → wry child bounds (physical on Linux via ppp).
                 self.mail_webview_req = Some(crate::mail_webview::MailWebViewRequest {
                     bounds: rect,
+                    pixels_per_point: ui.ctx().pixels_per_point(),
                     msg_id: msg.envelope.id.clone(),
                     body_html: msg.body_html.clone(),
                     load_images,
@@ -1759,10 +1865,11 @@ impl MailboxApp {
                     },
                     panel,
                 ));
+            // Left rail stays the smallest column (icons / compact accordion).
             side = if collapsed {
                 side.exact_width(56.0)
             } else {
-                side.default_width(176.0).width_range(148.0..=240.0)
+                side.default_width(168.0).width_range(140.0..=200.0)
             };
             side.show(ctx, |ui| {
                 layout::begin_panel(ui, panel);
@@ -1780,9 +1887,32 @@ impl MailboxApp {
             return;
         }
 
-        // Mid column: exact_width owned by the app. egui's built-in SidePanel
-        // resize persists content-driven widths and snaps back on mouse move.
-        let list_range = 280.0_f32..=520.0;
+        // Mid column ~30% of window; reader (central) keeps ≥50%. Nav is smallest.
+        // exact_width is owned by us — egui's SidePanel resize snaps content-driven widths.
+        let win_w = ctx.screen_rect().width();
+        let nav_w = if self.folders_collapsed { 64.0 } else { 176.0 };
+        let desk_w = if self.show_todo {
+            380.0
+        } else if self.show_calendar {
+            280.0
+        } else {
+            0.0
+        };
+        let reader_floor = (win_w * 0.50).max(320.0);
+        let list_max = (win_w - nav_w - desk_w - reader_floor)
+            .clamp(240.0, 520.0);
+        let list_min = 240.0_f32.min(list_max);
+        let list_range = list_min..=list_max;
+        let target_list = (win_w * 0.30).clamp(*list_range.start(), *list_range.end());
+        if self.last_shell_width <= 0.0 {
+            self.list_width = target_list;
+            self.last_shell_width = win_w;
+        } else if (win_w - self.last_shell_width).abs() > 12.0 {
+            // Keep the user's relative split when the window is resized.
+            let scale = win_w / self.last_shell_width.max(1.0);
+            self.list_width = (self.list_width * scale).clamp(*list_range.start(), *list_range.end());
+            self.last_shell_width = win_w;
+        }
         self.list_width = self.list_width.clamp(*list_range.start(), *list_range.end());
 
         // Tight gap between mid ↔ reader; keep outer chrome gutters.
@@ -1813,7 +1943,7 @@ impl MailboxApp {
         let list_card = theme::list_card(ctx);
         let reader_card = theme::reader_card(ctx);
         let card_edge = egui::Stroke::new(
-            1.0,
+            1.0_f32,
             theme::mute(ctx).linear_multiply(0.28),
         );
 
