@@ -14,7 +14,28 @@ use crate::icons::{self, FolderIcon};
 use crate::layout;
 use crate::staks;
 use crate::theme;
-use mailbox_core::types::{date_group_label, MessageId};
+use mailbox_core::types::{date_group_label, list_date_label, Message, MessageId};
+
+/// Plain body for list/fallback UI — never confuse empty HTML with the old stub.
+fn readable_message_plain(msg: &Message) -> String {
+    let plain = msg.body_text.trim();
+    let stub = mailbox_core::missing_plain_placeholder();
+    if !plain.is_empty() && plain != stub {
+        return msg.body_text.clone();
+    }
+    if !msg.body_html.trim().is_empty() {
+        let derived = mailbox_core::html_to_plain(&msg.body_html);
+        if !derived.is_empty() {
+            return derived;
+        }
+        return stub.to_string();
+    }
+    if plain.is_empty() {
+        "(no plain-text body)".into()
+    } else {
+        msg.body_text.clone()
+    }
+}
 
 impl MailboxApp {
     pub(crate) fn top_bar(&mut self, ui: &mut Ui) {
@@ -302,10 +323,15 @@ impl MailboxApp {
         ui.spacing_mut().item_spacing.y = 2.0;
 
         // Top-down: scrollable accounts/folders, then a fixed tools strip (paper fill).
-        // 4 rows × 28 + padding (Todo, Calendar, Settings, Help).
-        // Feedback stays hidden until GitLab migration (`FEEDBACK_UI_ENABLED`).
+        // Rows: Todo, Calendar, Settings, [Feedback], Help.
+        // Height = rows + item gaps + band pad (8+16) + outer bottom (8).
         let row_h = 28.0;
-        let footer_h = row_h * 4.0 + 12.0 + 16.0;
+        let tool_rows = if crate::app::FEEDBACK_UI_ENABLED {
+            5.0
+        } else {
+            4.0
+        };
+        let footer_h = row_h * tool_rows + (tool_rows - 1.0) * 2.0 + 8.0 + 16.0 + 8.0;
         let body_h = (ui.available_height() - footer_h).max(48.0);
 
         let paper = theme::paper(ui.ctx());
@@ -808,8 +834,7 @@ impl MailboxApp {
             self.open_settings(crate::settings::SettingsSection::Appearance);
         }
         if open_feedback {
-            self.show_feedback = true;
-            self.show_help = false;
+            self.open_compose_feedback();
         }
         if open_help {
             self.show_help = !self.show_help;
@@ -954,6 +979,7 @@ impl MailboxApp {
         let mut toggle_sel: Option<MessageId> = None;
         // Avatar click while not in multi-select → enter mode and check this id.
         let mut start_multi: Option<MessageId> = None;
+        let mut toggle_star: Option<MessageId> = None;
 
         // Thin floating bar (widens on hover); thumb stays visible for position.
         ui.spacing_mut().scroll = theme::list_scroll_style();
@@ -990,7 +1016,17 @@ impl MailboxApp {
                 for &idx in &env_indices {
                     // Copy row fields so we can call resolve_avatar (&mut self) without
                     // holding a borrow on envelopes.
-                    let (env_id, from_name, from_addr, subject_s, snippet, seen, date_ts) = {
+                    let (
+                        env_id,
+                        from_name,
+                        from_addr,
+                        subject_s,
+                        snippet,
+                        seen,
+                        flagged,
+                        labels,
+                        date_ts,
+                    ) = {
                         let env = &self.envelopes[idx];
                         (
                             env.id.clone(),
@@ -999,6 +1035,8 @@ impl MailboxApp {
                             env.subject.clone(),
                             env.snippet.clone(),
                             env.seen,
+                            env.flagged,
+                            env.labels.clone(),
                             env.date,
                         )
                     };
@@ -1023,7 +1061,7 @@ impl MailboxApp {
                     } else {
                         from_name.as_str()
                     };
-                    let date = date_ts.format("%b %d").to_string();
+                    let date = list_date_label(date_ts);
                     // Unread rows use a white fill — force dark text so dark theme stays readable.
                     let name_style = if seen {
                         RichText::new(from).size(12.0)
@@ -1090,7 +1128,9 @@ impl MailboxApp {
                     };
 
                     let mut avatar_clicked = false;
+                    let mut star_clicked = false;
                     let mut av_rect = egui::Rect::NOTHING;
+                    let mut star_rect = egui::Rect::NOTHING;
                     let row = egui::Frame::none()
                         .fill(row_fill)
                         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
@@ -1178,7 +1218,8 @@ impl MailboxApp {
                                         // Name left (truncate), date natural width on the right.
                                         // Avoid RTL+truncate — it right-aligns the name text.
                                         ui.horizontal(|ui| {
-                                            let date_w = 52.0_f32;
+                                            let star_w = if flagged { 14.0 } else { 0.0 };
+                                            let date_w = 52.0_f32 + star_w;
                                             let name_w = (ui.available_width() - date_w).max(40.0);
                                             ui.allocate_ui_with_layout(
                                                 egui::vec2(name_w, ui.spacing().interact_size.y),
@@ -1202,6 +1243,26 @@ impl MailboxApp {
                                                         )
                                                         .sense(label_sense),
                                                     );
+                                                    if flagged {
+                                                        ui.add_space(2.0);
+                                                        let (rect, star_resp) = ui
+                                                            .allocate_exact_size(
+                                                                egui::vec2(14.0, 14.0),
+                                                                Sense::click(),
+                                                            );
+                                                        star_rect = rect;
+                                                        icons::paint_star(
+                                                            ui,
+                                                            star_rect,
+                                                            theme::accent(ui.ctx()),
+                                                        );
+                                                        if star_resp
+                                                            .on_hover_text("Unstar")
+                                                            .clicked()
+                                                        {
+                                                            star_clicked = true;
+                                                        }
+                                                    }
                                                 },
                                             );
                                         });
@@ -1210,6 +1271,48 @@ impl MailboxApp {
                                                 .truncate()
                                                 .sense(label_sense),
                                         );
+                                        if !labels.is_empty() {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 4.0;
+                                                let chip_fg = if seen {
+                                                    theme::mute(ui.ctx())
+                                                } else {
+                                                    theme::unread_row_mute()
+                                                };
+                                                let chip_bg = theme::chip(ui.ctx());
+                                                for lab in labels.iter().take(4) {
+                                                    egui::Frame::none()
+                                                        .fill(chip_bg)
+                                                        .rounding(4.0)
+                                                        .inner_margin(egui::Margin::symmetric(
+                                                            5.0, 1.0,
+                                                        ))
+                                                        .show(ui, |ui| {
+                                                            ui.add(
+                                                                egui::Label::new(
+                                                                    RichText::new(lab)
+                                                                        .size(10.0)
+                                                                        .color(chip_fg),
+                                                                )
+                                                                .sense(label_sense),
+                                                            );
+                                                        });
+                                                }
+                                                if labels.len() > 4 {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(format!(
+                                                                "+{}",
+                                                                labels.len() - 4
+                                                            ))
+                                                            .size(10.0)
+                                                            .color(chip_fg),
+                                                        )
+                                                        .sense(label_sense),
+                                                    );
+                                                }
+                                            });
+                                        }
                                         let snippet_color = if seen {
                                             theme::mute(ui.ctx())
                                         } else {
@@ -1229,15 +1332,20 @@ impl MailboxApp {
                             });
                         });
 
-                    // Whole-row click (minus avatar) opens the message. Using Frame
+                    // Whole-row click (minus avatar / star) opens the message. Using Frame
                     // interact avoids egui 0.29 missing clicks on vertical().response.
                     let row_click = row.response.interact(Sense::click());
                     let body_clicked = !avatar_clicked
+                        && !star_clicked
                         && row_click.clicked()
-                        && row_click.interact_pointer_pos().is_some_and(|p| !av_rect.contains(p));
+                        && row_click.interact_pointer_pos().is_some_and(|p| {
+                            !av_rect.contains(p) && !star_rect.contains(p)
+                        });
 
-                    // Avatar = multi-select; row body always opens/focuses the message.
-                    if avatar_clicked {
+                    // Avatar = multi-select; star = unstar; row body opens the message.
+                    if star_clicked {
+                        toggle_star = Some(env_id);
+                    } else if avatar_clicked {
                         if multi {
                             toggle_sel = Some(env_id);
                         } else {
@@ -1257,6 +1365,9 @@ impl MailboxApp {
             self.toggle_list_message_selected(&id);
         } else if let Some(id) = toggle_sel {
             self.toggle_list_message_selected(&id);
+        }
+        if let Some(id) = toggle_star {
+            self.toggle_starred(&id);
         }
         if let Some(id) = open {
             if let Err(e) = self.open_id(&id) {
@@ -1321,7 +1432,7 @@ impl MailboxApp {
                             &mut self.mail_images,
                         );
                     } else {
-                        ui.label(&msg.body_text);
+                        ui.label(readable_message_plain(msg));
                     }
                 });
         });
@@ -1342,7 +1453,8 @@ impl MailboxApp {
                     window_h,
                 );
                 self.apply_compose_webview_result(&draft, &res, ui.ctx());
-                if res.send {
+                let hotkey_send = self.compose_webview.take_send_hotkey();
+                if res.send || hotkey_send {
                     self.compose = Some(draft);
                     self.submit_compose();
                 } else if res.open_full {
@@ -1458,7 +1570,10 @@ impl MailboxApp {
                                                 .strong(),
                                         );
                                     }
-                                    ui.label(RichText::new(msg.body_text.trim()).size(13.0));
+                                    ui.label(
+                                        RichText::new(readable_message_plain(msg).trim())
+                                            .size(13.0),
+                                    );
                                 });
                         });
                         ui.add_space(8.0);
@@ -1513,7 +1628,7 @@ impl MailboxApp {
                 }
             } else {
                 let mut draft = crate::compose::ComposeDraft::new_blank();
-                draft.to = peer;
+                draft.to = vec![peer];
                 draft.from_email = from_email;
                 draft.set_plain_body(plain);
                 draft.attachments = atts;
@@ -1684,9 +1799,18 @@ impl MailboxApp {
     /// New message / expanded reply — fills the mail body card.
     fn paint_compose_reader(&mut self, ui: &mut Ui) {
         if let Some(mut draft) = self.compose.take() {
-            let res = crate::compose::show_reader_compose(ui, &mut draft, self.busy.send);
+            let hints = self.compose_hints.clone();
+            let res = crate::compose::show_reader_compose(
+                ui,
+                &mut draft,
+                self.busy.send,
+                &hints,
+                &mut self.compose_autofocus_to,
+                &mut self.compose_autofocus_subject,
+            );
             self.apply_compose_webview_result(&draft, &res, ui.ctx());
-            if res.send {
+            let hotkey_send = self.compose_webview.take_send_hotkey();
+            if res.send || hotkey_send {
                 self.compose = Some(draft);
                 self.submit_compose();
             } else if res.close {
@@ -2459,7 +2583,7 @@ fn nav_accordion_header(
                                     RichText::new(egui_phosphor::regular::LIGHTNING)
                                         .family(theme::icon_family())
                                         .size(12.0)
-                                        .color(mute),
+                                        .color(theme::accent(ui.ctx())),
                                 )
                                 .frame(false),
                             )

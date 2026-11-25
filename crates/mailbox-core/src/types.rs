@@ -19,6 +19,17 @@ pub fn date_group_label(dt: DateTime<Utc>) -> String {
     }
 }
 
+/// Compact timestamp for the message list row (local time).
+/// Today → clock time (`14:30`); older days → month + day (`Nov 25`).
+pub fn list_date_label(dt: DateTime<Utc>) -> String {
+    let local = dt.with_timezone(&Local);
+    if local.date_naive() == Local::now().date_naive() {
+        local.format("%H:%M").to_string()
+    } else {
+        local.format("%b %d").to_string()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Folder {
     pub account_id: AccountId,
@@ -132,6 +143,20 @@ mod tests {
     }
 
     #[test]
+    fn list_date_today_is_clock_older_is_month_day() {
+        let now = Utc::now();
+        let today = list_date_label(now);
+        assert!(
+            today.chars().filter(|c| *c == ':').count() == 1 && today.len() <= 5,
+            "expected HH:MM, got {today}"
+        );
+        let older = Utc.with_ymd_and_hms(2020, 1, 15, 12, 0, 0).unwrap();
+        let label = list_date_label(older);
+        assert!(!label.contains(':'), "expected month-day, got {label}");
+        assert_eq!(label, older.with_timezone(&Local).format("%b %d").to_string());
+    }
+
+    #[test]
     fn folder_order_inbox_sent_archive_trash() {
         let mut folders = vec![
             Folder {
@@ -180,7 +205,13 @@ pub struct Envelope {
     pub from_addr: String,
     pub date: DateTime<Utc>,
     pub seen: bool,
+    /// IMAP `\Flagged` / Gmail Starred.
+    #[serde(default)]
+    pub flagged: bool,
     pub snippet: String,
+    /// User labels (and Important) derived from other synced folders for this Message-ID.
+    #[serde(default)]
+    pub labels: Vec<String>,
     /// RFC822 `In-Reply-To` (empty when none).
     #[serde(default)]
     pub in_reply_to: String,

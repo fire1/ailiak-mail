@@ -224,6 +224,33 @@ pub fn mark_seen_on_server(
     Ok(())
 }
 
+/// Push `\Flagged` to the IMAP server for one message (no-op for POP3 / missing UID).
+pub fn mark_flagged_on_server(
+    account: &MailAccountConfig,
+    credential: &MailCredential,
+    message_id: &MessageId,
+    folder_path: &str,
+    flagged: bool,
+) -> Result<()> {
+    if account.protocol != MailProtocol::Imap {
+        return Ok(());
+    }
+    let Some(uid) = parse_imap_uid(message_id, &account.id, folder_path) else {
+        return Ok(());
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("start tokio runtime")?;
+    rt.block_on(async {
+        let mut session = imap::connect_and_login(account, credential).await?;
+        imap::set_flagged(&mut session, folder_path, uid, flagged).await?;
+        session.logout().await.ok();
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
 pub fn move_messages(
     store: &Store,
     account: &MailAccountConfig,

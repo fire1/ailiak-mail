@@ -350,6 +350,10 @@ pub struct UiConfig {
     /// Desktop notification when sync inserts new messages. Default: on.
     #[serde(default = "default_notify_new_mail")]
     pub notify_new_mail: bool,
+    /// Desktop notification when a message is opened in the reader (Desk follow-up cue).
+    /// Default: on.
+    #[serde(default = "default_notify_opened_mail")]
+    pub notify_opened_mail: bool,
 }
 
 /// Preset tone packs for UI / new-mail sounds.
@@ -530,6 +534,10 @@ fn default_notify_new_mail() -> bool {
     true
 }
 
+fn default_notify_opened_mail() -> bool {
+    true
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -544,6 +552,7 @@ impl Default for UiConfig {
             sound_clicks: false,
             sound_theme: SoundTheme::default(),
             notify_new_mail: default_notify_new_mail(),
+            notify_opened_mail: default_notify_opened_mail(),
         }
     }
 }

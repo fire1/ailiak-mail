@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use mailbox_core::{classify_mailbox, MailboxRole};
 use mailbox_core::types::Envelope;
 
 #[derive(Debug, Clone)]
@@ -14,11 +15,22 @@ pub struct Stak {
     pub total: u32,
 }
 
+/// Trash / Spam must not feed Staks (search spans folders; skip those copies).
+fn skip_for_staks(env: &Envelope) -> bool {
+    matches!(
+        classify_mailbox(&env.folder_path, &env.folder_path),
+        MailboxRole::Trash | MailboxRole::Spam
+    )
+}
+
 /// Build Staks for the current folder’s envelopes.
 /// Keeps stacks with 2+ messages, or any with unread — sorted by unread then total.
 pub fn build_staks(envelopes: &[Envelope]) -> Vec<Stak> {
     let mut map: HashMap<String, (String, u32, u32)> = HashMap::new();
     for env in envelopes {
+        if skip_for_staks(env) {
+            continue;
+        }
         let (id, label) = stak_identity(env);
         let entry = map.entry(id).or_insert((label, 0, 0));
         entry.2 += 1;
@@ -50,7 +62,7 @@ pub fn build_staks(envelopes: &[Envelope]) -> Vec<Stak> {
 }
 
 pub fn envelope_in_stak(env: &Envelope, stak_id: &str) -> bool {
-    stak_identity(env).0 == stak_id
+    !skip_for_staks(env) && stak_identity(env).0 == stak_id
 }
 
 /// Brand id for logos (`google`, `instagram`, …) when the address maps to a known mark.
@@ -210,7 +222,9 @@ mod tests {
             from_addr: addr.into(),
             date: Utc::now(),
             seen,
+            flagged: false,
             snippet: String::new(),
+            labels: Vec::new(),
             in_reply_to: String::new(),
             references: String::new(),
             thread_id: String::new(),
@@ -227,6 +241,22 @@ mod tests {
         let staks = build_staks(&list);
         assert!(staks.iter().any(|s| s.id == "google" && s.total == 2 && s.unread == 1));
         assert!(staks.iter().any(|s| s.id == "instagram" && s.unread == 1));
+    }
+
+    #[test]
+    fn skips_trash_and_spam() {
+        let mut trash = env("noreply@google.com", "Google", false);
+        trash.folder_path = "[Gmail]/Trash".into();
+        trash.id = "trash-1".into();
+        let mut spam = env("noreply@google.com", "Google", false);
+        spam.folder_path = "[Gmail]/Spam".into();
+        spam.id = "spam-1".into();
+        let inbox = env("noreply@google.com", "Google", false);
+        let staks = build_staks(&[trash.clone(), spam, inbox.clone()]);
+        assert_eq!(staks.len(), 1);
+        assert_eq!(staks[0].total, 1);
+        assert!(!envelope_in_stak(&trash, "google"));
+        assert!(envelope_in_stak(&inbox, "google"));
     }
 
     #[test]

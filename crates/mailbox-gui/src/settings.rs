@@ -325,6 +325,7 @@ impl MailboxApp {
         let mut new_mail = self.config.ui.sound_new_mail;
         let mut clicks = self.config.ui.sound_clicks;
         let mut notify = self.config.ui.notify_new_mail;
+        let mut notify_opened = self.config.ui.notify_opened_mail;
         let mut theme_sel = self.config.ui.sound_theme;
         let mut changed = false;
 
@@ -364,7 +365,7 @@ impl MailboxApp {
         });
         ui.add_space(10.0);
         if ui
-            .checkbox(&mut notify, "Desktop notifications")
+            .checkbox(&mut notify, "New mail notifications")
             .on_hover_text("System notification when new mail arrives (on by default)")
             .changed()
         {
@@ -377,6 +378,26 @@ impl MailboxApp {
                     1,
                     "Ada Lovelace",
                     "Notes on the Analytical Engine",
+                );
+            }
+        });
+        ui.add_space(10.0);
+        if ui
+            .checkbox(&mut notify_opened, "Opened mail notifications")
+            .on_hover_text(
+                "System notification when you open a message — Desk follow-up cue (on by default)",
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            if ui.small_button("Preview").clicked() {
+                crate::notifications::notify_opened_mail(
+                    "Ada Lovelace",
+                    "Notes on the Analytical Engine",
+                    Some("Press a for Todo"),
                 );
             }
         });
@@ -399,15 +420,17 @@ impl MailboxApp {
             self.config.ui.sound_new_mail = new_mail;
             self.config.ui.sound_clicks = clicks;
             self.config.ui.notify_new_mail = notify;
+            self.config.ui.notify_opened_mail = notify_opened;
             self.config.ui.sound_theme = theme_sel;
             if let Err(e) = self.config.save(&self.paths.config_file()) {
                 self.status = e.to_string();
             } else {
                 self.status = format!(
-                    "Alerts: {} · sound {} · notify {} · clicks {}",
+                    "Alerts: {} · sound {} · new {} · open {} · clicks {}",
                     theme_sel.label(),
                     if new_mail { "on" } else { "off" },
                     if notify { "on" } else { "off" },
+                    if notify_opened { "on" } else { "off" },
                     if clicks { "on" } else { "off" }
                 );
             }

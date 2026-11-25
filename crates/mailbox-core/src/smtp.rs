@@ -7,6 +7,7 @@ use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{SmtpTransport, Transport};
 
 use crate::config::MailAccountConfig;
+use crate::message_parse::html_to_plain;
 use crate::oauth::MailCredential;
 
 /// File to attach on send (already loaded into memory by the UI).
@@ -146,9 +147,22 @@ pub fn send(
         }
     }
 
+    // Always include a usable plain part derived from HTML when needed.
+    // Never ship the reader placeholder string as message content.
+    let placeholder = crate::message_parse::missing_plain_placeholder();
+    let mut plain = mail.body_text.clone();
+    if plain.trim() == placeholder {
+        plain.clear();
+    }
+    if plain.trim().is_empty() {
+        if let Some(html) = mail.body_html.as_ref() {
+            plain = html_to_plain(html);
+        }
+    }
+
     let text = SinglePart::builder()
         .header(ContentType::TEXT_PLAIN)
-        .body(mail.body_text.clone());
+        .body(plain);
 
     let html = mail
         .body_html
@@ -203,11 +217,21 @@ pub fn send(
         }
     };
 
-    let mut transport_builder = if account.smtp_tls {
-        SmtpTransport::relay(&account.smtp_host)
-            .with_context(|| format!("SMTP relay {}", account.smtp_host))?
-    } else {
+    // Port 465 = implicit TLS (`relay`). Port 587 (and most submission) = STARTTLS.
+    // Using `relay` on 587 causes: "received corrupt message of type InvalidContentType".
+    let mut transport_builder = if !account.smtp_tls {
         SmtpTransport::builder_dangerous(&account.smtp_host)
+    } else if account.smtp_port == 465 {
+        SmtpTransport::relay(&account.smtp_host)
+            .with_context(|| format!("SMTP TLS relay {}:465", account.smtp_host))?
+    } else {
+        SmtpTransport::starttls_relay(&account.smtp_host)
+            .with_context(|| {
+                format!(
+                    "SMTP STARTTLS {}:{}",
+                    account.smtp_host, account.smtp_port
+                )
+            })?
     };
     transport_builder = transport_builder
         .port(account.smtp_port)
@@ -218,9 +242,16 @@ pub fn send(
     }
 
     let mailer = transport_builder.build();
-    mailer
-        .send(&msg)
-        .map_err(|e| anyhow!("SMTP send failed: {e}"))?;
+    mailer.send(&msg).map_err(|e| {
+        let hint = if account.smtp_tls && account.smtp_port == 587 {
+            ""
+        } else if account.smtp_tls && account.smtp_port != 465 {
+            " (try port 587 with STARTTLS, or 465 with SSL)"
+        } else {
+            ""
+        };
+        anyhow!("SMTP send failed: {e}{hint}")
+    })?;
     Ok(())
 }
 

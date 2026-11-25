@@ -1,7 +1,19 @@
 # Packaging AiliakMail (Linux · macOS · Windows)
 
 Installers are built with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager).  
-**Each OS package must be built on that OS** (or via GitHub Actions runners).
+**Each OS package must be built on that OS** (or via CI runners).
+
+## GitLab CI (ready for migration)
+
+[`.gitlab-ci.yml`](../.gitlab-ci.yml) mirrors the GitHub Release workflow:
+
+1. Push a tag `v*` (or run the pipeline manually).
+2. Jobs build **Linux** (`.deb` / AppImage), **macOS** (arm64 + Intel `.dmg` / `.app.tar.gz`), **Windows** (NSIS).
+3. `publish:release` uploads files to the **Generic Package Registry** and creates a **GitLab Release** with download links.
+
+Default runner tags target **GitLab.com SaaS** (`saas-linux-medium-amd64`, `saas-macos-medium-m1`, `saas-windows-medium-amd64`). On self-hosted GitLab, edit those `tags:` to match your Mac/Windows/Linux runners.
+
+Private projects: friends still need Guest+ access (or a deploy/job token) to download — same as private GitHub.
 
 | Platform | Formats | Icon |
 |----------|---------|------|

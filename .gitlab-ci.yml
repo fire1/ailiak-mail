@@ -1,0 +1,174 @@
+# AiliakMail — multi-OS release packages (Linux / macOS / Windows)
+#
+# Triggers on tags matching v* (same idea as .github/workflows/release.yml).
+# Also runnable manually from CI/CD → Pipelines → Run pipeline.
+#
+# GitLab.com SaaS runner tags (change if you use self-hosted runners):
+#   Linux:   saas-linux-medium-amd64   (or omit tags to use default shared runners)
+#   macOS:   saas-macos-medium-m1      (Apple Silicon; also cross-builds Intel)
+#   Windows: saas-windows-medium-amd64
+#
+# Installers are uploaded to the Generic Package Registry and linked on the
+# GitLab Release for the tag. Private projects still need Guest+ access (or a
+# token) to download — same as private GitHub.
+
+stages:
+  - package
+  - release
+
+variables:
+  CARGO_TERM_COLOR: "always"
+  CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
+  APPIMAGE_EXTRACT_AND_RUN: "1"
+  PACKAGE_NAME: "ailiakmail"
+  FF_USE_FASTZIP: "true"
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+    - when: never
+
+.rust_cache:
+  cache:
+    key:
+      files:
+        - Cargo.lock
+      prefix: "${CI_JOB_NAME}"
+    paths:
+      - .cargo/bin/
+      - .cargo/registry/index/
+      - .cargo/registry/cache/
+      - .cargo/git/db/
+      - target/
+    policy: pull-push
+
+# ─── Linux (.deb + AppImage) ───────────────────────────────────────────────
+package:linux:
+  extends: .rust_cache
+  stage: package
+  image: rust:1-bookworm
+  tags:
+    - saas-linux-medium-amd64
+  before_script:
+    - apt-get update
+    - |
+      apt-get install -y --no-install-recommends \
+        libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+        libxkbcommon-dev libssl-dev pkg-config \
+        libgtk-3-dev libwebkit2gtk-4.1-dev \
+        libasound2-dev \
+        libfuse2 \
+        cmake build-essential curl ca-certificates
+    - cargo install cargo-packager --locked
+  script:
+    - mkdir -p dist
+    - cargo packager --release --formats deb,appimage || cargo packager --release --formats deb
+    - |
+      set -e
+      for f in target/release/*.deb target/release/*.AppImage; do
+        [ -e "$f" ] || continue
+        cp -f "$f" "dist/$(basename "$f")"
+      done
+      ls -la dist
+  artifacts:
+    name: "ailiakmail-linux-$CI_COMMIT_REF_SLUG"
+    paths:
+      - dist/
+    expire_in: 14 days
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+
+# ─── macOS arm64 + Intel (cross from Apple Silicon runner) ─────────────────
+package:macos:
+  extends: .rust_cache
+  stage: package
+  tags:
+    - saas-macos-medium-m1
+  before_script:
+    - rustup default stable
+    - rustup target add aarch64-apple-darwin x86_64-apple-darwin
+    - cargo install cargo-packager --locked
+  script:
+    - mkdir -p dist
+    - |
+      set -euo pipefail
+      for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+        case "$triple" in
+          aarch64-apple-darwin) arch=aarch64 ;;
+          x86_64-apple-darwin) arch=x86_64 ;;
+        esac
+        echo "=== packager $triple ==="
+        CARGO_BUILD_TARGET="$triple" \
+          cargo packager --release --formats app,dmg --target "$triple"
+        bundle="target/${triple}/release"
+        ls -la "$bundle" || true
+        for dmg in "$bundle"/AiliakMail_*.dmg "$bundle"/*.dmg; do
+          [ -f "$dmg" ] || continue
+          cp -f "$dmg" "dist/$(basename "$dmg")"
+        done
+        if [ -d "$bundle/AiliakMail.app" ]; then
+          tar -C "$bundle" -czf "dist/AiliakMail-${arch}.app.tar.gz" AiliakMail.app
+        fi
+      done
+      ls -la dist
+  artifacts:
+    name: "ailiakmail-macos-$CI_COMMIT_REF_SLUG"
+    paths:
+      - dist/
+    expire_in: 14 days
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+
+# ─── Windows (NSIS + portable exe) ─────────────────────────────────────────
+package:windows:
+  extends: .rust_cache
+  stage: package
+  tags:
+    - saas-windows-medium-amd64
+  before_script:
+    - rustup default stable
+    - cargo install cargo-packager --locked
+  script:
+    - New-Item -ItemType Directory -Force -Path dist | Out-Null
+    - cargo packager --release --formats nsis
+    - |
+      Copy-Item -Path target\release\*.exe -Destination dist\ -ErrorAction SilentlyContinue
+      Copy-Item -Path target\release\*.msi -Destination dist\ -ErrorAction SilentlyContinue
+      Get-ChildItem dist
+  artifacts:
+    name: "ailiakmail-windows-$CI_COMMIT_REF_SLUG"
+    paths:
+      - dist/
+    expire_in: 14 days
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+
+# ─── Publish Generic Package Registry + GitLab Release ─────────────────────
+publish:release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: package:linux
+      artifacts: true
+    - job: package:macos
+      artifacts: true
+    - job: package:windows
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+  before_script:
+    - apk add --no-cache curl bash findutils
+  script:
+    - bash bin/gitlab-publish-release.sh
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 14 days

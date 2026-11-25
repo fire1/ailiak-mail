@@ -16,6 +16,8 @@ pub enum ComposeMode {
     New,
     Reply,
     ReplyAll,
+    /// App feedback — To is locked to the author address.
+    Feedback,
     #[allow(dead_code)]
     Forward,
 }
@@ -31,9 +33,14 @@ pub struct ComposeDraft {
     pub mode: ComposeMode,
     /// `true` = reply dock under the original; `false` = full reader-card composer.
     pub inline: bool,
-    pub to: String,
-    pub cc: String,
-    pub bcc: String,
+    /// Confirmed To recipients (shown as removable tags).
+    pub to: Vec<String>,
+    /// In-progress To typing (not yet a tag).
+    pub to_input: String,
+    pub cc: Vec<String>,
+    pub cc_input: String,
+    pub bcc: Vec<String>,
+    pub bcc_input: String,
     pub subject: String,
     /// Plain-text mirror of the WYSIWYG body (from the editor webview).
     pub body: String,
@@ -65,9 +72,12 @@ impl ComposeDraft {
         Self {
             mode: ComposeMode::New,
             inline: false,
-            to: String::new(),
-            cc: String::new(),
-            bcc: String::new(),
+            to: Vec::new(),
+            to_input: String::new(),
+            cc: Vec::new(),
+            cc_input: String::new(),
+            bcc: Vec::new(),
+            bcc_input: String::new(),
             subject: String::new(),
             body: String::new(),
             body_html: String::new(),
@@ -90,8 +100,48 @@ impl ComposeDraft {
         matches!(self.mode, ComposeMode::Reply | ComposeMode::ReplyAll)
     }
 
+    pub fn to_locked(&self) -> bool {
+        self.mode == ComposeMode::Feedback
+    }
+
+    pub fn new_feedback(to: &str) -> Self {
+        let mut draft = Self::new_blank();
+        draft.mode = ComposeMode::Feedback;
+        let addr = to.trim();
+        if !addr.is_empty() {
+            draft.to.push(addr.to_string());
+        }
+        draft.subject = "AiliakMail feedback".into();
+        draft
+    }
+
+    /// Flush typing buffers into tags, then return To list for SMTP.
+    pub fn recipients_to(&mut self) -> Vec<String> {
+        commit_recipient_input(&mut self.to, &mut self.to_input);
+        self.to.clone()
+    }
+
+    pub fn recipients_cc(&mut self) -> Vec<String> {
+        commit_recipient_input(&mut self.cc, &mut self.cc_input);
+        self.cc.clone()
+    }
+
+    pub fn recipients_bcc(&mut self) -> Vec<String> {
+        commit_recipient_input(&mut self.bcc, &mut self.bcc_input);
+        self.bcc.clone()
+    }
+
     pub fn body_for_send(&self) -> String {
+        let placeholder = mailbox_core::missing_plain_placeholder();
         let mut out = self.body.trim_end().to_string();
+        // Never send our reader stub as the message body.
+        if out.trim() == placeholder {
+            out.clear();
+        }
+        // Webview may leave plain empty while HTML has the real content.
+        if out.trim().is_empty() && !html_body_is_empty(&self.body_html) {
+            out = mailbox_core::html_to_plain(&self.body_html);
+        }
         if !self.quote_on_send.is_empty() {
             if !out.is_empty() {
                 out.push('\n');
@@ -103,9 +153,11 @@ impl ComposeDraft {
 
     /// HTML for SMTP `multipart/alternative`, including the reply quote.
     pub fn body_html_for_send(&self) -> String {
+        let placeholder = mailbox_core::missing_plain_placeholder();
         let mut html = self.body_html.trim().to_string();
         if html_body_is_empty(&html) {
-            if !self.body.trim().is_empty() {
+            let plain = self.body.trim();
+            if !plain.is_empty() && plain != placeholder {
                 html = plain_to_editor_html(&self.body);
             } else {
                 html.clear();
@@ -141,9 +193,12 @@ impl ComposeDraft {
                     addrs.push(a.clone());
                 }
             }
-            addrs.join(", ")
+            addrs
         } else {
-            format_addr(&msg.envelope.from_name, &msg.envelope.from_addr)
+            vec![format_addr(
+                &msg.envelope.from_name,
+                &msg.envelope.from_addr,
+            )]
         };
         let reply_to_name = if msg.envelope.from_name.trim().is_empty() {
             msg.envelope.from_addr.clone()
@@ -158,8 +213,11 @@ impl ComposeDraft {
             },
             inline: true,
             to,
-            cc: String::new(),
-            bcc: String::new(),
+            to_input: String::new(),
+            cc: Vec::new(),
+            cc_input: String::new(),
+            bcc: Vec::new(),
+            bcc_input: String::new(),
             subject: reply_subject(&msg.envelope.subject),
             body: String::new(),
             body_html: String::new(),
@@ -181,15 +239,6 @@ impl ComposeDraft {
         }
     }
 
-    pub fn parse_recipients(field: &str) -> Vec<String> {
-        field
-            .split([',', ';'])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect()
-    }
-
     pub fn pick_attachments(&mut self) {
         let files = rfd::FileDialog::new()
             .set_title("Attach files")
@@ -206,6 +255,47 @@ impl ComposeDraft {
                 self.attachments.push(ComposeAttachment { path, name });
             }
         }
+    }
+}
+
+fn strip_recipient_newlines(input: &mut String) {
+    if input.contains('\n') || input.contains('\r') {
+        *input = input
+            .chars()
+            .filter(|c| *c != '\n' && *c != '\r')
+            .collect();
+    }
+}
+
+fn commit_recipient_input(tags: &mut Vec<String>, input: &mut String) {
+    strip_recipient_newlines(input);
+    let raw = input.trim().trim_matches([',', ';']).trim();
+    if raw.is_empty() {
+        input.clear();
+        return;
+    }
+    if raw.contains('@') && !tags.iter().any(|t| same_email(t, raw)) {
+        tags.push(raw.to_string());
+    }
+    input.clear();
+}
+
+fn add_recipient_tag(tags: &mut Vec<String>, input: &mut String, tag: String) {
+    if tag.trim().is_empty() {
+        return;
+    }
+    if !tags.iter().any(|t| same_email(t, &tag)) {
+        tags.push(tag);
+    }
+    input.clear();
+}
+
+fn suggestion_label(name: &str, addr: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case(addr) {
+        addr.to_string()
+    } else {
+        format!("{name}  ·  {addr}")
     }
 }
 
@@ -253,6 +343,11 @@ fn quote_body(msg: &Message) -> String {
 }
 
 fn html_body_is_empty(html: &str) -> bool {
+    html_looks_empty(html)
+}
+
+/// True when HTML has no visible text (e.g. empty editor `<br>`).
+pub fn html_looks_empty(html: &str) -> bool {
     let mut text = String::new();
     let mut in_tag = false;
     for c in html.chars() {
@@ -311,6 +406,10 @@ fn paint_format_toolbar(ui: &mut Ui, draft: &ComposeDraft, result: &mut ComposeU
         if fmt_btn(ui, ph::TEXT_T_SLASH, "Clear formatting", false).clicked() {
             result.exec = Some("removeFormat");
         }
+        ui.add_space(6.0);
+        if fmt_btn(ui, ph::IMAGE, "Insert image into body", false).clicked() {
+            result.pick_inline_image = true;
+        }
     });
 }
 
@@ -336,6 +435,71 @@ fn icon_btn(ui: &mut Ui, glyph: &str, tip: &str) -> egui::Response {
             .rect_filled(rect, 6.0, ui.visuals().widgets.hovered.bg_fill);
     }
     paint_glyph(ui, rect.shrink(6.0), glyph, mute);
+    resp.on_hover_text(tip)
+}
+
+/// Attach files — plus glyph + “Attach” label.
+fn attach_button(ui: &mut Ui) -> egui::Response {
+    let mute = ui.visuals().weak_text_color();
+    let ink = ui.visuals().text_color();
+    let pad = egui::vec2(8.0, 4.0);
+    let icon = 14.0;
+    let galley = ui.painter().layout_no_wrap(
+        "Attach".to_owned(),
+        egui::FontId::new(13.0, egui::FontFamily::Proportional),
+        ink,
+    );
+    let size = egui::vec2(
+        pad.x * 2.0 + icon + ui.spacing().icon_spacing + galley.size().x,
+        (pad.y * 2.0 + icon.max(galley.size().y)).max(28.0),
+    );
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if resp.is_pointer_button_down_on() {
+        theme::select(ui.ctx())
+    } else if resp.hovered() {
+        theme::chip(ui.ctx())
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 6.0, fill);
+    }
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + pad.x, rect.center().y - icon * 0.5),
+        Vec2::splat(icon),
+    );
+    paint_glyph(ui, icon_rect, ph::PLUS, mute);
+    ui.painter().galley(
+        egui::pos2(
+            icon_rect.right() + ui.spacing().icon_spacing,
+            rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        Color32::PLACEHOLDER,
+    );
+    resp.on_hover_text("Attach files")
+}
+
+/// Compose discard (X) — single accent-tinted plate (no gray+stroke double layer).
+fn close_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
+    let accent = theme::accent(ui.ctx());
+    let size = Vec2::splat(28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    // Reader card is always light paper — mix white ← accent for one clear plate.
+    let t = if resp.is_pointer_button_down_on() {
+        0.32
+    } else if resp.hovered() {
+        0.22
+    } else {
+        0.14
+    };
+    let fill = Color32::from_rgb(
+        ((255.0 * (1.0 - t)) + (f32::from(accent.r()) * t)) as u8,
+        ((255.0 * (1.0 - t)) + (f32::from(accent.g()) * t)) as u8,
+        ((255.0 * (1.0 - t)) + (f32::from(accent.b()) * t)) as u8,
+    );
+    ui.painter().rect_filled(rect, 6.0, fill);
+    paint_glyph(ui, rect.shrink(6.0), ph::X, accent);
     resp.on_hover_text(tip)
 }
 
@@ -384,7 +548,13 @@ fn send_button(ui: &mut Ui, enabled: bool, sending: bool) -> egui::Response {
         galley,
         Color32::WHITE,
     );
-    resp.on_hover_text(if sending { "Sending…" } else { "Send" })
+    resp.on_hover_text(if sending {
+        "Sending…"
+    } else if cfg!(target_os = "macos") {
+        "Send (⌘Enter)"
+    } else {
+        "Send (Ctrl+Enter)"
+    })
 }
 
 /// Result of composing UI for one frame.
@@ -397,6 +567,14 @@ pub struct ComposeUiResult {
     pub editor_bounds: Option<Rect>,
     /// `document.execCommand` name requested by the format toolbar.
     pub exec: Option<&'static str>,
+    /// Insert raw HTML at the caret (e.g. inline `<img>`).
+    pub insert_html: Option<String>,
+    /// Open a file picker and insert the image into the body.
+    pub pick_inline_image: bool,
+    /// Clicked the body area — focus the WYSIWYG webview.
+    pub focus_editor: bool,
+    /// User focused the To / Subject egui fields (body should release sticky focus).
+    pub header_focused: bool,
 }
 
 fn paint_attachment_chips(ui: &mut Ui, draft: &mut ComposeDraft) {
@@ -428,119 +606,448 @@ fn paint_attachment_chips(ui: &mut Ui, draft: &mut ComposeDraft) {
     ui.add_space(4.0);
 }
 
-/// Labeled single-line field that stays inside the row (no horizontal overflow).
-///
-/// Optional `trailing` runs first via right-to-left so Cc/Bcc (etc.) keep their
-/// space and the input only uses what's left.
-fn compose_labeled_field(
+/// Email shown inside a recipient pill (matches compose reference chips).
+fn tag_label(tag: &str) -> String {
+    let e = extract_email(tag);
+    if e.is_empty() {
+        tag.trim().to_string()
+    } else {
+        e
+    }
+}
+
+fn paint_recipient_tag(ui: &mut Ui, tag: &str, mute: Color32, locked: bool) -> bool {
+    let mut remove = false;
+    let label = tag_label(tag);
+    egui::Frame::none()
+        .fill(Color32::from_rgb(0xee, 0xf0, 0xef))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    RichText::new(label)
+                        .size(13.0)
+                        .color(theme::reader_ink()),
+                );
+                if !locked {
+                    let (x_rect, x_resp) =
+                        ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
+                    paint_glyph(ui, x_rect, ph::X, mute);
+                    if x_resp.on_hover_text("Remove").clicked() {
+                        remove = true;
+                    }
+                }
+            });
+        });
+    remove
+}
+
+fn recipient_matches(
+    input: &str,
+    tags: &[String],
+    hints: &[(String, String)],
+) -> Vec<(String, String)> {
+    let q_chars = input.trim().chars().count();
+    if q_chars < 3 {
+        return Vec::new();
+    }
+    let q = input.trim().to_lowercase();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (name, addr) in hints {
+        if addr.is_empty() || tags.iter().any(|t| same_email(t, addr)) {
+            continue;
+        }
+        let key = addr.to_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        if addr.to_lowercase().contains(&q) || name.to_lowercase().contains(&q) {
+            out.push((name.clone(), addr.clone()));
+            if out.len() >= 8 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Clean recipient row: one horizontal line — tags + input (+ trailing Cc/Bcc).
+/// Returns whether the recipient text field currently has egui focus.
+fn paint_clean_recipient_row(
     ui: &mut Ui,
-    label: &str,
-    label_w: f32,
-    value: &mut String,
-    field_fill: Color32,
+    tags: &mut Vec<String>,
+    input: &mut String,
     mute: Color32,
+    hints: &[(String, String)],
+    field_key: &'static str,
+    hint: &str,
+    locked: bool,
+    autofocus: bool,
+    trailing_w: f32,
     trailing: impl FnOnce(&mut Ui),
-) {
+) -> bool {
+    // Single row only — never wrap the text field onto a second line.
     ui.horizontal(|ui| {
-        ui.set_max_width(ui.available_width());
-        ui.add_sized(
-            [label_w, 20.0],
-            egui::Label::new(RichText::new(label).color(mute)),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            trailing(ui);
-            let field_w = ui.available_width().max(48.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new(field_w, 32.0),
-                egui::Layout::left_to_right(egui::Align::Center),
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.set_min_height(28.0);
+
+        let edit_id = ui.id().with(("compose_rcpt_edit", field_key));
+        let popup_id = ui.id().with(("compose_rcpt_popup", field_key));
+        let sel_id = ui.id().with(("compose_rcpt_sel", field_key));
+
+        if !locked && (input.ends_with(',') || input.ends_with(';')) {
+            commit_recipient_input(tags, input);
+        }
+
+        let matches = if locked {
+            Vec::new()
+        } else {
+            recipient_matches(input, tags, hints)
+        };
+
+        let mut sel = ui
+            .ctx()
+            .data(|d| d.get_temp::<usize>(sel_id).unwrap_or(0));
+        if !matches.is_empty() {
+            sel = sel.min(matches.len() - 1);
+        } else {
+            sel = 0;
+        }
+
+        // Consume Enter/Tab *before* TextEdit so suggestions can be confirmed by keyboard.
+        let focused = ui.memory(|m| m.has_focus(edit_id));
+        let mut picked: Option<String> = None;
+        if !locked && focused && !matches.is_empty() {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)) {
+                sel = (sel + 1) % matches.len();
+            }
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)) {
+                sel = if sel == 0 {
+                    matches.len() - 1
+                } else {
+                    sel - 1
+                };
+            }
+            if ui.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, Key::Enter)
+                    || i.consume_key(egui::Modifiers::NONE, Key::Tab)
+            }) {
+                picked = Some(matches[sel].1.clone());
+            }
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+                ui.memory_mut(|m| m.close_popup());
+            }
+        } else if !locked
+            && focused
+            && matches.is_empty()
+            && !input.trim().is_empty()
+            && ui.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, Key::Enter)
+                    || i.consume_key(egui::Modifiers::NONE, Key::Tab)
+            })
+        {
+            commit_recipient_input(tags, input);
+        }
+
+        ui.ctx().data_mut(|d| d.insert_temp(sel_id, sel));
+
+        let mut remove: Option<usize> = None;
+        for (i, tag) in tags.iter().enumerate() {
+            if paint_recipient_tag(ui, tag, mute, locked) {
+                remove = Some(i);
+            }
+        }
+        if let Some(i) = remove {
+            tags.remove(i);
+        }
+
+        let te = if locked {
+            None
+        } else {
+            // Fill leftover width on this same row (small floor so it never wraps under tags).
+            let edit_w = (ui.available_width() - trailing_w).max(48.0);
+            let te = ui.add(
+                egui::TextEdit::singleline(input)
+                    .id(edit_id)
+                    .desired_width(edit_w)
+                    .frame(false)
+                    .hint_text(RichText::new(hint).size(13.0).color(mute))
+                    .text_color(theme::reader_ink()),
+            );
+            strip_recipient_newlines(input);
+            if autofocus {
+                te.request_focus();
+            }
+            Some(te)
+        };
+
+        trailing(ui);
+
+        let Some(te) = te else {
+            if let Some(choice) = picked {
+                add_recipient_tag(tags, input, choice);
+            }
+            return false;
+        };
+
+        let input_focused = te.has_focus() || focused;
+
+        let popup_was_open = ui.memory(|m| m.is_popup_open(popup_id));
+        // Keep popup alive across the click that steals TextEdit focus.
+        let show_popup = !matches.is_empty() && (te.has_focus() || popup_was_open || focused);
+
+        if te.has_focus() && !matches.is_empty() {
+            ui.memory_mut(|m| m.open_popup(popup_id));
+        }
+
+        if show_popup && !matches.is_empty() {
+            egui::popup::popup_below_widget(
+                ui,
+                popup_id,
+                &te,
+                egui::popup::PopupCloseBehavior::CloseOnClickOutside,
                 |ui| {
-                    ui.set_min_width(field_w);
-                    ui.set_max_width(field_w);
-                    Frame::none()
-                        .fill(field_fill)
-                        .rounding(8.0)
-                        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.add(
-                                egui::TextEdit::singleline(value)
-                                    .desired_width(ui.available_width())
-                                    .frame(false),
-                            );
-                        });
+                    ui.set_min_width(260.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (i, (name, addr)) in matches.iter().enumerate() {
+                        let line = suggestion_label(name, addr);
+                        let fill = if i == sel {
+                            theme::select(ui.ctx())
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        let resp = ui.add(
+                            egui::Button::new(RichText::new(&line).size(13.0))
+                                .fill(fill)
+                                .stroke(egui::Stroke::NONE)
+                                .rounding(4.0)
+                                .min_size(Vec2::new(ui.available_width(), 0.0)),
+                        );
+                        if resp.clicked() {
+                            picked = Some(addr.clone());
+                        }
+                    }
                 },
             );
-        });
-    });
+        } else if popup_was_open && matches.is_empty() {
+            ui.memory_mut(|m| m.close_popup());
+        }
+
+        if let Some(choice) = picked {
+            add_recipient_tag(tags, input, choice);
+            ui.memory_mut(|m| m.close_popup());
+            ui.ctx()
+                .memory_mut(|m| m.request_focus(edit_id));
+            return true;
+        }
+        input_focused
+    })
+    .inner
 }
 
 /// Full composer painted inside the mail body / reader card.
+///
+/// Clean header: placeholder Subject + To/Cc/Bcc (no gray field chrome), then body.
+/// `recipient_hints` is `(name, email)` from prior mail for suggestions.
 pub fn show_reader_compose(
     ui: &mut Ui,
     draft: &mut ComposeDraft,
     sending: bool,
+    recipient_hints: &[(String, String)],
+    autofocus_to: &mut bool,
+    autofocus_subject: &mut bool,
 ) -> ComposeUiResult {
     let mut result = ComposeUiResult::default();
     let mute = theme::reader_mute();
     let ink = theme::reader_ink();
-    let field_fill = Color32::from_rgb(0xf3, 0xf4, 0xf6);
 
-    // Keep To / Subject / editor inside the reader card.
     let card = ui.max_rect();
     ui.set_clip_rect(card);
     ui.set_max_width(card.width());
 
+    // Minimal chrome: close + from (no boxed fields).
     ui.horizontal(|ui| {
         ui.set_max_width(ui.available_width());
-        let title = compose_title(draft);
+        if close_icon_btn(ui, "Discard").clicked() {
+            result.close = true;
+        }
+        ui.add_space(6.0);
         ui.label(
-            RichText::new(&title)
-                .strong()
-                .size(18.0)
-                .color(ink),
+            RichText::new(compose_title(draft))
+                .size(13.0)
+                .color(mute),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if icon_btn(ui, ph::X, "Discard").clicked() {
-                result.close = true;
-            }
             if !draft.from_email.is_empty() {
-                let from = format!("from {}", draft.from_email);
                 ui.add(
-                    egui::Label::new(RichText::new(from).small().color(mute)).truncate(),
+                    egui::Label::new(
+                        RichText::new(&draft.from_email).small().color(mute),
+                    )
+                    .truncate(),
                 );
             }
         });
     });
-    ui.add_space(8.0);
+    ui.add_space(14.0);
 
-    let label_w = 56.0;
-    compose_labeled_field(ui, "To", label_w, &mut draft.to, field_fill, mute, |ui| {
-        if !draft.show_bcc && ui.small_button("Bcc").clicked() {
-            draft.show_bcc = true;
-        }
-        if !draft.show_cc && ui.small_button("Cc").clicked() {
-            draft.show_cc = true;
+    // Subject — large placeholder, no label / fill.
+    let subject_id = ui.id().with("compose_subject_clean");
+    let subject_resp = ui.add(
+        egui::TextEdit::singleline(&mut draft.subject)
+            .id(subject_id)
+            .desired_width(ui.available_width())
+            .frame(false)
+            .hint_text(
+                RichText::new("Subject")
+                    .size(22.0)
+                    .color(Color32::from_rgb(0xb0, 0xb4, 0xb2)),
+            )
+            .text_color(ink)
+            .font(egui::FontId::proportional(22.0)),
+    );
+    if *autofocus_subject {
+        subject_resp.request_focus();
+        *autofocus_subject = false;
+    }
+    if subject_resp.gained_focus() || subject_resp.has_focus() {
+        result.header_focused = true;
+    }
+    ui.add_space(6.0);
+
+    // To — tags + input; Cc/Bcc toggles stay at the end of this row.
+    let to_locked = draft.to_locked();
+    let to_hint = if to_locked {
+        ""
+    } else if draft.to.is_empty() && draft.to_input.is_empty() {
+        "To"
+    } else {
+        ""
+    };
+    let mut open_cc = false;
+    let mut open_bcc = false;
+    // "To" is placeholder-only — hide once there are tags or typing.
+    ui.horizontal(|ui| {
+        let trail_w = if to_locked {
+            0.0
+        } else {
+            let mut w = 0.0;
+            if !draft.show_cc {
+                w += 28.0;
+            }
+            if !draft.show_bcc {
+                w += 36.0;
+            }
+            w
+        };
+        if paint_clean_recipient_row(
+            ui,
+            &mut draft.to,
+            &mut draft.to_input,
+            mute,
+            recipient_hints,
+            "to",
+            to_hint,
+            to_locked,
+            *autofocus_to && !to_locked,
+            trail_w,
+            |ui| {
+                if to_locked {
+                    return;
+                }
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if !draft.show_cc
+                    && ui
+                        .add(
+                            egui::Label::new(RichText::new("Cc").size(13.0).color(mute))
+                                .sense(Sense::click()),
+                        )
+                        .on_hover_text("Add Cc")
+                        .clicked()
+                {
+                    open_cc = true;
+                }
+                if !draft.show_bcc
+                    && ui
+                        .add(
+                            egui::Label::new(RichText::new("Bcc").size(13.0).color(mute))
+                                .sense(Sense::click()),
+                        )
+                        .on_hover_text("Add Bcc")
+                        .clicked()
+                {
+                    open_bcc = true;
+                }
+            },
+        ) {
+            result.header_focused = true;
         }
     });
-    if draft.show_cc {
-        ui.add_space(4.0);
-        compose_labeled_field(ui, "Cc", label_w, &mut draft.cc, field_fill, mute, |_| {});
+    *autofocus_to = false;
+    if open_cc {
+        draft.show_cc = true;
     }
-    if draft.show_bcc {
-        ui.add_space(4.0);
-        compose_labeled_field(ui, "Bcc", label_w, &mut draft.bcc, field_fill, mute, |_| {});
+    if open_bcc {
+        draft.show_bcc = true;
     }
-    ui.add_space(4.0);
-    compose_labeled_field(
-        ui,
-        "Subject",
-        label_w,
-        &mut draft.subject,
-        field_fill,
-        mute,
-        |_| {},
+
+    if !to_locked && draft.show_cc {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Cc").size(13.0).color(mute));
+            ui.add_space(4.0);
+            if paint_clean_recipient_row(
+                ui,
+                &mut draft.cc,
+                &mut draft.cc_input,
+                mute,
+                recipient_hints,
+                "cc",
+                "Add Cc",
+                false,
+                open_cc,
+                0.0,
+                |_| {},
+            ) {
+                result.header_focused = true;
+            }
+        });
+    }
+    if !to_locked && draft.show_bcc {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Bcc").size(13.0).color(mute));
+            ui.add_space(4.0);
+            if paint_clean_recipient_row(
+                ui,
+                &mut draft.bcc,
+                &mut draft.bcc_input,
+                mute,
+                recipient_hints,
+                "bcc",
+                "Add Bcc",
+                false,
+                open_bcc,
+                0.0,
+                |_| {},
+            ) {
+                result.header_focused = true;
+            }
+        });
+    }
+
+    ui.add_space(10.0);
+    let sep_w = ui.available_width();
+    let (sep_rect, _) = ui.allocate_exact_size(Vec2::new(sep_w, 1.0), Sense::hover());
+    ui.painter().hline(
+        sep_rect.x_range(),
+        sep_rect.center().y,
+        egui::Stroke::new(1.0, Color32::from_rgb(0xe5, 0xe7, 0xe5)),
     );
-    ui.add_space(6.0);
+    ui.add_space(8.0);
+
     paint_attachment_chips(ui, draft);
     paint_format_toolbar(ui, draft, &mut result);
     ui.add_space(4.0);
@@ -548,26 +1055,52 @@ pub fn show_reader_compose(
     let action_h = 40.0;
     let body_h = (ui.available_height() - action_h - 4.0).max(120.0);
     let body_w = ui.available_width().min(card.width()).max(0.0);
-    let (editor_rect, _) =
-        ui.allocate_exact_size(Vec2::new(body_w, body_h), Sense::hover());
-    ui.painter().rect_filled(editor_rect, 10.0, field_fill);
+    // Clickable underlay — webview sits above, but egui still sees presses in gaps.
+    let (editor_rect, editor_resp) =
+        ui.allocate_exact_size(Vec2::new(body_w, body_h), Sense::click());
+    // White underlay so it matches the clean card (webview paints on top).
+    ui.painter()
+        .rect_filled(editor_rect, 0.0, Color32::WHITE);
+    if editor_resp.clicked()
+        || (editor_resp.hovered() && ui.input(|i| i.pointer.primary_pressed()))
+    {
+        result.focus_editor = true;
+    }
     result.editor_bounds = Some(editor_rect);
 
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        if icon_btn(ui, ph::PLUS, "Attach files").clicked() {
-            draft.pick_attachments();
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can = !sending && !draft.to.trim().is_empty();
-            if send_button(ui, can, sending).clicked() {
-                result.send = true;
+    // Lock width to the card so Send/Discard cannot expand past the visible edge.
+    let action_w = ui.available_width().min(card.width()).max(0.0);
+    ui.allocate_ui_with_layout(
+        Vec2::new(action_w, 32.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_width(action_w);
+            if attach_button(ui).clicked() {
+                draft.pick_attachments();
             }
-            if ui.button("Discard").clicked() {
-                result.close = true;
-            }
-        });
-    });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can = !sending
+                    && (!draft.to.is_empty() || !draft.to_input.trim().is_empty());
+                if send_button(ui, can, sending).clicked() {
+                    result.send = true;
+                }
+                if ui.button("Discard").clicked() {
+                    result.close = true;
+                }
+            });
+        },
+    );
+    // Ctrl+Enter (Linux/Windows/macOS) or Cmd+Enter (macOS) to send.
+    let can_send =
+        !sending && (!draft.to.is_empty() || !draft.to_input.trim().is_empty());
+    if can_send
+        && ui.input(|i| {
+            (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(Key::Enter)
+        })
+    {
+        result.send = true;
+    }
     if ui.input(|i| i.key_pressed(Key::Escape)) {
         result.close = true;
     }
@@ -630,7 +1163,7 @@ pub fn show_inline_compose(
                     );
                 });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icon_btn(ui, ph::X, "Discard reply").clicked() {
+                if close_icon_btn(ui, "Discard reply").clicked() {
                     result.close = true;
                 }
                 if !draft.from_email.is_empty() {
@@ -678,7 +1211,7 @@ pub fn show_inline_compose(
 
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    if icon_btn(ui, ph::PLUS, "Attach files").clicked() {
+                    if attach_button(ui).clicked() {
                         draft.pick_attachments();
                     }
                     if icon_btn(ui, ph::ARROWS_OUT, "Expand in reader").clicked() {
@@ -700,7 +1233,7 @@ pub fn show_inline_compose(
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let can_send = !sending
-                            && !draft.to.trim().is_empty()
+                            && (!draft.to.is_empty() || !draft.to_input.trim().is_empty())
                             && (!draft.body_is_empty() || !draft.attachments.is_empty());
                         if send_button(ui, can_send, sending).clicked() {
                             result.send = true;
@@ -719,6 +1252,7 @@ pub fn show_inline_compose(
 fn compose_title(draft: &ComposeDraft) -> String {
     match draft.mode {
         ComposeMode::New => "New message".into(),
+        ComposeMode::Feedback => "Feedback".into(),
         ComposeMode::Reply => {
             if draft.subject.is_empty() {
                 "Reply".into()
@@ -835,7 +1369,7 @@ pub fn show_chat_reply_dock(
                 }
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    if icon_btn(ui, ph::PLUS, "Attach files").clicked() {
+                    if attach_button(ui).clicked() {
                         if let Some(paths) = rfd::FileDialog::new()
                             .set_title("Attach files")
                             .pick_files()

@@ -307,7 +307,7 @@ pub async fn sync_inbox(
         };
 
         // POP3 has no \Seen flag — treat newly fetched as unread.
-        match parse_raw_message(&account.id, INBOX, uid, false, &raw) {
+        match parse_raw_message(&account.id, INBOX, uid, false, false, &raw) {
             Some(msg) => messages.push(msg),
             None => {
                 parse_failures += 1;

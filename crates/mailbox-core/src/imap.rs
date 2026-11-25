@@ -181,15 +181,27 @@ pub async fn sync_folder(
             Some(u) => u,
             None => continue,
         };
-        let seen = fetch
-            .flags()
-            .any(|f| matches!(f, async_imap::types::Flag::Seen));
+        let mut seen = false;
+        let mut flagged = false;
+        for f in fetch.flags() {
+            match f {
+                async_imap::types::Flag::Seen => seen = true,
+                async_imap::types::Flag::Flagged => flagged = true,
+                _ => {}
+            }
+        }
+        // Gmail Starred mailbox ⇒ treat as flagged even if FLAGS lagged.
+        if crate::folder_role::classify_mailbox(folder_path, folder_path)
+            == crate::folder_role::MailboxRole::Starred
+        {
+            flagged = true;
+        }
         let raw = match fetch.body() {
             Some(b) if !b.is_empty() => b,
             _ => continue,
         };
 
-        if let Some(msg) = parse_raw_message(account_id, folder_path, uid, seen, raw) {
+        if let Some(msg) = parse_raw_message(account_id, folder_path, uid, seen, flagged, raw) {
             messages.push(msg);
         }
     }
@@ -212,6 +224,31 @@ pub async fn set_seen(
         "+FLAGS (\\Seen)"
     } else {
         "-FLAGS (\\Seen)"
+    };
+    let _ = session
+        .uid_store(uid.to_string(), flags)
+        .await
+        .with_context(|| format!("UID STORE {flags} uid={uid}"))?
+        .try_collect::<Vec<_>>()
+        .await;
+    Ok(())
+}
+
+/// Set or clear `\Flagged` / Gmail Starred (UID STORE).
+pub async fn set_flagged(
+    session: &mut ImapSession,
+    folder_path: &str,
+    uid: u32,
+    flagged: bool,
+) -> Result<()> {
+    session
+        .select(folder_path)
+        .await
+        .with_context(|| format!("SELECT {folder_path}"))?;
+    let flags = if flagged {
+        "+FLAGS (\\Flagged)"
+    } else {
+        "-FLAGS (\\Flagged)"
     };
     let _ = session
         .uid_store(uid.to_string(), flags)

@@ -60,6 +60,18 @@ Or build a release binary for your OS:
 
 Add `--package` to also produce installers (`.deb` / AppImage / `.dmg` / NSIS) when tooling is available.
 
+### Publish a multi-OS GitHub Release
+
+One machine cannot reliably build Linux + macOS + Windows GUIs. Use the release script to **tag and push**; GitHub Actions then builds all platforms and attaches installers:
+
+```bash
+# commit your work first, then:
+./bin/release.sh 0.1.2           # creates v0.1.2, pushes, triggers CI
+./bin/release.sh 0.1.2 --watch   # same, then waits for the Actions run
+./bin/release.sh --from-cargo    # use version from Cargo.toml [workspace.package]
+./bin/release.sh 0.1.2 --dry-run # preview only
+```
+
 ## Build scripts (`bin/`)
 
 | Script | Platform | Notes |
@@ -68,8 +80,11 @@ Add `--package` to also produce installers (`.deb` / AppImage / `.dmg` / NSIS) w
 | [`bin/build-macos.sh`](bin/build-macos.sh) | macOS | Native; `--universal` lipo; `--package` → app + dmg |
 | [`bin/build-windows.sh`](bin/build-windows.sh) | Windows | Native MSVC; `--cross` from Linux (experimental); `--package` → NSIS |
 | [`bin/build-all.sh`](bin/build-all.sh) | current host | Runs the matching script above |
+| [`bin/release.sh`](bin/release.sh) | all (via CI) | Tag `v*`, push, GitHub Actions → Linux + macOS arm64/Intel + Windows |
 
-Cross-compiling a full egui GUI to another OS is unreliable; for release artifacts use **GitHub Actions** (tag `v*` → `.github/workflows/release.yml`).
+Cross-compiling a full egui GUI to another OS is unreliable; for release artifacts use **`./bin/release.sh`** (or push a `v*` tag → `.github/workflows/release.yml`).
+
+**GitLab:** the same multi-OS packaging is in [`.gitlab-ci.yml`](.gitlab-ci.yml) (tag `v*` → Linux + macOS arm64/Intel + Windows → Package Registry + Release). See [`packaging/README.md`](packaging/README.md). On migrate day, push tags to GitLab; adjust runner `tags:` if you are not on GitLab.com SaaS.
 
 ## App authorization (recommended)
 

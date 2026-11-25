@@ -276,7 +276,7 @@ fn html_preferred_over_microsoft_plain_when_both_present() {
 #[test]
 fn multipart_eml_stores_html_and_prefers_html_links() {
     let raw = include_bytes!("fixtures/mail/multipart_alt.eml");
-    let msg = parse_raw_message("acct", "INBOX", 42, true, raw).expect("parse eml");
+    let msg = parse_raw_message("acct", "INBOX", 42, true, false, raw).expect("parse eml");
 
     assert!(
         !msg.body_html.is_empty(),
@@ -319,7 +319,7 @@ fn plain_only_multipart_fallback_still_linkifies() {
 #[test]
 fn multipart_related_resolves_cid_to_data_url() {
     let raw = include_bytes!("fixtures/mail/multipart_related_cid.eml");
-    let msg = parse_raw_message("acct", "INBOX", 7, true, raw).expect("parse eml");
+    let msg = parse_raw_message("acct", "INBOX", 7, true, false, raw).expect("parse eml");
     assert!(
         msg.body_html.contains("data:image/png;base64,"),
         "cid must become data: URL: {}",
@@ -344,7 +344,7 @@ fn multipart_related_resolves_cid_to_data_url() {
 #[test]
 fn plain_only_eml_stores_no_synthesized_html() {
     let raw = include_bytes!("fixtures/mail/plain_only.eml");
-    let msg = parse_raw_message("acct", "INBOX", 8, true, raw).expect("parse eml");
+    let msg = parse_raw_message("acct", "INBOX", 8, true, false, raw).expect("parse eml");
     assert!(
         msg.body_html.is_empty(),
         "mail-parser synthesized HTML must not be stored: {}",

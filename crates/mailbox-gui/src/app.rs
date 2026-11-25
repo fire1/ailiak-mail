@@ -16,7 +16,8 @@ use mailbox_core::secrets;
 use mailbox_core::seed::{demo_account_id, seed_demo_if_empty};
 use mailbox_core::store::Store;
 use mailbox_core::sync::{
-    mark_seen_on_server, move_messages, sync_account, test_connection, SyncOptions,
+    mark_flagged_on_server, mark_seen_on_server, move_messages, sync_account, test_connection,
+    SyncOptions,
 };
 use mailbox_core::types::{Envelope, Folder, Message, MessageId, SpecialFolderKind};
 
@@ -31,9 +32,11 @@ use mailbox_core::providers::MailProvider;
 
 /// Full Ailiak Desk in the system browser (escape hatch; Todo uses the API).
 pub(crate) const DESK_URL: &str = "https://ailiak.com";
-/// Hidden until we migrate hosting to GitLab (issue-by-email works there).
-pub(crate) const FEEDBACK_UI_ENABLED: bool = false;
-/// Prefill target for Feedback → new issue (swap to GitLab when ready).
+/// Feedback nav entry → mail composer (To locked to [`FEEDBACK_TO_ADDR`]).
+pub(crate) const FEEDBACK_UI_ENABLED: bool = true;
+/// Where Feedback compose sends mail.
+pub(crate) const FEEDBACK_TO_ADDR: &str = "anzaprianov@gmail.com";
+/// Legacy GitHub issue URL (unused — feedback uses SMTP compose).
 #[allow(dead_code)]
 pub(crate) const FEEDBACK_ISSUES_URL: &str =
     "https://github.com/fire1/ailiak-mail/issues/new";
@@ -127,6 +130,14 @@ pub struct MailboxApp {
     pub(crate) chat_attachments: Vec<crate::compose::ComposeAttachment>,
     /// Floating compose draft (None = closed).
     pub(crate) compose: Option<crate::compose::ComposeDraft>,
+    /// `(name, email)` suggestions for compose To/Cc/Bcc.
+    pub(crate) compose_hints: Vec<(String, String)>,
+    /// Focus the To field once when the full composer opens.
+    pub(crate) compose_autofocus_to: bool,
+    /// Focus Subject once (e.g. Feedback compose with locked To).
+    pub(crate) compose_autofocus_subject: bool,
+    /// Body webview owns keyboard — keep egui from parking focus on To.
+    pub(crate) compose_body_focused: bool,
     pub(crate) selected_message: Option<MessageId>,
     pub(crate) open_message: Option<Message>,
     /// Opt-in remote images for the open message (privacy default: off).
@@ -145,6 +156,8 @@ pub struct MailboxApp {
     pub(crate) compose_webview_req: Option<crate::compose_webview::ComposeWebViewRequest>,
     /// Waiting for a definitive HTML flush before SMTP send.
     pending_compose_send: bool,
+    /// Frames waited for webview flush (timeout → send with synced draft).
+    pending_compose_send_frames: u8,
     pub(crate) search: String,
     /// Request keyboard focus on the top-bar search field (set by `/`).
     pub(crate) focus_search: bool,
@@ -288,6 +301,10 @@ impl MailboxApp {
             chat_reply_focused: false,
             chat_attachments: Vec::new(),
             compose: None,
+            compose_hints: Vec::new(),
+            compose_autofocus_to: false,
+            compose_autofocus_subject: false,
+            compose_body_focused: false,
             selected_message: None,
             open_message: None,
             load_remote_images: false,
@@ -299,6 +316,7 @@ impl MailboxApp {
             compose_webview: crate::compose_webview::ComposeWebView::default(),
             compose_webview_req: None,
             pending_compose_send: false,
+            pending_compose_send_frames: 0,
             search: String::new(),
             focus_search: false,
             status,
@@ -1587,15 +1605,7 @@ and paste it here."
 
     pub(crate) fn refresh_folders(&mut self) -> Result<()> {
         self.folders = self.store.list_folders(&self.account_id)?;
-        // Local virtual folder — snoozed mail stays unread until opened later.
-        let (_, snoozed_unread) = self.store.snoozed_counts(&self.account_id)?;
-        self.folders.push(mailbox_core::Folder {
-            account_id: self.account_id.clone(),
-            name: "Snoozed".into(),
-            path: mailbox_core::SNOOZED_FOLDER_PATH.into(),
-            unread: snoozed_unread,
-            hidden: false,
-        });
+        // Snoozed virtual folder omitted while the feature is disabled in the UI.
         mailbox_core::folder_role::sort_folders(&mut self.folders);
         // Prefer a visible system folder when the selection vanished or is All Mail (hidden).
         let show_all = self.config.ui.show_all_mail;
@@ -1732,7 +1742,45 @@ and paste it here."
         draft.from_email = self.account_email();
         // `inline: false` → full reader-card composer (not the reply dock).
         draft.inline = false;
+        self.refresh_compose_hints();
+        // No field focused on open — user clicks To / Subject / body intentionally.
+        self.compose_autofocus_to = false;
+        self.compose_autofocus_subject = false;
+        self.compose_body_focused = false;
         self.compose = Some(draft);
+    }
+
+    /// Feedback: full composer with To locked to [`FEEDBACK_TO_ADDR`].
+    pub(crate) fn open_compose_feedback(&mut self) {
+        self.selected_person = None;
+        self.show_help = false;
+        self.show_feedback = false;
+        let mut draft = crate::compose::ComposeDraft::new_feedback(FEEDBACK_TO_ADDR);
+        draft.from_email = self.account_email();
+        draft.inline = false;
+        self.refresh_compose_hints();
+        self.compose_autofocus_to = false;
+        self.compose_autofocus_subject = false;
+        self.compose_body_focused = false;
+        self.compose = Some(draft);
+        self.status = format!("Feedback — sending to {FEEDBACK_TO_ADDR}");
+    }
+
+    /// Load frequent From addresses for the composer suggestion popup.
+    pub(crate) fn refresh_compose_hints(&mut self) {
+        let me = self.account_email().to_lowercase();
+        match self.store.list_recipient_hints(&self.account_id, 150) {
+            Ok(hints) => {
+                self.compose_hints = hints
+                    .into_iter()
+                    .filter(|(_, addr)| !addr.eq_ignore_ascii_case(&me))
+                    .collect();
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "recipient hints failed");
+                self.compose_hints.clear();
+            }
+        }
     }
 
     pub(crate) fn open_reply(&mut self, all: bool) {
@@ -1776,7 +1824,7 @@ and paste it here."
         let Some(draft) = self.compose.as_ref() else {
             return;
         };
-        if crate::compose::ComposeDraft::parse_recipients(&draft.to).is_empty() {
+        if draft.to.is_empty() && draft.to_input.trim().is_empty() {
             self.status = "Add at least one To recipient".into();
             return;
         }
@@ -1785,8 +1833,11 @@ and paste it here."
             return;
         }
         // Pull a definitive HTML snapshot from the editor before SMTP.
+        // WebKitGTK callbacks can hang — we time out and use the already-synced draft.
         if self.compose_webview.is_alive() {
             self.pending_compose_send = true;
+            self.pending_compose_send_frames = 0;
+            self.busy.send = true;
             self.compose_webview.request_flush();
             self.status = "Sending…".into();
             return;
@@ -1796,7 +1847,9 @@ and paste it here."
 
     fn finish_submit_compose(&mut self) {
         self.pending_compose_send = false;
+        self.pending_compose_send_frames = 0;
         let Some(draft) = self.compose.clone() else {
+            self.busy.send = false;
             return;
         };
         let Some(account) = self
@@ -1806,21 +1859,24 @@ and paste it here."
             .find(|a| a.id == self.account_id)
             .cloned()
         else {
+            self.busy.send = false;
             self.status = "Add an account in Settings before sending".into();
             return;
         };
         let attachments = match load_outgoing_attachments(&draft.attachments) {
             Ok(a) => a,
             Err(e) => {
+                self.busy.send = false;
                 self.status = e;
                 return;
             }
         };
         let html = draft.body_html_for_send();
+        let mut draft = draft;
         let mail = mailbox_core::OutgoingMail {
-            to: crate::compose::ComposeDraft::parse_recipients(&draft.to),
-            cc: crate::compose::ComposeDraft::parse_recipients(&draft.cc),
-            bcc: crate::compose::ComposeDraft::parse_recipients(&draft.bcc),
+            to: draft.recipients_to(),
+            cc: draft.recipients_cc(),
+            bcc: draft.recipients_bcc(),
             subject: draft.subject.clone(),
             body_text: draft.body_for_send(),
             body_html: if html.trim().is_empty() {
@@ -1833,6 +1889,7 @@ and paste it here."
             attachments,
         };
         if mail.to.is_empty() {
+            self.busy.send = false;
             self.status = "Add at least one To recipient".into();
             return;
         }
@@ -1866,15 +1923,51 @@ and paste it here."
         if let Some(cmd) = res.exec {
             self.compose_webview.exec_command(cmd);
         }
+        if let Some(html) = res.insert_html.as_ref() {
+            self.compose_webview.insert_html(html);
+        }
+        if res.pick_inline_image {
+            self.insert_inline_image_from_picker();
+        }
+        if res.header_focused {
+            self.compose_body_focused = false;
+        }
+        let webview_took_focus = self.compose_webview.take_editor_focused();
+        if res.focus_editor || webview_took_focus {
+            self.compose_body_focused = true;
+        }
+        for cmd in self.compose_webview.take_host_cmds() {
+            if cmd == "insertImage" {
+                self.insert_inline_image_from_picker();
+            }
+        }
         if let Some(bounds) = res.editor_bounds {
+            // Webview is a native child above egui — clicks often never reach egui.
+            // Use pointer position + IPC focus from the editor to drop To/Subject focus.
+            let press_in_editor = ctx.input(|i| {
+                let pos = i.pointer.interact_pos().or_else(|| i.pointer.latest_pos());
+                i.pointer.primary_pressed() && pos.is_some_and(|p| bounds.contains(p))
+            });
+            if press_in_editor {
+                self.compose_body_focused = true;
+            }
+            // While the body owns focus, keep egui from parking the caret on To.
+            if self.compose_body_focused {
+                if let Some(id) = ctx.memory(|m| m.focused()) {
+                    ctx.memory_mut(|m| m.surrender_focus(id));
+                }
+            }
+            if press_in_editor || res.focus_editor || webview_took_focus {
+                self.compose_webview.focus_editor();
+            }
             let placeholder = if draft.is_reply() {
                 if draft.reply_to_name.is_empty() {
-                    "Write a reply…".into()
+                    "Write a reply — type / for styles…".into()
                 } else {
-                    format!("Reply to {}…", draft.reply_to_name)
+                    format!("Reply to {} — type / for styles…", draft.reply_to_name)
                 }
             } else {
-                "Write your message…".into()
+                "Write, type \"/\" for commands…".into()
             };
             self.compose_webview_req = Some(crate::compose_webview::ComposeWebViewRequest {
                 bounds,
@@ -1888,8 +1981,62 @@ and paste it here."
         }
     }
 
+    /// Pick an image file and insert it as a data-URL `<img>` in the compose body.
+    pub(crate) fn insert_inline_image_from_picker(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Insert image")
+            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+            .pick_file()
+        else {
+            return;
+        };
+        let mime = match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            _ => {
+                self.status = "Unsupported image type".into();
+                return;
+            }
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Could not read image: {e}");
+                return;
+            }
+        };
+        const MAX: usize = 1_500_000;
+        if bytes.len() > MAX {
+            self.status = "Image too large to inline (max ~1.5 MB)".into();
+            return;
+        }
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let alt = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".into());
+        let html = format!(
+            r#"<img src="data:{mime};base64,{b64}" alt="{alt}" style="max-width:100%;height:auto;">"#
+        );
+        self.compose_webview.insert_html(&html);
+        self.status = format!("Inserted {alt}");
+    }
+
     fn sync_compose_from_webview(&mut self) {
         let _ = self.compose_webview.poll();
+        for cmd in self.compose_webview.take_host_cmds() {
+            if cmd == "insertImage" {
+                self.insert_inline_image_from_picker();
+            }
+        }
         let Some(draft) = self.compose.as_mut() else {
             return;
         };
@@ -2028,6 +2175,30 @@ and paste it here."
             self.reader_headers_expanded = false;
             self.reader_subject_expanded = false;
             self.selected_message = Some(id.clone());
+            if self.config.ui.notify_opened_mail {
+                let from = if msg.envelope.from_name.is_empty() {
+                    msg.envelope.from_addr.as_str()
+                } else {
+                    msg.envelope.from_name.as_str()
+                };
+                let linked = self
+                    .store
+                    .ailiak_task_for_message(&msg.envelope.message_id)
+                    .ok()
+                    .flatten();
+                let hint = if let Some(ref task_id) = linked {
+                    Some(format!("On Desk · {task_id}"))
+                } else if self.config.ailiak.enabled {
+                    Some("Press a for Todo".into())
+                } else {
+                    None
+                };
+                crate::notifications::notify_opened_mail(
+                    from,
+                    &msg.envelope.subject,
+                    hint.as_deref(),
+                );
+            }
             self.open_message = Some(msg);
         }
         Ok(())
@@ -2054,6 +2225,83 @@ and paste it here."
                 mark_seen_on_server(&account, &credential, &message_id, &folder_path, seen)
             {
                 tracing::debug!(error = %e, msg = %message_id, "IMAP mark-seen failed");
+            }
+        });
+    }
+
+    /// Toggle star / `\Flagged` on a mid-list row (local + IMAP push).
+    pub(crate) fn toggle_starred(&mut self, id: &MessageId) {
+        let Some((next, folder_path, row_id, mid)) = self.envelopes.iter().find_map(|e| {
+            if e.id == *id {
+                Some((
+                    !e.flagged,
+                    e.folder_path.clone(),
+                    e.id.clone(),
+                    e.message_id.clone(),
+                ))
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
+        match self.store.set_flagged(&row_id, next) {
+            Ok(_) => {
+                for e in self.envelopes.iter_mut() {
+                    if e.id == row_id || (!mid.is_empty() && e.message_id == mid) {
+                        e.flagged = next;
+                    }
+                }
+                // Viewing Starred: unstar removes the row from this folder locally.
+                if !next
+                    && mailbox_core::classify_mailbox(&folder_path, &folder_path)
+                        == mailbox_core::MailboxRole::Starred
+                {
+                    self.envelopes.retain(|e| e.id != row_id);
+                    if self.selected_message.as_ref() == Some(&row_id) {
+                        self.selected_message = None;
+                        self.open_message = None;
+                    }
+                }
+                if let Some(msg) = self.open_message.as_mut() {
+                    if msg.envelope.id == row_id
+                        || (!mid.is_empty() && msg.envelope.message_id == mid)
+                    {
+                        msg.envelope.flagged = next;
+                    }
+                }
+                self.status = if next {
+                    "Starred".into()
+                } else {
+                    "Unstarred".into()
+                };
+                self.push_flagged_to_server(row_id, folder_path, next);
+            }
+            Err(e) => self.status = e.to_string(),
+        }
+    }
+
+    /// Best-effort IMAP `\Flagged` (background). Local cache is already updated.
+    fn push_flagged_to_server(&self, message_id: MessageId, folder_path: String, flagged: bool) {
+        let Some(account) = self.selected_account().cloned() else {
+            return;
+        };
+        if account.protocol != MailProtocol::Imap {
+            return;
+        }
+        let oauth_config = self.config.oauth.clone();
+        thread::spawn(move || {
+            let credential = match oauth::resolve_mail_credential(&account, &oauth_config, None) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(error = %e, "mark-flagged: no credential");
+                    return;
+                }
+            };
+            if let Err(e) =
+                mark_flagged_on_server(&account, &credential, &message_id, &folder_path, flagged)
+            {
+                tracing::debug!(error = %e, msg = %message_id, "IMAP mark-flagged failed");
             }
         });
     }
@@ -2141,6 +2389,7 @@ and paste it here."
                     self.status = "Message sent".into();
                     self.compose = None;
                     self.pending_compose_send = false;
+                    self.pending_compose_send_frames = 0;
                     self.compose_webview.hide();
                     self.chat_reply.clear();
                     self.chat_reply_focused = false;
@@ -2294,6 +2543,8 @@ and paste it here."
                 }
                 BgMsg::Error(e) => {
                     self.busy.send = false;
+                    self.pending_compose_send = false;
+                    self.pending_compose_send_frames = 0;
                     self.calendar.loading = false;
                     if self.busy.sync {
                         self.last_sync_at = Instant::now();
@@ -2937,13 +3188,31 @@ impl App for MailboxApp {
         crate::mail_webview::MailWebView::pump_platform();
         self.sync_compose_from_webview();
         if self.pending_compose_send {
+            self.pending_compose_send_frames =
+                self.pending_compose_send_frames.saturating_add(1);
             if let Some(c) = self.compose_webview.take_flush() {
                 if let Some(draft) = self.compose.as_mut() {
-                    draft.body = c.text;
-                    draft.body_html = c.html;
+                    let flush_empty = c.text.trim().is_empty()
+                        && crate::compose::html_looks_empty(&c.html);
+                    let draft_has_body = !draft.body_is_empty();
+                    // Never wipe a good draft with an empty flush (WebKit race / reload).
+                    if !flush_empty || !draft_has_body {
+                        if !c.text.trim().is_empty() {
+                            draft.body = c.text;
+                        } else if draft.body.trim().is_empty() && !c.html.trim().is_empty() {
+                            draft.body = mailbox_core::html_to_plain(&c.html);
+                        }
+                        if !crate::compose::html_looks_empty(&c.html) {
+                            draft.body_html = c.html;
+                        }
+                    }
                 }
                 self.finish_submit_compose();
-            } else if !self.compose_webview.is_alive() {
+            } else if !self.compose_webview.is_alive()
+                || self.compose_webview.flush_failed()
+                || self.pending_compose_send_frames >= 45
+            {
+                // ~0.7s timeout or failed callback — send with last IPC-synced body.
                 self.finish_submit_compose();
             } else {
                 ctx.request_repaint_after(Duration::from_millis(16));

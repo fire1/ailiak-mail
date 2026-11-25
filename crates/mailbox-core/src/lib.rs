@@ -13,7 +13,7 @@ pub use mail_body::{
     sanitize_mail_html, BodyBlock, ImageThreatKind, InlineSeg, MailBody, MailNavAction,
     RemoteImageRisk,
 };
-pub use message_parse::readable_body;
+pub use message_parse::{html_to_plain, missing_plain_placeholder, readable_body};
 pub use mime_inline::{
     has_cid_refs, inline_parts, message_has_real_html, resolve_inline_images, rewrite_cids,
 };
@@ -48,12 +48,13 @@ pub use smtp::{
 };
 pub use store::Store;
 pub use sync::{
-    mark_seen_on_server, move_messages, sync_account, test_connection, SyncOptions, SyncReport,
+    mark_flagged_on_server, mark_seen_on_server, move_messages, sync_account, test_connection,
+    SyncOptions, SyncReport,
 };
 pub use folder_role::{
     build_label_tree, classify_mailbox, is_all_mail, LabelNode, MailboxRole,
 };
 pub use types::{
-    date_group_label, is_snoozed_folder, resolve_special_folder, AccountId, Envelope, Folder,
-    Message, MessageId, SpecialFolderKind, SNOOZED_FOLDER_PATH,
+    date_group_label, is_snoozed_folder, list_date_label, resolve_special_folder, AccountId,
+    Envelope, Folder, Message, MessageId, SpecialFolderKind, SNOOZED_FOLDER_PATH,
 };

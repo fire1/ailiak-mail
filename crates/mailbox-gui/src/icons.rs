@@ -55,7 +55,7 @@ impl FolderIcon {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarIcon {
     Sync,
     Compose,
@@ -203,6 +203,11 @@ pub fn paint_search(ui: &Ui, rect: egui::Rect, color: Color32) {
     paint_glyph(ui, rect, ph::MAGNIFYING_GLASS, color);
 }
 
+/// Starred / `\Flagged` marker for mid-list rows.
+pub fn paint_star(ui: &Ui, rect: egui::Rect, color: Color32) {
+    paint_glyph(ui, rect, ph::STAR, color);
+}
+
 /// Top-bar Sync: glyph + label (or spinner while busy).
 pub fn toolbar_button(
     ui: &mut Ui,
@@ -279,7 +284,12 @@ fn toolbar_button_inner(
     if busy {
         ui.put(icon_rect, egui::Spinner::new().size(icon));
     } else {
-        paint_glyph(ui, icon_rect, kind.glyph(), mute);
+        let icon_color = if kind == ToolbarIcon::Sync {
+            theme::accent(ui.ctx())
+        } else {
+            mute
+        };
+        paint_glyph(ui, icon_rect, kind.glyph(), icon_color);
     }
     ui.painter().galley(
         ui.painter().round_pos_to_pixels(Pos2::new(
@@ -639,7 +649,6 @@ pub fn settings_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
     )
 }
 
-#[allow(dead_code)]
 pub fn feedback_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
     nav_action_row(
         ui,
@@ -647,7 +656,7 @@ pub fn feedback_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
         true,
         false,
         "Feedback",
-        "Send feedback as an issue",
+        "Email feedback to the author",
         ph::CHAT_CIRCLE,
     )
 }

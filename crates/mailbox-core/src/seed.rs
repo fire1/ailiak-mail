@@ -17,6 +17,7 @@ pub fn seed_demo_if_empty(store: &Store) -> Result<bool> {
         ("Sent", "Sent", 0),
         ("Archive", "Archive", 0),
         ("Trash", "Trash", 0),
+        ("Work", "Work", 0),
     ];
     for (name, path, unread) in folders {
         store.upsert_folder(&Folder {
@@ -41,7 +42,9 @@ pub fn seed_demo_if_empty(store: &Store) -> Result<bool> {
                 from_addr: "hello@mailbox.local".into(),
                 date: now - Duration::hours(2),
                 seen: false,
+                flagged: true,
                 snippet: "A calm Rust email client for Linux…".into(),
+                labels: Vec::new(),
                 in_reply_to: String::new(),
                 references: String::new(),
                 thread_id: String::new(),
@@ -71,7 +74,9 @@ Tips:\n\
                 from_addr: "ada@example.com".into(),
                 date: now - Duration::hours(5),
                 seen: false,
+                flagged: false,
                 snippet: "When you wire an agent token…".into(),
+                labels: Vec::new(),
                 in_reply_to: String::new(),
                 references: String::new(),
                 thread_id: String::new(),
@@ -97,7 +102,9 @@ Ada\n"
                 from_addr: "hello@mailbox.local".into(),
                 date: now - Duration::days(1),
                 seen: true,
+                flagged: false,
                 snippet: "Messages live in a local SQLite store…".into(),
+                labels: Vec::new(),
                 in_reply_to: String::new(),
                 references: String::new(),
                 thread_id: String::new(),
@@ -122,7 +129,9 @@ already fetched.\n"
                 from_addr: "you@example.com".into(),
                 date: now - Duration::days(2),
                 seen: true,
+                flagged: false,
                 snippet: "Sounds good — see you Saturday.".into(),
+                labels: Vec::new(),
                 in_reply_to: String::new(),
                 references: String::new(),
                 thread_id: String::new(),
@@ -137,6 +146,31 @@ already fetched.\n"
     for msg in messages {
         store.upsert_message(&msg)?;
     }
+
+    // Same Message-ID in a user label folder → Inbox row shows a "Work" chip.
+    store.upsert_message(&Message {
+        envelope: Envelope {
+            id: "demo-2-work".into(),
+            account_id: DEMO_ACCOUNT.into(),
+            folder_path: "Work".into(),
+            message_id: "<desk@ailiak.example>".into(),
+            subject: "Try Send to Ailiak".into(),
+            from_name: "Ada".into(),
+            from_addr: "ada@example.com".into(),
+            date: now - Duration::hours(5),
+            seen: false,
+            flagged: false,
+            snippet: "When you wire an agent token…".into(),
+            labels: Vec::new(),
+            in_reply_to: String::new(),
+            references: String::new(),
+            thread_id: String::new(),
+        },
+        body_text: String::new(),
+        body_html: String::new(),
+        to: vec!["you@example.com".into()],
+        cc: vec![],
+    })?;
 
     Ok(true)
 }

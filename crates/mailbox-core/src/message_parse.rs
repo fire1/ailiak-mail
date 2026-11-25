@@ -10,6 +10,7 @@ pub fn parse_raw_message(
     folder_path: &str,
     uid: u32,
     seen: bool,
+    flagged: bool,
     raw: &[u8],
 ) -> Option<Message> {
     let parsed = MessageParser::default().parse(raw)?;
@@ -75,7 +76,9 @@ pub fn parse_raw_message(
             from_addr,
             date,
             seen,
+            flagged,
             snippet,
+            labels: Vec::new(),
             in_reply_to,
             references,
             thread_id,
@@ -159,6 +162,11 @@ pub(crate) fn looks_like_html(s: &str) -> bool {
     .filter(|t| lower.contains(**t))
     .count();
     tag_hits >= 2 || lower.contains("<html") || lower.contains("<!doctype")
+}
+
+/// Strip tags for SMTP `text/plain` (never injects UI placeholder copy).
+pub fn html_to_plain(html: &str) -> String {
+    html_to_text(html)
 }
 
 /// Strip tags / decode entities into readable plain text (for the calm reader).
@@ -315,12 +323,13 @@ fn normalize_whitespace(s: &str) -> String {
         }
         out.push(ch);
     }
-    let trimmed = out.trim().to_string();
-    if trimmed.is_empty() {
-        "(HTML message — plain text unavailable)".into()
-    } else {
-        trimmed
-    }
+    // Empty → empty. Never inject UI copy into stored/sent bodies.
+    out.trim().to_string()
+}
+
+/// Reader-only label when HTML exists but plain extraction yielded nothing.
+pub fn missing_plain_placeholder() -> &'static str {
+    "(HTML message — plain text unavailable)"
 }
 
 fn snippet_from(body: &str) -> String {

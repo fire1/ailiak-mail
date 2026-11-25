@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::folder_role::{classify_mailbox, MailboxRole};
 use crate::types::{AccountId, Envelope, Folder, Message, MessageId};
 
 fn envelope_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Envelope> {
@@ -12,9 +14,9 @@ fn envelope_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Envelope> {
         .map(|d| d.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
     let message_id: String = row.get(3)?;
-    let in_reply_to: String = row.get(10).unwrap_or_default();
-    let references: String = row.get(11).unwrap_or_default();
-    let thread_id: String = row.get(12).unwrap_or_else(|_| {
+    let in_reply_to: String = row.get(11).unwrap_or_default();
+    let references: String = row.get(12).unwrap_or_default();
+    let thread_id: String = row.get(13).unwrap_or_else(|_| {
         Envelope::compute_thread_id(&message_id, &in_reply_to, &references)
     });
     Ok(Envelope {
@@ -27,11 +29,25 @@ fn envelope_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Envelope> {
         from_addr: row.get(6)?,
         date,
         seen: row.get::<_, i64>(8)? != 0,
-        snippet: row.get(9)?,
+        flagged: row.get::<_, i64>(9).unwrap_or(0) != 0,
+        snippet: row.get(10)?,
+        labels: Vec::new(),
         in_reply_to,
         references,
         thread_id,
     })
+}
+
+fn label_display_name(path: &str, name: &str) -> String {
+    let n = name.trim();
+    if !n.is_empty() {
+        return n.to_string();
+    }
+    path.rsplit(['/', '.'])
+        .next()
+        .unwrap_or(path)
+        .trim()
+        .to_string()
 }
 
 pub struct Store {
@@ -104,6 +120,7 @@ impl Store {
                 from_addr TEXT NOT NULL,
                 date_rfc3339 TEXT NOT NULL,
                 seen INTEGER NOT NULL DEFAULT 0,
+                flagged INTEGER NOT NULL DEFAULT 0,
                 snoozed INTEGER NOT NULL DEFAULT 0,
                 snippet TEXT NOT NULL,
                 body_text TEXT NOT NULL,
@@ -147,6 +164,10 @@ impl Store {
             "ALTER TABLE messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''",
             [],
         );
+        let _ = self.conn.execute(
+            "ALTER TABLE messages ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         self.conn.execute_batch(
             r#"
             CREATE INDEX IF NOT EXISTS idx_messages_snoozed
@@ -155,6 +176,8 @@ impl Store {
                 ON messages(account_id, thread_id, date_rfc3339 ASC);
             CREATE INDEX IF NOT EXISTS idx_messages_from
                 ON messages(account_id, from_addr);
+            CREATE INDEX IF NOT EXISTS idx_messages_msgid
+                ON messages(account_id, message_id);
             "#,
         )?;
         Ok(())
@@ -261,16 +284,17 @@ impl Store {
             r#"
             INSERT INTO messages (
                 id, account_id, folder_path, message_id, subject,
-                from_name, from_addr, date_rfc3339, seen, snippet,
+                from_name, from_addr, date_rfc3339, seen, flagged, snippet,
                 body_text, body_html, to_addrs, cc_addrs,
                 in_reply_to, references_hdr, thread_id
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
             ON CONFLICT(id) DO UPDATE SET
                 subject = excluded.subject,
                 from_name = excluded.from_name,
                 from_addr = excluded.from_addr,
                 date_rfc3339 = excluded.date_rfc3339,
                 seen = excluded.seen,
+                flagged = excluded.flagged,
                 snippet = excluded.snippet,
                 body_text = CASE
                     WHEN length(excluded.body_text) > 0 THEN excluded.body_text
@@ -296,6 +320,7 @@ impl Store {
                 e.from_addr,
                 e.date.to_rfc3339(),
                 e.seen as i64,
+                e.flagged as i64,
                 e.snippet,
                 msg.body_text,
                 msg.body_html,
@@ -316,7 +341,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, account_id, folder_path, message_id, subject,
-                   from_name, from_addr, date_rfc3339, seen, snippet,
+                   from_name, from_addr, date_rfc3339, seen, flagged, snippet,
                    in_reply_to, references_hdr, thread_id
             FROM messages
             WHERE account_id = ?1 AND folder_path = ?2 AND snoozed = 0
@@ -324,7 +349,9 @@ impl Store {
             "#,
         )?;
         let rows = stmt.query_map(params![account_id, folder_path], envelope_from_row)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut envs = rows.collect::<Result<Vec<_>, _>>()?;
+        self.enrich_envelopes(&mut envs)?;
+        Ok(envs)
     }
 
     /// All snoozed messages for an account (local “Snoozed” view).
@@ -332,7 +359,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, account_id, folder_path, message_id, subject,
-                   from_name, from_addr, date_rfc3339, seen, snippet,
+                   from_name, from_addr, date_rfc3339, seen, flagged, snippet,
                    in_reply_to, references_hdr, thread_id
             FROM messages
             WHERE account_id = ?1 AND snoozed = 1
@@ -340,7 +367,97 @@ impl Store {
             "#,
         )?;
         let rows = stmt.query_map(params![account_id], envelope_from_row)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut envs = rows.collect::<Result<Vec<_>, _>>()?;
+        self.enrich_envelopes(&mut envs)?;
+        Ok(envs)
+    }
+
+    /// Attach Gmail-style labels + starred from sibling folder rows (same Message-ID).
+    fn enrich_envelopes(&self, envs: &mut [Envelope]) -> Result<()> {
+        if envs.is_empty() {
+            return Ok(());
+        }
+        let account_id = envs[0].account_id.clone();
+        let mut ids: Vec<String> = envs
+            .iter()
+            .map(|e| e.message_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut placeholders = String::new();
+        for i in 0..ids.len() {
+            if i > 0 {
+                placeholders.push(',');
+            }
+            placeholders.push('?');
+        }
+        let sql = format!(
+            r#"
+            SELECT m.message_id, m.folder_path, COALESCE(f.name, ''), m.flagged
+            FROM messages m
+            LEFT JOIN folders f
+              ON f.account_id = m.account_id AND f.path = m.folder_path
+            WHERE m.account_id = ?1 AND m.message_id IN ({placeholders})
+            "#
+        );
+        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(1 + ids.len());
+        params.push(account_id.into());
+        for id in &ids {
+            params.push(id.clone().into());
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3).unwrap_or(0) != 0,
+            ))
+        })?;
+
+        let mut by_mid: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
+        for row in rows {
+            let (mid, path, name, flagged) = row?;
+            by_mid
+                .entry(mid)
+                .or_default()
+                .push((path, name, flagged));
+        }
+
+        for env in envs.iter_mut() {
+            let Some(entries) = by_mid.get(&env.message_id) else {
+                continue;
+            };
+            let mut labels: Vec<String> = Vec::new();
+            let mut flagged = env.flagged;
+            for (path, name, fl) in entries {
+                if *fl {
+                    flagged = true;
+                }
+                let role = classify_mailbox(path, name);
+                match role {
+                    MailboxRole::Starred => flagged = true,
+                    MailboxRole::Important | MailboxRole::User => {
+                        if path != &env.folder_path {
+                            let label = label_display_name(path, name);
+                            if !label.is_empty() && !labels.iter().any(|l| l == &label) {
+                                labels.push(label);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            labels.sort();
+            env.flagged = flagged;
+            env.labels = labels;
+        }
+        Ok(())
     }
 
     /// Messages in a thread, oldest first (for chat view).
@@ -485,27 +602,27 @@ impl Store {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, account_id, folder_path, message_id, subject,
-                   from_name, from_addr, date_rfc3339, seen, snippet,
+                   from_name, from_addr, date_rfc3339, seen, flagged, snippet,
                    body_text, to_addrs, cc_addrs, body_html,
                    in_reply_to, references_hdr, thread_id
             FROM messages WHERE id = ?1
             "#,
         )?;
-        let msg = stmt
+        let mut msg = stmt
             .query_row(params![id], |row| {
                 let date_s: String = row.get(7)?;
                 let date = DateTime::parse_from_rfc3339(&date_s)
                     .map(|d| d.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
-                let to_s: String = row.get(11)?;
-                let cc_s: String = row.get(12)?;
+                let to_s: String = row.get(12)?;
+                let cc_s: String = row.get(13)?;
                 let to: Vec<String> = serde_json::from_str(&to_s).unwrap_or_default();
                 let cc: Vec<String> = serde_json::from_str(&cc_s).unwrap_or_default();
-                let body_html: String = row.get(13).unwrap_or_default();
+                let body_html: String = row.get(14).unwrap_or_default();
                 let message_id: String = row.get(3)?;
-                let in_reply_to: String = row.get(14).unwrap_or_default();
-                let references: String = row.get(15).unwrap_or_default();
-                let thread_id: String = row.get(16).unwrap_or_else(|_| {
+                let in_reply_to: String = row.get(15).unwrap_or_default();
+                let references: String = row.get(16).unwrap_or_default();
+                let thread_id: String = row.get(17).unwrap_or_else(|_| {
                     Envelope::compute_thread_id(&message_id, &in_reply_to, &references)
                 });
                 Ok(Message {
@@ -519,19 +636,66 @@ impl Store {
                         from_addr: row.get(6)?,
                         date,
                         seen: row.get::<_, i64>(8)? != 0,
-                        snippet: row.get(9)?,
+                        flagged: row.get::<_, i64>(9).unwrap_or(0) != 0,
+                        snippet: row.get(10)?,
+                        labels: Vec::new(),
                         in_reply_to,
                         references,
                         thread_id,
                     },
-                    body_text: row.get(10)?,
+                    body_text: row.get(11)?,
                     body_html,
                     to,
                     cc,
                 })
             })
             .optional()?;
+        if let Some(ref mut m) = msg {
+            let mut one = [m.envelope.clone()];
+            self.enrich_envelopes(&mut one)?;
+            m.envelope = one.into_iter().next().unwrap();
+        }
         Ok(msg)
+    }
+
+    /// Set or clear `\Flagged` / star on all local rows sharing this Message-ID.
+    /// When clearing, drops local copies that live only in Starred mailboxes so
+    /// list enrichment does not immediately re-star the message.
+    pub fn set_flagged(&self, id: &MessageId, flagged: bool) -> Result<bool> {
+        let row: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT account_id, message_id FROM messages WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((account_id, message_id)) = row else {
+            return Ok(false);
+        };
+        let updated = if message_id.is_empty() {
+            self.conn.execute(
+                "UPDATE messages SET flagged = ?1 WHERE id = ?2",
+                params![flagged as i64, id],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE messages SET flagged = ?1 WHERE account_id = ?2 AND message_id = ?3",
+                params![flagged as i64, account_id, message_id],
+            )?
+        };
+        if !flagged && !message_id.is_empty() {
+            let folders = self.list_all_folders(&account_id)?;
+            for f in folders {
+                if classify_mailbox(&f.path, &f.name) == MailboxRole::Starred {
+                    self.conn.execute(
+                        "DELETE FROM messages WHERE account_id = ?1 AND message_id = ?2 AND folder_path = ?3",
+                        params![account_id, message_id, f.path],
+                    )?;
+                }
+            }
+        }
+        Ok(updated > 0)
     }
 
     /// Set local seen flag. Returns `true` when the value actually changed.
@@ -605,12 +769,50 @@ impl Store {
         Ok(new_id)
     }
 
+    /// Frequent From addresses for composer To/Cc suggestions (Trash/Spam excluded).
+    /// Returns `(display_name, email)` ordered by how often they appear.
+    pub fn list_recipient_hints(
+        &self,
+        account_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let limit = limit.clamp(1, 500);
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT trim(from_addr), max(from_name), COUNT(*) AS c
+            FROM messages
+            WHERE account_id = ?1
+              AND snoozed = 0
+              AND length(trim(from_addr)) > 0
+              AND lower(folder_path) NOT LIKE '%trash%'
+              AND lower(folder_path) NOT LIKE '%spam%'
+              AND lower(folder_path) NOT LIKE '%junk%'
+            GROUP BY lower(trim(from_addr))
+            ORDER BY c DESC
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(params![account_id, limit as i64], |row| {
+            let addr: String = row.get(0)?;
+            let name: String = row.get::<_, String>(1).unwrap_or_default();
+            Ok((name.trim().to_string(), addr.trim().to_string()))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (name, addr) = row?;
+            if addr.contains('@') {
+                out.push((name, addr));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn search_local(&self, account_id: &str, query: &str) -> Result<Vec<Envelope>> {
         let q = format!("%{query}%");
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, account_id, folder_path, message_id, subject,
-                   from_name, from_addr, date_rfc3339, seen, snippet,
+                   from_name, from_addr, date_rfc3339, seen, flagged, snippet,
                    in_reply_to, references_hdr, thread_id
             FROM messages
             WHERE account_id = ?1
@@ -622,7 +824,9 @@ impl Store {
             "#,
         )?;
         let rows = stmt.query_map(params![account_id, q], envelope_from_row)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut envs = rows.collect::<Result<Vec<_>, _>>()?;
+        self.enrich_envelopes(&mut envs)?;
+        Ok(envs)
     }
 
     pub fn ailiak_task_for_message(&self, message_id: &str) -> Result<Option<String>> {
@@ -680,7 +884,9 @@ mod tests {
                 from_addr: "ada@example.com".into(),
                 date: Utc.with_ymd_and_hms(2026, 11, 21, 8, 0, 0).unwrap(),
                 seen: false,
+                flagged: false,
                 snippet: "Hi there".into(),
+                labels: Vec::new(),
                 in_reply_to: String::new(),
                 references: String::new(),
                 thread_id: String::new(),
@@ -710,6 +916,69 @@ mod tests {
         assert_eq!(list[0].subject, "Hello");
         let msg = store.get_message(&"m1".into()).unwrap().unwrap();
         assert!(msg.body_text.contains("Ada"));
+    }
+
+    #[test]
+    fn set_flagged_clears_starred_copies() {
+        let store = Store::open_in_memory().unwrap();
+        for (name, path) in [("Inbox", "INBOX"), ("Starred", "[Gmail]/Starred")] {
+            store
+                .upsert_folder(&Folder {
+                    account_id: "demo".into(),
+                    name: name.into(),
+                    path: path.into(),
+                    unread: 0,
+                    hidden: false,
+                })
+                .unwrap();
+        }
+        store.upsert_message(&sample()).unwrap();
+        let mut starred = sample();
+        starred.envelope.id = "m1-star".into();
+        starred.envelope.folder_path = "[Gmail]/Starred".into();
+        starred.envelope.flagged = true;
+        store.upsert_message(&starred).unwrap();
+        assert!(store.list_envelopes("demo", "INBOX").unwrap()[0].flagged);
+
+        assert!(store.set_flagged(&"m1".into(), false).unwrap());
+        let inbox = store.list_envelopes("demo", "INBOX").unwrap();
+        assert!(!inbox[0].flagged);
+        assert!(store
+            .list_envelopes("demo", "[Gmail]/Starred")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn sibling_folder_becomes_label_and_star() {
+        let store = Store::open_in_memory().unwrap();
+        for (name, path) in [("Inbox", "INBOX"), ("Work", "Work"), ("Starred", "[Gmail]/Starred")]
+        {
+            store
+                .upsert_folder(&Folder {
+                    account_id: "demo".into(),
+                    name: name.into(),
+                    path: path.into(),
+                    unread: 0,
+                    hidden: false,
+                })
+                .unwrap();
+        }
+        store.upsert_message(&sample()).unwrap();
+        let mut labeled = sample();
+        labeled.envelope.id = "m1-work".into();
+        labeled.envelope.folder_path = "Work".into();
+        store.upsert_message(&labeled).unwrap();
+        let mut starred = sample();
+        starred.envelope.id = "m1-star".into();
+        starred.envelope.folder_path = "[Gmail]/Starred".into();
+        starred.envelope.flagged = true;
+        store.upsert_message(&starred).unwrap();
+
+        let list = store.list_envelopes("demo", "INBOX").unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].flagged);
+        assert_eq!(list[0].labels, vec!["Work".to_string()]);
     }
 
     #[test]
