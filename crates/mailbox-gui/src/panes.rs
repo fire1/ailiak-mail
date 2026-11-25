@@ -1086,7 +1086,17 @@ impl MailboxApp {
                         theme::unread_row_mute()
                     };
 
-                    let avatar = if let Some(brand_id) = staks::brand_id_for_addr(&from_addr) {
+                    // Personal hosts (gmail.com, outlook.com, …) → profile photo / initials.
+                    // Brand marks are for company senders (stripe.com, noreply@google.com).
+                    let host = from_addr
+                        .split('@')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .to_lowercase();
+                    let avatar = if mailbox_core::is_personal_mailbox_domain(&host) {
+                        self.resolve_avatar(ui.ctx(), &from_addr, &from_name)
+                    } else if let Some(brand_id) = staks::brand_id_for_addr(&from_addr) {
                         self.brand_texture(ui.ctx(), brand_id)
                             .map(crate::avatars::AvatarView::Image)
                             .unwrap_or_else(|| {
@@ -1094,12 +1104,6 @@ impl MailboxApp {
                             })
                     } else {
                         // Unknown sender domain — still try Logo.dev on the host.
-                        let host = from_addr
-                            .split('@')
-                            .nth(1)
-                            .unwrap_or("")
-                            .trim()
-                            .to_lowercase();
                         let domain = mailbox_core::remote_image_domain(&from_addr);
                         let logo_key = if !domain.is_empty() {
                             domain
