@@ -60,9 +60,10 @@ impl MailboxApp {
             });
         });
 
-        // Right: Archive / Trash / remote images / Sync
+        // Right (L→R): Done, Trash, Archive, Reply, Reply all, Load, Sync
+        // Painted right-to-left so Sync stays on the far right.
         let right = Rect::from_min_max(
-            egui::pos2(bar.right() - (bar.width() * 0.28).max(248.0), bar.top()),
+            egui::pos2(bar.right() - (bar.width() * 0.34).max(320.0), bar.top()),
             bar.right_bottom(),
         );
         ui.allocate_new_ui(UiBuilder::new().max_rect(right), |ui| {
@@ -79,6 +80,52 @@ impl MailboxApp {
                     self.start_sync(false);
                 }
                 let has_msg = self.open_message.is_some();
+                let images_on = self.load_remote_images;
+                let has_remote = self
+                    .cached_mail_body()
+                    .is_some_and(|b| b.has_remote_images);
+                // One-shot Load: only while blocked remote images exist; gone once loaded.
+                if has_msg && !images_on && has_remote {
+                    let from = self
+                        .open_message
+                        .as_ref()
+                        .map(|m| m.envelope.from_addr.clone())
+                        .unwrap_or_default();
+                    let domain = mailbox_core::remote_image_domain(&from);
+                    let scope = if domain.is_empty() {
+                        from.clone()
+                    } else {
+                        format!("*.{domain}")
+                    };
+                    let threat_n = self
+                        .cached_mail_body()
+                        .map(|b| b.image_threats.len())
+                        .unwrap_or(0);
+                    let threat_note = if threat_n > 0 {
+                        format!(
+                            "\n{threat_n} tracking-like image(s) stay blocked for privacy"
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let images_tip = format!(
+                        "Load remote images for {scope}\nAllowed for this Stak domain; tracking-like stay blocked{threat_note}"
+                    );
+                    if icons::toolbar_load_images_button(ui, true, &images_tip).clicked() {
+                        self.allow_remote_images_for_sender();
+                    }
+                }
+                if icons::toolbar_icon_button(
+                    ui,
+                    icons::ToolbarIcon::ReplyAll,
+                    "Reply all (Shift+R)",
+                    has_msg && !self.busy.send,
+                    self.busy.send,
+                )
+                .clicked()
+                {
+                    self.open_reply(true);
+                }
                 if icons::toolbar_icon_button(
                     ui,
                     icons::ToolbarIcon::Reply,
@@ -94,69 +141,27 @@ impl MailboxApp {
                         self.open_reply(false);
                     }
                 }
+                // Snooze toolbar control hidden for now (feature kept in code).
+                let archive_tip = if self.selected_person.is_some() {
+                    "Archive this People conversation"
+                } else {
+                    "Archive current message"
+                };
                 if icons::toolbar_icon_button(
                     ui,
-                    icons::ToolbarIcon::ReplyAll,
-                    "Reply all (Shift+R)",
-                    has_msg && !self.busy.send,
-                    self.busy.send,
+                    icons::ToolbarIcon::Archive,
+                    archive_tip,
+                    has_msg && !self.busy.moving(),
+                    self.busy.archive,
                 )
                 .clicked()
                 {
-                    self.open_reply(true);
-                }
-                let images_on = self.load_remote_images;
-                let from = self
-                    .open_message
-                    .as_ref()
-                    .map(|m| m.envelope.from_addr.clone())
-                    .unwrap_or_default();
-                let domain = mailbox_core::remote_image_domain(&from);
-                let scope = if domain.is_empty() {
-                    from.clone()
-                } else {
-                    format!("*.{domain}")
-                };
-                let threat_n = self
-                    .cached_mail_body()
-                    .map(|b| b.image_threats.len())
-                    .unwrap_or(0);
-                let threat_note = if threat_n > 0 {
-                    format!(
-                        "\n{threat_n} tracking-like image(s) stay blocked for privacy"
-                    )
-                } else {
-                    String::new()
-                };
-                let images_tip = if !has_msg {
-                    "Open a message to allow or block remote images for its domain".to_string()
-                } else if images_on {
-                    format!(
-                        "Remote images ON for {scope}\nClick to block images from this domain (whole Stak){threat_note}"
-                    )
-                } else {
-                    format!(
-                        "Remote images OFF for {scope}\nClick to always load images from {scope} (covers other From addresses in this Stak; tracking-like stay blocked){threat_note}"
-                    )
-                };
-                if icons::toolbar_remote_images_button(ui, images_on, has_msg, &images_tip)
-                    .clicked()
-                {
-                    if images_on {
-                        self.block_remote_images_for_sender();
-                    } else {
-                        self.allow_remote_images_for_sender();
-                    }
+                    self.move_current_message(mailbox_core::SpecialFolderKind::Archive);
                 }
                 let trash_tip = if self.selected_person.is_some() {
                     "Trash this People conversation (#)"
                 } else {
                     "Trash current message (#)"
-                };
-                let archive_tip = if self.selected_person.is_some() {
-                    "Archive this People conversation (e)"
-                } else {
-                    "Archive current message (e)"
                 };
                 if icons::toolbar_icon_button(
                     ui,
@@ -169,32 +174,22 @@ impl MailboxApp {
                 {
                     self.move_current_message(mailbox_core::SpecialFolderKind::Trash);
                 }
+                let done_tip = if self.selected_person.is_some() {
+                    "Done — archive this People conversation (e)"
+                } else {
+                    "Done — archive current message (e)"
+                };
                 if icons::toolbar_icon_button(
                     ui,
-                    icons::ToolbarIcon::Archive,
-                    archive_tip,
+                    icons::ToolbarIcon::Done,
+                    done_tip,
                     has_msg && !self.busy.moving(),
                     self.busy.archive,
                 )
                 .clicked()
                 {
+                    // Same as rusty-inbox Done: leave the inbox via Archive.
                     self.move_current_message(mailbox_core::SpecialFolderKind::Archive);
-                }
-                let snooze_tip = if mailbox_core::is_snoozed_folder(&self.selected_folder) {
-                    "Unsnooze — put back in its folder (stays as-is)"
-                } else {
-                    "Snooze — hide for later without marking read"
-                };
-                if icons::toolbar_icon_button(
-                    ui,
-                    icons::ToolbarIcon::Snooze,
-                    snooze_tip,
-                    has_msg && !self.busy.snooze,
-                    self.busy.snooze,
-                )
-                .clicked()
-                {
-                    self.snooze_current_message();
                 }
             });
         });
@@ -835,7 +830,7 @@ impl MailboxApp {
         }
     }
 
-    /// Folder title + archive/trash — sits above the mid list card.
+    /// Folder title + mark-read / archive / trash — sits above the mid list card.
     pub(crate) fn list_pane_header(&mut self, ui: &mut Ui) {
         let folder_title = self
             .folders
@@ -877,10 +872,15 @@ impl MailboxApp {
         } else {
             list_title
         };
-        let enabled = if multi {
+        let move_enabled = if multi {
             selected_n > 0 && !self.busy.moving()
         } else {
             list_count > 0 && !self.busy.moving()
+        };
+        let read_enabled = if multi {
+            selected_n > 0
+        } else {
+            list_count > 0
         };
         let trash_tip = if multi {
             if selected_n > 1 {
@@ -900,8 +900,18 @@ impl MailboxApp {
         } else {
             "Archive all messages in this folder/label (asks first)"
         };
+        let read_tip = if multi {
+            if selected_n > 1 {
+                "Mark selected messages as read (asks first)"
+            } else {
+                "Mark selected message as read"
+            }
+        } else {
+            "Mark all unread in this folder/label as read (asks first)"
+        };
         // Title left, actions flush right — allocate remaining width so RTL
         // doesn't pack the buttons beside the title.
+        // Visual L→R: Mark read, Archive, Trash
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(title)
@@ -918,7 +928,7 @@ impl MailboxApp {
                         ui,
                         icons::ToolbarIcon::Trash,
                         trash_tip,
-                        enabled,
+                        move_enabled,
                         self.busy.trash,
                     )
                     .clicked()
@@ -929,12 +939,23 @@ impl MailboxApp {
                         ui,
                         icons::ToolbarIcon::Archive,
                         archive_tip,
-                        enabled,
+                        move_enabled,
                         self.busy.archive,
                     )
                     .clicked()
                     {
                         self.move_listed_messages(mailbox_core::SpecialFolderKind::Archive);
+                    }
+                    if icons::toolbar_icon_button(
+                        ui,
+                        icons::ToolbarIcon::MarkRead,
+                        read_tip,
+                        read_enabled,
+                        false,
+                    )
+                    .clicked()
+                    {
+                        self.mark_listed_messages_read();
                     }
                 },
             );

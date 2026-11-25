@@ -71,10 +71,30 @@ enum BgMsg {
     Error(String),
 }
 
-/// Mid-list Archive/Trash awaiting an explicit confirm (whole folder/label/list).
+/// Mid-list bulk action awaiting an explicit confirm (whole folder/label/list).
+#[derive(Clone, Copy)]
+pub(crate) enum PendingBulkKind {
+    Move(SpecialFolderKind),
+    MarkRead,
+}
+
+impl PendingBulkKind {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Move(k) => k.label(),
+            Self::MarkRead => "Mark as read",
+        }
+    }
+
+    fn danger(self) -> bool {
+        matches!(self, Self::Move(SpecialFolderKind::Trash))
+    }
+}
+
+/// Mid-list Archive/Trash/Mark-read awaiting confirm.
 #[derive(Clone)]
 pub(crate) struct PendingBulkMove {
-    pub kind: SpecialFolderKind,
+    pub kind: PendingBulkKind,
     pub ids: Vec<MessageId>,
     /// Human scope, e.g. "Inbox" or "GitHub · Inbox".
     pub scope: String,
@@ -1087,12 +1107,71 @@ and paste it here."
         let needs_confirm = !self.list_multi_select || ids.len() > 1;
         if needs_confirm {
             self.pending_bulk_move = Some(PendingBulkMove {
-                kind,
+                kind: PendingBulkKind::Move(kind),
                 ids,
                 scope: self.bulk_move_scope_label(),
             });
         } else {
             self.start_move_messages(ids, kind);
+        }
+    }
+
+    /// Mark mid-list selection (or every visible row) as read.
+    ///
+    /// Whole-list / multi-item actions ask for confirm — same guard as Archive/Trash.
+    pub(crate) fn mark_listed_messages_read(&mut self) {
+        let ids: Vec<MessageId> = if self.list_multi_select {
+            let visible: std::collections::HashSet<&MessageId> =
+                if let Some(stak_id) = self.selected_stak.as_deref() {
+                    self.envelopes
+                        .iter()
+                        .filter(|e| crate::staks::envelope_in_stak(e, stak_id))
+                        .map(|e| &e.id)
+                        .collect()
+                } else {
+                    self.envelopes.iter().map(|e| &e.id).collect()
+                };
+            self.list_selected
+                .iter()
+                .filter(|id| visible.contains(id))
+                .cloned()
+                .collect()
+        } else if let Some(stak_id) = self.selected_stak.as_deref() {
+            self.envelopes
+                .iter()
+                .filter(|e| crate::staks::envelope_in_stak(e, stak_id))
+                .map(|e| e.id.clone())
+                .collect()
+        } else {
+            self.envelopes.iter().map(|e| e.id.clone()).collect()
+        };
+        // Only unread rows need work.
+        let ids: Vec<MessageId> = ids
+            .into_iter()
+            .filter(|id| {
+                self.envelopes
+                    .iter()
+                    .find(|e| e.id == *id)
+                    .is_some_and(|e| !e.seen)
+            })
+            .collect();
+        if ids.is_empty() {
+            self.status = if self.list_multi_select {
+                "Check at least one unread message first".into()
+            } else {
+                "No unread messages in this list".into()
+            };
+            return;
+        }
+        let needs_confirm = !self.list_multi_select || ids.len() > 1;
+        if needs_confirm {
+            self.pending_bulk_move = Some(PendingBulkMove {
+                kind: PendingBulkKind::MarkRead,
+                ids,
+                scope: self.bulk_move_scope_label(),
+            });
+        } else {
+            self.start_mark_read_messages(ids);
         }
     }
 
@@ -1158,7 +1237,7 @@ and paste it here."
             return;
         }
         self.pending_bulk_move = Some(PendingBulkMove {
-            kind,
+            kind: PendingBulkKind::Move(kind),
             ids,
             scope: self.bulk_move_scope_label(),
         });
@@ -1168,7 +1247,10 @@ and paste it here."
         let Some(pending) = self.pending_bulk_move.take() else {
             return;
         };
-        self.start_move_messages(pending.ids, pending.kind);
+        match pending.kind {
+            PendingBulkKind::Move(kind) => self.start_move_messages(pending.ids, kind),
+            PendingBulkKind::MarkRead => self.start_mark_read_messages(pending.ids),
+        }
     }
 
     pub(crate) fn cancel_pending_bulk_move(&mut self) {
@@ -1180,18 +1262,25 @@ and paste it here."
             return;
         };
         let n = pending.ids.len();
-        let verb = pending.kind.label();
+        let verb = pending.kind.verb();
         let title = format!("Confirm {}", verb.to_ascii_lowercase());
-        let body = if n == 1 {
-            format!(
+        let body = match pending.kind {
+            PendingBulkKind::MarkRead if n == 1 => format!(
+                "Mark 1 message as read in {}?",
+                pending.scope
+            ),
+            PendingBulkKind::MarkRead => format!(
+                "Mark {n} messages as read in {}?\n\nThis marks everything unread in the current list — cancel if you only meant one message.",
+                pending.scope
+            ),
+            PendingBulkKind::Move(_) if n == 1 => format!(
                 "{verb} 1 message in {}?\n\nThis cannot be undone from here.",
                 pending.scope
-            )
-        } else {
-            format!(
+            ),
+            PendingBulkKind::Move(_) => format!(
                 "{verb} {n} messages in {}?\n\nThis clears the current list view — cancel if you only meant one message.",
                 pending.scope
-            )
+            ),
         };
 
         let mut confirm = false;
@@ -1224,17 +1313,20 @@ and paste it here."
                         cancel = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let danger = pending.kind == SpecialFolderKind::Trash;
-                        let confirm_btn = if danger {
+                        let confirm_label = match pending.kind {
+                            PendingBulkKind::MarkRead => format!("Mark {n} read"),
+                            PendingBulkKind::Move(_) => format!("{verb} {n}"),
+                        };
+                        let confirm_btn = if pending.kind.danger() {
                             ui.add(
                                 egui::Button::new(
-                                    egui::RichText::new(format!("{verb} {n}"))
+                                    egui::RichText::new(confirm_label)
                                         .color(egui::Color32::from_rgb(0xc0, 0x3a, 0x3a)),
                                 )
                                 .fill(crate::theme::chip(ctx)),
                             )
                         } else {
-                            ui.button(format!("{verb} {n}"))
+                            ui.button(confirm_label)
                         };
                         if confirm_btn.clicked() {
                             confirm = true;
@@ -1250,6 +1342,54 @@ and paste it here."
             self.confirm_pending_bulk_move();
         } else if cancel {
             self.cancel_pending_bulk_move();
+        }
+    }
+
+    /// Mark messages read locally and push IMAP `\Seen` in the background.
+    fn start_mark_read_messages(&mut self, ids: Vec<MessageId>) {
+        let mut changed = 0usize;
+        let mut push: Vec<(MessageId, String)> = Vec::new();
+        for id in &ids {
+            match self.store.mark_seen(id, true) {
+                Ok(true) => {
+                    changed += 1;
+                    if let Some(env) = self.envelopes.iter_mut().find(|e| e.id == *id) {
+                        env.seen = true;
+                        push.push((id.clone(), env.folder_path.clone()));
+                    } else if let Ok(Some(msg)) = self.store.get_message(id) {
+                        push.push((id.clone(), msg.envelope.folder_path));
+                    }
+                    if self.open_message.as_ref().is_some_and(|m| m.envelope.id == *id) {
+                        if let Some(m) = self.open_message.as_mut() {
+                            m.envelope.seen = true;
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    self.status = e.to_string();
+                    return;
+                }
+            }
+        }
+        if changed > 0 {
+            self.rebuild_staks_cache();
+            let _ = self.refresh_folders();
+            for (id, folder) in push {
+                self.push_seen_to_server(id, folder, true);
+            }
+        }
+        self.status = if changed == 0 {
+            "No messages marked read".into()
+        } else if changed == 1 {
+            "Marked 1 message as read".into()
+        } else {
+            format!("Marked {changed} messages as read")
+        };
+        if self.list_multi_select {
+            self.list_selected.clear();
+            self.list_multi_select = false;
+            self.list_select_anchor = None;
         }
     }
 
@@ -1841,7 +1981,8 @@ and paste it here."
         }
     }
 
-    /// Revoke remote images for the open message’s domain.
+    /// Revoke remote images for the open message’s domain (allowlist undo; settings later).
+    #[allow(dead_code)]
     pub(crate) fn block_remote_images_for_sender(&mut self) {
         let Some(addr) = self
             .open_message
@@ -2466,7 +2607,7 @@ Try again, or check that a keyring/secret-service is running."
                 ui.monospace("n         new message (compose)");
                 ui.monospace("r         reply (or focus chat reply)");
                 ui.monospace("Shift+R   reply all");
-                ui.monospace("e         archive (selection or current)");
+                ui.monospace("e         done / archive (selection or current)");
                 ui.monospace("# / Del   trash (selection or current)");
                 ui.monospace(",         settings page");
                 ui.monospace("Esc       leave settings / multi-select / compose");

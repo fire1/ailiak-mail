@@ -282,7 +282,7 @@ impl MailboxApp {
         let logos_on = crate::logo_dev::LogoCache::configured();
         ui.label(
             RichText::new(if logos_on {
-                "Logo.dev CDN is configured (LOGO_DEV_PUBLISHABLE_KEY). Staks and list avatars load company marks from img.logo.dev."
+                "Logo.dev CDN is configured (LOGO_DEV_PUBLISHABLE_KEY). Marks are cached under the app data logos/ folder; the CDN is only contacted when a logo is missing locally."
             } else {
                 "Set LOGO_DEV_PUBLISHABLE_KEY in `.env` to load company logos from Logo.dev."
             })

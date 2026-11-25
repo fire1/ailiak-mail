@@ -61,6 +61,9 @@ pub enum ToolbarIcon {
     Compose,
     Reply,
     ReplyAll,
+    Done,
+    /// Mark as read (mid-list bulk / selection).
+    MarkRead,
     Archive,
     Trash,
     Snooze,
@@ -74,6 +77,8 @@ impl ToolbarIcon {
             // Classic curved reply arrow; double bend = reply-all.
             Self::Reply => ph::ARROW_BEND_UP_LEFT,
             Self::ReplyAll => ph::ARROW_BEND_DOUBLE_UP_LEFT,
+            Self::Done => ph::CHECK,
+            Self::MarkRead => ph::ENVELOPE_OPEN,
             Self::Archive => ph::ARCHIVE,
             Self::Trash => ph::TRASH,
             Self::Snooze => ph::CLOCK_AFTERNOON,
@@ -81,7 +86,7 @@ impl ToolbarIcon {
     }
 }
 
-/// Icon-only toolbar control (Archive / Trash / Snooze). Shows a spinner when `busy`.
+/// Icon-only toolbar control (Done / Archive / Trash / Snooze). Shows a spinner when `busy`.
 pub fn toolbar_icon_button(
     ui: &mut Ui,
     kind: ToolbarIcon,
@@ -124,15 +129,26 @@ pub fn toolbar_icon_button(
     }
 }
 
-/// Toggle remote images for the current sender (`IMAGE` on / `IMAGE_BROKEN` off).
-pub fn toolbar_remote_images_button(
-    ui: &mut Ui,
-    images_on: bool,
-    enabled: bool,
-    tip: &str,
-) -> Response {
+/// Remote-images opt-in: image glyph + “Load”. Caller hides this once images are on.
+pub fn toolbar_load_images_button(ui: &mut Ui, enabled: bool, tip: &str) -> Response {
     let mute = theme::mute(ui.ctx());
-    let size = Vec2::splat(28.0);
+    let ink = ui.visuals().text_color();
+    let pad = egui::vec2(8.0, 4.0);
+    let icon: f32 = 14.0;
+    let label = "Load";
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        FontId::new(13.0, egui::FontFamily::Proportional),
+        if enabled {
+            ink
+        } else {
+            mute.linear_multiply(0.4)
+        },
+    );
+    let size = egui::vec2(
+        pad.x * 2.0 + icon + ui.spacing().icon_spacing + galley.size().x,
+        (pad.y * 2.0 + icon.max(galley.size().y)).max(28.0),
+    );
     let sense = if enabled {
         Sense::click()
     } else {
@@ -151,17 +167,21 @@ pub fn toolbar_remote_images_button(
     if fill != Color32::TRANSPARENT {
         ui.painter().rect_filled(rect, 6.0, fill);
     }
-    let glyph = if images_on {
-        ph::IMAGE
-    } else {
-        ph::IMAGE_BROKEN
-    };
-    let color = if enabled {
+    let icon_color = if enabled {
         mute
     } else {
         mute.linear_multiply(0.4)
     };
-    paint_glyph(ui, rect.shrink(6.0), glyph, color);
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + pad.x, rect.center().y - icon * 0.5),
+        Vec2::splat(icon),
+    );
+    paint_glyph(ui, icon_rect, ph::IMAGE, icon_color);
+    let text_pos = egui::pos2(
+        icon_rect.right() + ui.spacing().icon_spacing,
+        rect.center().y - galley.size().y * 0.5,
+    );
+    ui.painter().galley(text_pos, galley, Color32::PLACEHOLDER);
     response.on_hover_text(tip)
 }
 

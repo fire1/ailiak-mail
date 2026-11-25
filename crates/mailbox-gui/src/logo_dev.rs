@@ -1,5 +1,10 @@
 //! Company logos from [Logo.dev](https://www.logo.dev) CDN (`img.logo.dev`).
 //!
+//! **Caching:** memory → on-disk PNG under the app data `logos/` dir → CDN only
+//! when neither has the mark. HTTP 404s are remembered as `.miss` files so we
+//! do not re-hit the API for known-missing domains. Transient network errors
+//! are session-only misses (retry next launch).
+//!
 //! Keys (never commit): `LOGO_DEV_PUBLISHABLE_KEY` / `LOGO_DEV_SECRET_KEY`
 //! (also accepts `AILIAKMAIL_LOGO_DEV_*`). Publishable (`pk_`) is used for CDN
 //! image URLs; secret (`sk_`) is reserved for server-side API calls.
@@ -17,12 +22,15 @@ use image::imageops::FilterType;
 const FETCH_PX: u32 = 128;
 /// Texture uploaded to egui (displayed ~20–28 CSS px).
 const TEX_PX: u32 = 64;
-/// Bump when fetch/process pipeline changes so stale disk caches are ignored.
+/// Current on-disk PNG suffix (`{domain}.{CACHE_VER}.png`).
 const CACHE_VER: &str = "v2";
 
 enum LogoMsg {
     Ready { key: String, rgba: ColorImage },
+    /// Permanent miss (404) — also written as a `.miss` marker on disk.
     Miss { key: String },
+    /// Transient failure — memory only; next launch may retry the CDN.
+    SoftMiss { key: String },
 }
 
 #[derive(Clone)]
@@ -120,9 +128,8 @@ impl LogoCache {
         Some(domain.to_string())
     }
 
-    fn cache_path(logos_dir: &Path, stem: &str) -> PathBuf {
-        let safe: String = stem
-            .chars()
+    fn safe_stem(stem: &str) -> String {
+        stem.chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
                     c
@@ -130,8 +137,25 @@ impl LogoCache {
                     '_'
                 }
             })
-            .collect();
-        logos_dir.join(format!("{safe}.{CACHE_VER}.png"))
+            .collect()
+    }
+
+    fn cache_path(logos_dir: &Path, stem: &str) -> PathBuf {
+        logos_dir.join(format!("{}.{CACHE_VER}.png", Self::safe_stem(stem)))
+    }
+
+    fn miss_path(logos_dir: &Path, stem: &str) -> PathBuf {
+        logos_dir.join(format!("{}.{CACHE_VER}.miss", Self::safe_stem(stem)))
+    }
+
+    /// Current + legacy filenames we still accept as a local hit (no CDN).
+    fn disk_candidates(logos_dir: &Path, stem: &str) -> Vec<PathBuf> {
+        let safe = Self::safe_stem(stem);
+        vec![
+            logos_dir.join(format!("{safe}.{CACHE_VER}.png")),
+            logos_dir.join(format!("{safe}.l.png")), // prior cache suffix
+            logos_dir.join(format!("{safe}.png")),
+        ]
     }
 
     fn cache_key(domain: &str) -> String {
@@ -152,7 +176,7 @@ impl LogoCache {
                     );
                     self.by_key.insert(key, Cached::Image(tex));
                 }
-                LogoMsg::Miss { key } => {
+                LogoMsg::Miss { key } | LogoMsg::SoftMiss { key } => {
                     self.pending.remove(&key);
                     self.by_key.insert(key, Cached::Miss);
                 }
@@ -163,7 +187,8 @@ impl LogoCache {
         }
     }
 
-    /// Return a Logo.dev texture when ready; kicks a background fetch otherwise.
+    /// Return a Logo.dev texture when ready; kicks a background fetch **only**
+    /// when memory and disk both lack the logo (and no in-flight fetch).
     pub fn texture(
         &mut self,
         ctx: &Context,
@@ -181,15 +206,30 @@ impl LogoCache {
             };
         }
 
-        let path = Self::cache_path(logos_dir, &domain);
-        if let Some(img) = load_processed_png(&path) {
-            let tex = ctx.load_texture(
-                format!("logo-dev-{key}"),
-                img,
-                TextureOptions::LINEAR,
-            );
-            self.by_key.insert(key, Cached::Image(tex.clone()));
-            return Some(tex);
+        // Known CDN 404 — stay offline.
+        if Self::miss_path(logos_dir, &domain).is_file() {
+            self.by_key.insert(key, Cached::Miss);
+            return None;
+        }
+
+        // Local PNG hit (current or legacy name) — never call the CDN.
+        let current = Self::cache_path(logos_dir, &domain);
+        for path in Self::disk_candidates(logos_dir, &domain) {
+            if let Some(img) = load_processed_png(&path) {
+                // Promote legacy filenames to the current cache path once.
+                if path != current {
+                    let _ = fs::create_dir_all(logos_dir);
+                    let _ = fs::copy(&path, &current);
+                }
+                let _ = fs::remove_file(Self::miss_path(logos_dir, &domain));
+                let tex = ctx.load_texture(
+                    format!("logo-dev-{key}"),
+                    img,
+                    TextureOptions::LINEAR,
+                );
+                self.by_key.insert(key, Cached::Image(tex.clone()));
+                return Some(tex);
+            }
         }
 
         if self.pending.contains(&key) {
@@ -205,11 +245,14 @@ impl LogoCache {
         thread::Builder::new()
             .name("logo-dev-fetch".into())
             .spawn(move || match fetch_logo(&domain, &token, &logos_dir) {
-                Ok(Some(img)) => {
+                Ok(FetchOutcome::Image(img)) => {
                     let _ = tx.send(LogoMsg::Ready { key, rgba: img });
                 }
-                Ok(None) | Err(_) => {
+                Ok(FetchOutcome::NotFound) => {
                     let _ = tx.send(LogoMsg::Miss { key });
+                }
+                Err(_) => {
+                    let _ = tx.send(LogoMsg::SoftMiss { key });
                 }
             })
             .ok();
@@ -221,6 +264,11 @@ fn load_processed_png(path: &Path) -> Option<ColorImage> {
     let bytes = fs::read(path).ok()?;
     let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
     Some(rgba_to_color_image(&img))
+}
+
+enum FetchOutcome {
+    Image(ColorImage),
+    NotFound,
 }
 
 /// High-quality square fit into [`TEX_PX`] with transparent padding.
@@ -246,11 +294,7 @@ fn rgba_to_color_image(img: &image::RgbaImage) -> ColorImage {
     ColorImage::from_rgba_unmultiplied(size, img.as_raw())
 }
 
-fn fetch_logo(
-    domain: &str,
-    token: &str,
-    logos_dir: &Path,
-) -> Result<Option<ColorImage>, String> {
+fn fetch_logo(domain: &str, token: &str, logos_dir: &Path) -> Result<FetchOutcome, String> {
     // Full-color PNG — avoid `theme=` (washes marks) and prefer a large source
     // then Lanczos to TEX_PX so 20–28px UI stays sharp.
     let url = format!(
@@ -263,14 +307,18 @@ fn fetch_logo(
         .map_err(|e| e.to_string())?;
     let resp = client.get(&url).send().map_err(|e| e.to_string())?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
+        let _ = fs::create_dir_all(logos_dir);
+        let _ = fs::write(LogoCache::miss_path(logos_dir, domain), b"");
+        return Ok(FetchOutcome::NotFound);
     }
     if !resp.status().is_success() {
         return Err(format!("logo.dev HTTP {}", resp.status()));
     }
     let bytes = resp.bytes().map_err(|e| e.to_string())?;
     if bytes.is_empty() {
-        return Ok(None);
+        let _ = fs::create_dir_all(logos_dir);
+        let _ = fs::write(LogoCache::miss_path(logos_dir, domain), b"");
+        return Ok(FetchOutcome::NotFound);
     }
     let decoded = image::load_from_memory(&bytes)
         .map_err(|e| e.to_string())?
@@ -278,8 +326,11 @@ fn fetch_logo(
     let processed = process_logo_rgba(decoded);
     let _ = fs::create_dir_all(logos_dir);
     let path = LogoCache::cache_path(logos_dir, domain);
-    let _ = processed.save(&path);
-    Ok(Some(rgba_to_color_image(&processed)))
+    processed
+        .save(&path)
+        .map_err(|e| format!("save logo cache {}: {e}", path.display()))?;
+    let _ = fs::remove_file(LogoCache::miss_path(logos_dir, domain));
+    Ok(FetchOutcome::Image(rgba_to_color_image(&processed)))
 }
 
 #[cfg(test)]
@@ -304,5 +355,14 @@ mod tests {
         let src = image::RgbaImage::from_pixel(200, 100, image::Rgba([255, 0, 0, 255]));
         let out = process_logo_rgba(src);
         assert_eq!(out.dimensions(), (TEX_PX, TEX_PX));
+    }
+
+    #[test]
+    fn disk_candidates_prefer_current_then_legacy() {
+        let dir = Path::new("/tmp/ailiakmail-logos-test");
+        let paths = LogoCache::disk_candidates(dir, "Example.COM");
+        assert!(paths[0].ends_with("Example.COM.v2.png") || paths[0].to_string_lossy().contains("Example.COM.v2.png"));
+        assert!(paths.iter().any(|p| p.to_string_lossy().ends_with(".l.png")));
+        assert_eq!(LogoCache::safe_stem("a/b c.com"), "a_b_c.com");
     }
 }
