@@ -6,6 +6,7 @@ pub mod config;
 pub mod imap;
 pub mod mail_body;
 pub mod message_parse;
+pub mod mime_inline;
 pub use mail_body::{
     analyze_remote_image_threats, build_mail_body, build_mail_html_document,
     classify_mail_navigation, classify_remote_image_threats, mail_html_has_remote_images, safe_url,
@@ -13,6 +14,9 @@ pub use mail_body::{
     RemoteImageRisk,
 };
 pub use message_parse::readable_body;
+pub use mime_inline::{
+    has_cid_refs, inline_parts, message_has_real_html, resolve_inline_images, rewrite_cids,
+};
 pub mod oauth;
 pub mod oauth_clients;
 pub mod paths;
@@ -27,16 +31,17 @@ pub mod types;
 pub mod folder_role;
 
 pub use config::{
-    folders_panel_help, looks_like_abv, nav_sync_tip, pop3_account_form_help,
-    pop3_sync_limitation_note, AiliakConfig, AppConfig, MailAccountConfig, MailAuthMethod,
-    MailProtocol, OAuthConfig, ThemeMode,
+    folders_panel_help, looks_like_abv, mail_host, nav_sync_tip, normalize_mail_addr,
+    pop3_account_form_help, pop3_sync_limitation_note, remote_image_domain, AiliakConfig,
+    AppConfig, MailAccountConfig, MailAuthMethod, MailProtocol, OAuthConfig, SoundTheme,
+    ThemeMode, UiConfig,
 };
 pub use oauth::{
     ensure_access_token, oauth_sign_in, resolve_mail_credential, store_oauth_tokens, MailCredential,
     OAuthClientCreds, OAuthProvider, OAuthSignInResult,
 };
 pub use oauth_clients::{creds_ready as oauth_creds_ready, has_embedded_app, resolve_creds as resolve_oauth_creds};
-pub use providers::{MailProvider, ProviderPreset};
+pub use providers::{is_personal_mailbox_domain, MailProvider, ProviderPreset};
 pub use paths::AppPaths;
 pub use smtp::{
     reply_references, reply_subject, send as send_mail, OutgoingAttachment, OutgoingMail,

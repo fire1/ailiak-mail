@@ -233,6 +233,161 @@ impl MailProvider {
     }
 }
 
+/// Exact consumer / personal mailbox domains (People left-nav filter).
+///
+/// Sourced from account presets ([`MailProvider`]) plus widely used personal
+/// providers (Proton, Fastmail, AOL, Mail.ru, Tuta, regional free mail, etc.).
+/// Company / work domains are intentionally excluded.
+const PERSONAL_MAIL_DOMAINS: &[&str] = &[
+    // Google
+    "gmail.com",
+    "googlemail.com",
+    // Microsoft consumer
+    "outlook.com",
+    "outlook.de",
+    "outlook.fr",
+    "outlook.es",
+    "outlook.it",
+    "outlook.jp",
+    "outlook.co.uk",
+    "hotmail.com",
+    "hotmail.co.uk",
+    "hotmail.de",
+    "hotmail.fr",
+    "hotmail.it",
+    "hotmail.es",
+    "live.com",
+    "live.co.uk",
+    "live.de",
+    "live.fr",
+    "msn.com",
+    "passport.com",
+    // Apple
+    "icloud.com",
+    "me.com",
+    "mac.com",
+    // Yahoo family (exact; see also yahoo.* prefix match)
+    "yahoo.com",
+    "ymail.com",
+    "rocketmail.com",
+    // Yandex
+    "yandex.com",
+    "yandex.ru",
+    "yandex.by",
+    "yandex.kz",
+    "yandex.ua",
+    "ya.ru",
+    // GMX / Mail.com network
+    "gmx.com",
+    "gmx.net",
+    "gmx.de",
+    "gmx.at",
+    "gmx.ch",
+    "gmx.fr",
+    "gmx.es",
+    "mail.com",
+    "email.com",
+    "usa.com",
+    "consultant.com",
+    // Proton
+    "proton.me",
+    "protonmail.com",
+    "protonmail.ch",
+    "pm.me",
+    // Fastmail
+    "fastmail.com",
+    "fastmail.fm",
+    "messagingengine.com",
+    // Tuta
+    "tuta.com",
+    "tutanota.com",
+    "tutanota.de",
+    "tutamail.com",
+    "keemail.me",
+    // Zoho personal
+    "zoho.com",
+    "zohomail.com",
+    "zohomail.eu",
+    // AOL / Verizon media
+    "aol.com",
+    "aim.com",
+    "verizon.net",
+    // Mailbox.org / Posteo / Runbox / Hey
+    "mailbox.org",
+    "posteo.de",
+    "posteo.net",
+    "runbox.com",
+    "hey.com",
+    // Bulgaria (account presets / POP3)
+    "abv.bg",
+    "mail.bg",
+    "dir.bg",
+    // Russia / CIS free mail
+    "mail.ru",
+    "inbox.ru",
+    "list.ru",
+    "bk.ru",
+    "internet.ru",
+    // China consumer
+    "qq.com",
+    "163.com",
+    "126.com",
+    "yeah.net",
+    "sina.com",
+    "foxmail.com",
+    // Korea / Japan / India / CZ
+    "naver.com",
+    "daum.net",
+    "hanmail.net",
+    "nate.com",
+    "yahoo.co.jp",
+    "rediffmail.com",
+    "seznam.cz",
+    "email.cz",
+    // Germany / France / Italy / Netherlands consumer ISPs
+    "web.de",
+    "freenet.de",
+    "t-online.de",
+    "orange.fr",
+    "wanadoo.fr",
+    "laposte.net",
+    "free.fr",
+    "sfr.fr",
+    "libero.it",
+    "virgilio.it",
+    "alice.it",
+    "tin.it",
+    "ziggo.nl",
+    "xs4all.nl",
+    // US ISP / cable often used as personal mail
+    "comcast.net",
+    "att.net",
+    "sbcglobal.net",
+    "bellsouth.net",
+    "charter.net",
+    "cox.net",
+    "earthlink.net",
+    "optonline.net",
+];
+
+/// Prefixes for regional consumer brands (`yahoo.co.uk`, `gmx.us`, `yandex.com.tr`).
+const PERSONAL_MAIL_PREFIXES: &[&str] = &["yahoo.", "gmx.", "yandex.", "hotmail.", "live.", "outlook."];
+
+/// True when `domain` is a well-known **personal / consumer** mailbox host
+/// (Gmail, Outlook.com, Yahoo, iCloud, Proton, …) — not a company domain.
+pub fn is_personal_mailbox_domain(domain: &str) -> bool {
+    let d = domain.trim().to_ascii_lowercase();
+    if d.is_empty() || !d.contains('.') {
+        return false;
+    }
+    if PERSONAL_MAIL_DOMAINS.iter().any(|known| *known == d) {
+        return true;
+    }
+    PERSONAL_MAIL_PREFIXES
+        .iter()
+        .any(|prefix| d.starts_with(prefix) && d.len() > prefix.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +402,52 @@ mod tests {
                 assert!(!preset.imap_host.is_empty());
                 assert!(!preset.smtp_host.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn personal_domains_cover_presets_and_regionals() {
+        for d in [
+            "gmail.com",
+            "googlemail.com",
+            "outlook.com",
+            "hotmail.com",
+            "yahoo.com",
+            "yahoo.co.uk",
+            "ymail.com",
+            "icloud.com",
+            "me.com",
+            "yandex.ru",
+            "ya.ru",
+            "gmx.de",
+            "abv.bg",
+            "mail.bg",
+            "proton.me",
+            "pm.me",
+            "fastmail.com",
+            "aol.com",
+            "mail.ru",
+            "qq.com",
+            "web.de",
+        ] {
+            assert!(
+                is_personal_mailbox_domain(d),
+                "expected personal: {d}"
+            );
+        }
+        for d in [
+            "google.com",
+            "accounts.google.com",
+            "microsoft.com",
+            "github.com",
+            "acme-corp.io",
+            "staks.example",
+            "company.com",
+        ] {
+            assert!(
+                !is_personal_mailbox_domain(d),
+                "expected non-personal: {d}"
+            );
         }
     }
 }

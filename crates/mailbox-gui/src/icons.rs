@@ -69,7 +69,7 @@ pub enum ToolbarIcon {
 impl ToolbarIcon {
     fn glyph(self) -> &'static str {
         match self {
-            Self::Sync => ph::ARROWS_CLOCKWISE,
+            Self::Sync => ph::LIGHTNING,
             Self::Compose => ph::NOTE_PENCIL,
             // Classic curved reply arrow; double bend = reply-all.
             Self::Reply => ph::ARROW_BEND_UP_LEFT,
@@ -194,18 +194,49 @@ pub fn toolbar_button(
     tip: &str,
     busy: bool,
 ) -> Response {
+    toolbar_button_inner(ui, kind, label, tip, busy, false, 0.0)
+}
+
+/// Glyph + label that always uses the hover chip fill so it stays noticeable
+/// (Compose in the top bar). `min_height` matches the search field chrome.
+pub fn toolbar_button_emphasized(
+    ui: &mut Ui,
+    kind: ToolbarIcon,
+    label: &str,
+    tip: &str,
+    busy: bool,
+    min_height: f32,
+) -> Response {
+    toolbar_button_inner(ui, kind, label, tip, busy, true, min_height)
+}
+
+fn toolbar_button_inner(
+    ui: &mut Ui,
+    kind: ToolbarIcon,
+    label: &str,
+    tip: &str,
+    busy: bool,
+    emphasized: bool,
+    min_height: f32,
+) -> Response {
     let mute = theme::mute(ui.ctx());
     let ink = ui.visuals().text_color();
-    let pad = egui::vec2(8.0, 4.0);
-    let icon = 14.0;
+    // Emphasized (Compose): wider pad for a larger hit box; same 13px label.
+    let pad = if emphasized {
+        egui::vec2(14.0, 0.0)
+    } else {
+        egui::vec2(8.0, 4.0)
+    };
+    let icon: f32 = 14.0;
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
         FontId::new(13.0, egui::FontFamily::Proportional),
         ink,
     );
+    let content_h = pad.y * 2.0 + icon.max(galley.size().y);
     let size = egui::vec2(
         pad.x * 2.0 + icon + ui.spacing().icon_spacing + galley.size().x,
-        (pad.y * 2.0 + icon.max(galley.size().y)).max(24.0),
+        content_h.max(min_height).max(24.0_f32),
     );
     let sense = if busy { Sense::hover() } else { Sense::click() };
     let (rect, response) = ui.allocate_exact_size(size, sense);
@@ -213,7 +244,7 @@ pub fn toolbar_button(
         theme::select(ui.ctx())
     } else if response.is_pointer_button_down_on() {
         theme::select(ui.ctx())
-    } else if response.hovered() {
+    } else if emphasized || response.hovered() {
         theme::chip(ui.ctx())
     } else {
         Color32::TRANSPARENT
@@ -542,6 +573,7 @@ fn nav_action_row(
     }
 }
 
+#[allow(dead_code)] // Removed from nav footer; Desk still opens via logo / `d`.
 pub fn desk_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
     nav_action_row(
         ui,
@@ -590,6 +622,19 @@ pub fn settings_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
     )
 }
 
+#[allow(dead_code)]
+pub fn feedback_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
+    nav_action_row(
+        ui,
+        collapsed,
+        true,
+        false,
+        "Feedback",
+        "Send feedback as an issue",
+        ph::CHAT_CIRCLE,
+    )
+}
+
 pub fn help_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
     nav_action_row(ui, collapsed, true, false, "Help", "Help (?)", ph::QUESTION)
 }
@@ -630,8 +675,17 @@ pub fn stak_nav_button(
         Vec2::splat(icon_size),
     );
     if let Some(tex) = brand {
+        // Soft plate behind marks so transparent Logo.dev PNGs stay readable.
+        let plate = if ui.visuals().dark_mode {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 18)
+        } else {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+        };
+        ui.painter().rect_filled(icon_rect, 5.0, plate);
         egui::Image::new((tex.id(), icon_rect.size()))
-            .rounding(4.0)
+            .maintain_aspect_ratio(true)
+            .fit_to_exact_size(icon_rect.size())
+            .rounding(5.0)
             .paint_at(ui, icon_rect);
     } else {
         let icon_color = if selected { accent } else { mute };

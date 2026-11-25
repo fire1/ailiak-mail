@@ -1,10 +1,13 @@
 //! People — human peers for chat-style conversations (vs brand Staks).
+//!
+//! Only senders on well-known **personal / consumer** mailbox domains
+//! ([`mailbox_core::is_personal_mailbox_domain`]) appear here — Gmail, Outlook.com,
+//! Yahoo, iCloud, Proton, GMX, ABV, etc. Company domains and robot addresses stay out.
 
 use std::collections::HashMap;
 
+use mailbox_core::is_personal_mailbox_domain;
 use mailbox_core::types::Envelope;
-
-use crate::staks;
 
 #[derive(Debug, Clone)]
 pub struct Person {
@@ -16,18 +19,14 @@ pub struct Person {
     pub last_snippet: String,
 }
 
-/// True when this From address looks like a person (not brand / noreply / robot).
+/// True when this From address is a person on a popular personal mail provider.
 pub fn is_person_addr(from_addr: &str, from_name: &str) -> bool {
     let addr = from_addr.trim().to_lowercase();
     if addr.is_empty() || !addr.contains('@') {
         return false;
     }
-    if staks::brand_id_for_addr(&addr).is_some() {
-        // Shared consumer domains (gmail/outlook) still appear as brands in Staks —
-        // carve those out so individuals remain people.
-        if is_personal_provider(&addr) {
-            return !looks_robot_local(&addr);
-        }
+    let domain = addr.split('@').nth(1).unwrap_or("");
+    if !is_personal_mailbox_domain(domain) {
         return false;
     }
     if looks_robot_local(&addr) {
@@ -38,27 +37,6 @@ pub fn is_person_addr(from_addr: &str, from_name: &str) -> bool {
         return false;
     }
     true
-}
-
-fn is_personal_provider(addr: &str) -> bool {
-    let domain = addr.split('@').nth(1).unwrap_or("");
-    matches!(
-        domain,
-        "gmail.com"
-            | "googlemail.com"
-            | "outlook.com"
-            | "hotmail.com"
-            | "live.com"
-            | "msn.com"
-            | "yahoo.com"
-            | "icloud.com"
-            | "me.com"
-            | "mac.com"
-            | "proton.me"
-            | "protonmail.com"
-            | "abv.bg"
-            | "mail.bg"
-    )
 }
 
 fn looks_robot_local(addr: &str) -> bool {
@@ -123,5 +101,27 @@ pub fn display_name(person: &Person) -> &str {
         &person.addr
     } else {
         &person.name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn people_only_personal_providers() {
+        assert!(is_person_addr("alice@gmail.com", "Alice"));
+        assert!(is_person_addr("bob@yahoo.co.uk", "Bob"));
+        assert!(is_person_addr("cara@proton.me", "Cara"));
+        assert!(is_person_addr("dan@abv.bg", "Dan"));
+        assert!(is_person_addr("eve@icloud.com", "Eve"));
+        assert!(is_person_addr("frank@gmx.de", "Frank"));
+        assert!(is_person_addr("gina@mail.ru", "Gina"));
+
+        assert!(!is_person_addr("ceo@acme.com", "CEO"));
+        assert!(!is_person_addr("alerts@github.com", "GitHub"));
+        assert!(!is_person_addr("noreply@gmail.com", "Gmail"));
+        assert!(!is_person_addr("news@company.io", "News"));
+        assert!(!is_person_addr("alice@google.com", "Alice"));
     }
 }

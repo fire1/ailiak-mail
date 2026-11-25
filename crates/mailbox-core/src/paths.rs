@@ -50,6 +50,8 @@ impl AppPaths {
             .with_context(|| format!("create data dir {}", self.data_dir.display()))?;
         fs::create_dir_all(self.avatars_dir())
             .with_context(|| format!("create avatars dir {}", self.avatars_dir().display()))?;
+        fs::create_dir_all(self.logos_dir())
+            .with_context(|| format!("create logos dir {}", self.logos_dir().display()))?;
         Ok(())
     }
 
@@ -64,6 +66,28 @@ impl AppPaths {
     /// Local profile-picture overrides (`{sha256(email)}.png`).
     pub fn avatars_dir(&self) -> PathBuf {
         self.data_dir.join("avatars")
+    }
+
+    /// Cached company logos from Logo.dev (`{domain}.png`).
+    pub fn logos_dir(&self) -> PathBuf {
+        self.data_dir.join("logos")
+    }
+
+    /// Wall-clock stamp of the last successful mail sync (unix seconds, text file).
+    pub fn last_sync_stamp_file(&self) -> PathBuf {
+        self.data_dir.join("last_sync.stamp")
+    }
+
+    pub fn read_last_sync_unix(&self) -> Option<u64> {
+        let raw = fs::read_to_string(self.last_sync_stamp_file()).ok()?;
+        raw.trim().parse().ok()
+    }
+
+    pub fn write_last_sync_unix(&self, unix_secs: u64) {
+        let _ = fs::write(
+            self.last_sync_stamp_file(),
+            format!("{unix_secs}\n"),
+        );
     }
 }
 

@@ -12,6 +12,10 @@ Peer / inspiration project for AiliakMail. Snapshot for local reference — upst
 | **Stars / forks** | ~27 / 2 (at capture time) |
 | **Primary stack** | **Rust** mail engine + **Qt 6 / QML** UI (`cxx-qt`) |
 
+## Local source code reference
+
+Check for local existence inside of `~/Projects/GitHub/rusty-inbox`  
+
 ## Elevator pitch
 
 Fast, native desktop email client (Linux / Windows / macOS): Rust IMAP/SMTP engine, Qt Quick UI (not Electron), Smart Inbox, keyboard-first, optional AI assistant. Omarchy-aware theming on Linux.
@@ -47,18 +51,7 @@ crates/rusty-inbox-ai/    AI assistant (no UI): providers, models, OAuth PKCE
 | Updates | In-app update check + install | Flatpak / AppImage / NSIS / DMG aware |
 | Privacy | Local SQLite; no telemetry | Same direction as us |
 
-## Install (upstream)
 
-```sh
-# Linux Flatpak (recommended)
-flatpak install --user https://karem505.github.io/rusty-inbox/rusty-inbox.flatpakref
-
-# One-liner (Linux/macOS)
-curl -fsSL https://raw.githubusercontent.com/karem505/rusty-inbox/main/scripts/install.sh | sh
-
-# Arch AUR
-yay -S rusty-inbox
-```
 
 Windows: PowerShell install script or `.exe` / portable zip from Releases.  
 macOS: `.dmg` (arm64 + x86_64).
@@ -88,6 +81,15 @@ Qt WebEngine is bundled → installers are much larger than our egui+wry builds 
 - Useful reference for: Smart Inbox grouping, People surface, keyboard map, Thunderbird import, in-app updates, Flatpak/AUR packaging.
 - **Not** a drop-in stack match: they chose Qt/QML + WebEngine; we chose egui + wry. Expect different binary size and HTML-mail embedding tradeoffs.
 - Optional AI crate (`rusty-inbox-ai`) is a concrete checklist if we add assistant features later (Ailiak Desk bridge is our differentiator today).
+
+### Adopted for HTML body rendering
+
+Ported from rusty-inbox into `mailbox-core` (kept egui + wry, not Qt):
+
+- Real `text/html` only (drop mail-parser synthesized HTML for plain-only mail).
+- `cid:` → `data:` inline image rewrite at parse time (`mime_inline`).
+- Webview document = light “paper”, keep author CSS, CSP + strip scripts (not nested `srcdoc` iframes — those paint blank under WebKitGTK/wry; rusty uses Chromium where iframe sandbox works).
+- Privacy default differs: we keep remote images blocked; rusty-inbox loads them.
 
 ## Capture
 

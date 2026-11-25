@@ -1,6 +1,6 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
 use eframe::App;
@@ -24,12 +24,24 @@ use crate::avatars::{AvatarCache, AvatarMsg};
 use crate::brand::AiliakLogo;
 use crate::busy::BusyFlags;
 use crate::calendar::CalendarState;
+use crate::logo_dev::LogoCache;
 use crate::settings::{AccountWizard, AccountWizardStep, SettingsSection};
 use crate::theme;
 use mailbox_core::providers::MailProvider;
 
 /// Full Ailiak Desk in the system browser (escape hatch; Todo uses the API).
 pub(crate) const DESK_URL: &str = "https://ailiak.com";
+/// Hidden until we migrate hosting to GitLab (issue-by-email works there).
+pub(crate) const FEEDBACK_UI_ENABLED: bool = false;
+/// Prefill target for Feedback → new issue (swap to GitLab when ready).
+#[allow(dead_code)]
+pub(crate) const FEEDBACK_ISSUES_URL: &str =
+    "https://github.com/fire1/ailiak-mail/issues/new";
+
+/// Let the first frames paint before kicking a network sync.
+const STARTUP_SYNC_DELAY: Duration = Duration::from_secs(2);
+/// Skip startup sync if we already synced within this window (rapid relaunch).
+const STARTUP_SYNC_COOLDOWN: Duration = Duration::from_secs(90);
 
 enum BgMsg {
     AiliakOk {
@@ -57,6 +69,15 @@ enum BgMsg {
     /// SMTP send finished.
     SendOk,
     Error(String),
+}
+
+/// Mid-list Archive/Trash awaiting an explicit confirm (whole folder/label/list).
+#[derive(Clone)]
+pub(crate) struct PendingBulkMove {
+    pub kind: SpecialFolderKind,
+    pub ids: Vec<MessageId>,
+    /// Human scope, e.g. "Inbox" or "GitHub · Inbox".
+    pub scope: String,
 }
 
 pub struct MailboxApp {
@@ -93,6 +114,8 @@ pub struct MailboxApp {
     pub(crate) mail_webview: crate::mail_webview::MailWebView,
     /// Set each frame by the reader when HTML should fill a screen rect.
     pub(crate) mail_webview_req: Option<crate::mail_webview::MailWebViewRequest>,
+    /// Consecutive frames without a mail webview request (debounce hide).
+    mail_webview_miss_frames: u8,
     pub(crate) search: String,
     /// Request keyboard focus on the top-bar search field (set by `/`).
     pub(crate) focus_search: bool,
@@ -104,6 +127,13 @@ pub struct MailboxApp {
     pub(crate) show_settings: bool,
     pub(crate) settings_section: SettingsSection,
     pub(crate) show_help: bool,
+    pub(crate) show_feedback: bool,
+    pub(crate) feedback_title: String,
+    pub(crate) feedback_body: String,
+    /// Reader meta (To / Cc / Date) expanded under From.
+    pub(crate) reader_headers_expanded: bool,
+    /// Reader subject shown in full (click a truncated title to expand).
+    pub(crate) reader_subject_expanded: bool,
     pub(crate) show_calendar: bool,
     pub(crate) show_todo: bool,
     /// Folder rail: icons only when true.
@@ -122,6 +152,8 @@ pub struct MailboxApp {
     pub(crate) list_multi_select: bool,
     /// Message ids checked while `list_multi_select` is on.
     pub(crate) list_selected: std::collections::HashSet<MessageId>,
+    /// Confirm before mid-panel Archive/Trash clears a whole list.
+    pub(crate) pending_bulk_move: Option<PendingBulkMove>,
     /// Visible-list index where Shift+arrow selection started.
     list_select_anchor: Option<usize>,
     /// Mid-column width — owned by us (not egui PanelState).
@@ -155,6 +187,7 @@ pub struct MailboxApp {
     pub(crate) account_wizard: Option<AccountWizard>,
     pub(crate) ailiak_logo: AiliakLogo,
     pub(crate) avatars: AvatarCache,
+    pub(crate) logos: LogoCache,
     avatar_tx: Sender<AvatarMsg>,
     avatar_rx: Receiver<AvatarMsg>,
     bg_tx: Sender<BgMsg>,
@@ -163,6 +196,8 @@ pub struct MailboxApp {
     pub(crate) busy: BusyFlags,
     /// Last sync start (manual or auto) — drives the auto-sync timer.
     last_sync_at: Instant,
+    /// When set, pull the current folder once after this instant (gentle boot sync).
+    startup_sync_at: Option<Instant>,
     /// Webview torn down; send `Close` next frame so wry Drop does not hang.
     exit_after_webview: bool,
 }
@@ -231,6 +266,7 @@ impl MailboxApp {
             mail_body_cache: None,
             mail_webview: crate::mail_webview::MailWebView::default(),
             mail_webview_req: None,
+            mail_webview_miss_frames: 0,
             search: String::new(),
             focus_search: false,
             status,
@@ -239,15 +275,21 @@ impl MailboxApp {
             show_settings: false,
             settings_section: SettingsSection::Appearance,
             show_help: false,
+            show_feedback: false,
+            feedback_title: String::new(),
+            feedback_body: String::new(),
+            reader_headers_expanded: false,
+            reader_subject_expanded: false,
             show_calendar: false,
             show_todo: false,
             folders_collapsed: false,
-            staks_section_open: true,
-            people_section_open: true,
+            staks_section_open: false,
+            people_section_open: false,
             folders_section_open: true,
-            labels_section_open: true,
+            labels_section_open: false,
             label_expanded: std::collections::HashSet::new(),
             list_multi_select: false,
+            pending_bulk_move: None,
             list_selected: std::collections::HashSet::new(),
             list_select_anchor: None,
             list_width: 340.0,
@@ -274,6 +316,7 @@ impl MailboxApp {
             account_wizard: None,
             ailiak_logo,
             avatars: AvatarCache::default(),
+            logos: LogoCache::default(),
             avatar_tx,
             avatar_rx,
             bg_tx,
@@ -281,6 +324,7 @@ impl MailboxApp {
             busy: BusyFlags::default(),
             exit_after_webview: false,
             last_sync_at: Instant::now(),
+            startup_sync_at: None,
         };
         app.reload_settings_fields();
         app.refresh_folders()?;
@@ -293,7 +337,35 @@ impl MailboxApp {
         if app.config.ailiak.enabled {
             app.refresh_desk_tasks();
         }
+        app.schedule_startup_sync();
         Ok(app)
+    }
+
+    /// Queue a deferred current-folder sync after launch (not `sync_all`).
+    fn schedule_startup_sync(&mut self) {
+        if self.config.accounts.is_empty() {
+            return;
+        }
+        if let Some(last) = self.paths.read_last_sync_unix() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if now.saturating_sub(last) < STARTUP_SYNC_COOLDOWN.as_secs() {
+                tracing::debug!(
+                    cooldown_secs = STARTUP_SYNC_COOLDOWN.as_secs(),
+                    "skipping startup sync — recent sync stamp"
+                );
+                return;
+            }
+        }
+        self.startup_sync_at = Some(Instant::now() + STARTUP_SYNC_DELAY);
+    }
+
+    fn note_sync_stamp(&self) {
+        if let Ok(secs) = SystemTime::now().duration_since(UNIX_EPOCH) {
+            self.paths.write_last_sync_unix(secs.as_secs());
+        }
     }
 
     pub(crate) fn apply_provider_preset(&mut self, provider: MailProvider) {
@@ -751,8 +823,102 @@ impl MailboxApp {
         self.settings_section = section;
         self.show_settings = true;
         self.show_help = false;
+        self.show_feedback = false;
         self.show_todo = false;
         self.show_calendar = false;
+    }
+
+    /// Open the system browser on a new issue with the feedback form filled in.
+    #[allow(dead_code)]
+    pub(crate) fn submit_feedback_to_github(&mut self) {
+        let title = self.feedback_title.trim();
+        let body = self.feedback_body.trim();
+        if title.is_empty() && body.is_empty() {
+            self.status = "Write a short title or message first".into();
+            return;
+        }
+        let title = if title.is_empty() {
+            "Feedback from AiliakMail".to_string()
+        } else {
+            title.to_string()
+        };
+        let mut issue_body = String::new();
+        issue_body.push_str(body);
+        if !issue_body.is_empty() {
+            issue_body.push_str("\n\n");
+        }
+        issue_body.push_str("---\n");
+        issue_body.push_str("_Sent from AiliakMail Feedback_\n");
+        let url = format!(
+            "{FEEDBACK_ISSUES_URL}?title={}&body={}",
+            query_encode(&title),
+            query_encode(&issue_body)
+        );
+        match open_url(&url) {
+            Ok(()) => {
+                self.status = "Opened GitHub to file your feedback".into();
+                self.show_feedback = false;
+                self.feedback_title.clear();
+                self.feedback_body.clear();
+            }
+            Err(e) => self.status = format!("Could not open browser: {e}"),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn feedback_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_feedback;
+        egui::Window::new("Feedback")
+            .open(&mut open)
+            .default_width(420.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "GitHub has no issue-by-email (unlike GitLab). Your note opens as a new \
+                         issue in the browser — sign in to GitHub to submit.",
+                    )
+                    .small()
+                    .color(theme::mute(ui.ctx())),
+                );
+                ui.add_space(8.0);
+                ui.label(RichText::new("Title").strong());
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.feedback_title)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Short summary"),
+                );
+                ui.add_space(6.0);
+                ui.label(RichText::new("Message").strong());
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.feedback_body)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(8)
+                        .hint_text("What happened? What did you expect?"),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Open GitHub issue").color(egui::Color32::WHITE),
+                            )
+                            .fill(theme::accent(ui.ctx())),
+                        )
+                        .clicked()
+                    {
+                        self.submit_feedback_to_github();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.show_feedback = false;
+                    }
+                });
+            });
+        // Window `.open` may clear the flag; keep closed if submit already closed it.
+        if !self.show_feedback {
+            open = false;
+        }
+        self.show_feedback = open;
     }
 
     /// Open Ailiak Desk in the system browser.
@@ -876,9 +1042,12 @@ and paste it here."
     }
 
     /// Archive or trash mid-list selection (multi-select) or every visible row.
+    ///
+    /// Whole-list / multi-item actions ask for confirm so Inbox (and other
+    /// folders/labels) are not cleared by a mis-click on the mid-panel buttons.
     pub(crate) fn move_listed_messages(&mut self, kind: SpecialFolderKind) {
         if self.selected_person.is_some() && !self.list_multi_select {
-            self.move_person_conversation(kind);
+            self.request_move_person_conversation(kind);
             return;
         }
         let ids: Vec<MessageId> = if self.list_multi_select {
@@ -914,7 +1083,174 @@ and paste it here."
             };
             return;
         }
-        self.start_move_messages(ids, kind);
+        // Single checked row is intentional; whole list / several rows need confirm.
+        let needs_confirm = !self.list_multi_select || ids.len() > 1;
+        if needs_confirm {
+            self.pending_bulk_move = Some(PendingBulkMove {
+                kind,
+                ids,
+                scope: self.bulk_move_scope_label(),
+            });
+        } else {
+            self.start_move_messages(ids, kind);
+        }
+    }
+
+    fn bulk_move_scope_label(&self) -> String {
+        if let Some(peer) = self.selected_person.as_deref() {
+            let name = self
+                .people_cache
+                .iter()
+                .find(|p| p.addr.eq_ignore_ascii_case(peer))
+                .map(|p| crate::people::display_name(p).to_string())
+                .unwrap_or_else(|| peer.to_string());
+            return format!("conversation with {name}");
+        }
+        let folder_title = self
+            .folders
+            .iter()
+            .find(|f| f.path == self.selected_folder)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| {
+                if self.selected_folder.is_empty() {
+                    "this list".into()
+                } else {
+                    self.selected_folder.clone()
+                }
+            });
+        if let Some(stak_id) = self.selected_stak.as_deref() {
+            let label = self
+                .staks_cache
+                .iter()
+                .find(|s| s.id == stak_id)
+                .map(|s| s.label.clone())
+                .unwrap_or_else(|| stak_id.to_string());
+            format!("{label} · {folder_title}")
+        } else {
+            folder_title
+        }
+    }
+
+    fn request_move_person_conversation(&mut self, kind: SpecialFolderKind) {
+        let Some(peer) = self.selected_person.clone() else {
+            self.status = "Select a person first".into();
+            return;
+        };
+        let ids: Vec<MessageId> = match self.store.list_messages_with_peer(&self.account_id, &peer)
+        {
+            Ok(msgs) => msgs.into_iter().map(|m| m.envelope.id).collect(),
+            Err(e) => {
+                self.status = e.to_string();
+                return;
+            }
+        };
+        if ids.is_empty() {
+            self.selected_person = None;
+            self.chat_messages.clear();
+            self.selected_message = None;
+            self.open_message = None;
+            self.rebuild_people_cache();
+            self.status = format!("No messages left with {peer}");
+            return;
+        }
+        if ids.len() == 1 {
+            self.start_move_messages(ids, kind);
+            return;
+        }
+        self.pending_bulk_move = Some(PendingBulkMove {
+            kind,
+            ids,
+            scope: self.bulk_move_scope_label(),
+        });
+    }
+
+    pub(crate) fn confirm_pending_bulk_move(&mut self) {
+        let Some(pending) = self.pending_bulk_move.take() else {
+            return;
+        };
+        self.start_move_messages(pending.ids, pending.kind);
+    }
+
+    pub(crate) fn cancel_pending_bulk_move(&mut self) {
+        self.pending_bulk_move = None;
+    }
+
+    fn show_bulk_confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_bulk_move.clone() else {
+            return;
+        };
+        let n = pending.ids.len();
+        let verb = pending.kind.label();
+        let title = format!("Confirm {}", verb.to_ascii_lowercase());
+        let body = if n == 1 {
+            format!(
+                "{verb} 1 message in {}?\n\nThis cannot be undone from here.",
+                pending.scope
+            )
+        } else {
+            format!(
+                "{verb} {n} messages in {}?\n\nThis clears the current list view — cancel if you only meant one message.",
+                pending.scope
+            )
+        };
+
+        let mut confirm = false;
+        let mut cancel = false;
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("bulk_confirm_backdrop"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
+                ui.painter()
+                    .rect_filled(rect, 0.0, egui::Color32::from_black_alpha(90));
+                if resp.clicked() {
+                    cancel = true;
+                }
+            });
+
+        egui::Window::new(title)
+            .id(egui::Id::new("bulk_confirm_dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.label(egui::RichText::new(body).color(crate::theme::ink(ctx)));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let danger = pending.kind == SpecialFolderKind::Trash;
+                        let confirm_btn = if danger {
+                            ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!("{verb} {n}"))
+                                        .color(egui::Color32::from_rgb(0xc0, 0x3a, 0x3a)),
+                                )
+                                .fill(crate::theme::chip(ctx)),
+                            )
+                        } else {
+                            ui.button(format!("{verb} {n}"))
+                        };
+                        if confirm_btn.clicked() {
+                            confirm = true;
+                        }
+                    });
+                });
+            });
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if confirm {
+            self.confirm_pending_bulk_move();
+        } else if cancel {
+            self.cancel_pending_bulk_move();
+        }
     }
 
     fn start_move_messages(&mut self, ids: Vec<MessageId>, kind: SpecialFolderKind) {
@@ -1451,6 +1787,8 @@ and paste it here."
             self.mail_body_cache = None;
             self.mail_webview_req = None;
             self.mail_webview.last_error = None; // retry create on next HTML message
+            self.reader_headers_expanded = false;
+            self.reader_subject_expanded = false;
             self.selected_message = Some(id.clone());
             self.open_message = Some(msg);
         }
@@ -1482,7 +1820,7 @@ and paste it here."
         });
     }
 
-    /// Allow remote images for the open message’s sender (persisted; once per From address).
+    /// Allow remote images for the open message’s **domain** (persisted; covers the Stak).
     pub(crate) fn allow_remote_images_for_sender(&mut self) {
         let Some(addr) = self
             .open_message
@@ -1491,15 +1829,19 @@ and paste it here."
         else {
             return;
         };
+        let domain = mailbox_core::remote_image_domain(&addr);
         self.config.ui.allow_remote_images_sender(&addr);
         self.load_remote_images = true;
         self.mail_body_cache = None;
+        self.mail_images.clear();
         if let Err(e) = self.config.save(&self.paths.config_file()) {
             self.status = format!("Could not save image allowlist: {e}");
+        } else if !domain.is_empty() {
+            self.status = format!("Remote images allowed for *.{domain}");
         }
     }
 
-    /// Revoke remote images for the open message’s sender.
+    /// Revoke remote images for the open message’s domain.
     pub(crate) fn block_remote_images_for_sender(&mut self) {
         let Some(addr) = self
             .open_message
@@ -1508,11 +1850,15 @@ and paste it here."
         else {
             return;
         };
+        let domain = mailbox_core::remote_image_domain(&addr);
         self.config.ui.block_remote_images_sender(&addr);
         self.load_remote_images = false;
         self.mail_body_cache = None;
+        self.mail_images.clear();
         if let Err(e) = self.config.save(&self.paths.config_file()) {
             self.status = format!("Could not save image allowlist: {e}");
+        } else if !domain.is_empty() {
+            self.status = format!("Remote images blocked for *.{domain}");
         }
     }
 
@@ -1656,6 +2002,10 @@ and paste it here."
                 } => {
                     self.busy.sync = false;
                     self.last_sync_at = Instant::now();
+                    self.note_sync_stamp();
+                    if messages > 0 && self.config.ui.sound_new_mail {
+                        crate::sounds::play_new_mail(self.config.ui.sound_theme);
+                    }
                     self.account_id = account_id;
                     self.selected_folder = folder_path.clone();
                     self.status = if detail.is_empty() {
@@ -1712,6 +2062,20 @@ and paste it here."
             self.avatars.apply_msg(ctx, msg);
             ctx.request_repaint();
         }
+    }
+
+    /// Brand / company mark: prefer crisp bundled SVG; Logo.dev for the rest.
+    pub(crate) fn brand_texture(
+        &mut self,
+        ctx: &egui::Context,
+        brand_or_domain: &str,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(tex) = crate::brand_logos::texture(ctx, brand_or_domain) {
+            return Some(tex);
+        }
+        let dark = ctx.style().visuals.dark_mode;
+        self.logos
+            .texture(ctx, &self.paths.logos_dir(), brand_or_domain, dark)
     }
 
     pub(crate) fn resolve_avatar(
@@ -2049,8 +2413,23 @@ Try again, or check that a keyring/secret-service is running."
         Ok(())
     }
 
-    /// Fire a background sync when `ui.auto_sync_mins` elapses.
+    /// Deferred boot sync + periodic auto-sync (`ui.auto_sync_mins`).
     fn tick_auto_sync(&mut self, ctx: &egui::Context) {
+        if let Some(due) = self.startup_sync_at {
+            if self.busy.sync {
+                self.startup_sync_at = None;
+            } else if Instant::now() >= due {
+                self.startup_sync_at = None;
+                if !self.config.accounts.is_empty() {
+                    tracing::info!("startup sync — current folder only");
+                    self.start_sync(false);
+                }
+                return;
+            } else {
+                ctx.request_repaint_after((due - Instant::now()).max(Duration::from_millis(200)));
+            }
+        }
+
         let mins = self.config.ui.auto_sync_mins;
         if mins == 0 || self.busy.sync || self.config.accounts.is_empty() {
             return;
@@ -2081,7 +2460,7 @@ Try again, or check that a keyring/secret-service is running."
                 ui.monospace("/         focus search");
                 ui.monospace("g         sync selected folder");
                 ui.monospace("Shift+G   sync all folders");
-                ui.monospace("d         open Desk in browser");
+                ui.monospace("d         open Desk in browser (or click logo)");
                 ui.monospace("a         Todo (mail → Ailiak)");
                 ui.monospace("c         calendar (Desk days)");
                 ui.monospace("n         new message (compose)");
@@ -2126,12 +2505,16 @@ Try again, or check that a keyring/secret-service is running."
             }
             return;
         }
-        if self.show_help {
+        if self.show_help || self.show_feedback {
             return;
         }
 
         let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         if escape && !ctx.wants_keyboard_input() {
+            if self.pending_bulk_move.is_some() {
+                self.cancel_pending_bulk_move();
+                return;
+            }
             if self.compose.is_some() {
                 self.compose = None;
                 return;
@@ -2292,6 +2675,7 @@ impl App for MailboxApp {
 
         self.poll_bg();
         self.poll_avatars(ctx);
+        self.logos.poll(ctx);
         self.mail_images.poll(ctx);
         crate::mail_webview::MailWebView::pump_platform();
         theme::sync_system(ctx, self.config.ui.theme);
@@ -2304,8 +2688,18 @@ impl App for MailboxApp {
         if self.show_help {
             self.help_window(ctx);
         }
+        if FEEDBACK_UI_ENABLED && self.show_feedback {
+            self.feedback_window(ctx);
+        }
+        if self.pending_bulk_move.is_some() {
+            self.show_bulk_confirm_dialog(ctx);
+        }
 
         self.show_shell(ctx);
+
+        if self.config.ui.sound_clicks && ctx.input(|i| i.pointer.primary_clicked()) {
+            crate::sounds::play_click(self.config.ui.sound_theme);
+        }
 
         // Floating compose for New (and reply promoted to full via ⤢).
         if let Some(mut draft) = self.compose.take() {
@@ -2325,10 +2719,14 @@ impl App for MailboxApp {
         // wry child views always sit above egui — hide whenever composing.
         let hide_mail = self.show_settings
             || self.show_help
-            || self.compose.is_some();
+            || self.show_feedback
+            || self.compose.is_some()
+            || self.pending_bulk_move.is_some();
         if hide_mail {
+            self.mail_webview_miss_frames = 0;
             self.mail_webview.hide();
         } else if let Some(req) = self.mail_webview_req.take() {
+            self.mail_webview_miss_frames = 0;
             self.mail_webview.show_html(
                 frame,
                 &req.msg_id,
@@ -2339,7 +2737,12 @@ impl App for MailboxApp {
                 req.pixels_per_point,
             );
         } else {
-            self.mail_webview.hide();
+            // One missing frame is common while panels settle; don't park/unmap
+            // immediately (that path used to spam Gdk frame-clock asserts).
+            self.mail_webview_miss_frames = self.mail_webview_miss_frames.saturating_add(1);
+            if self.mail_webview_miss_frames >= 3 {
+                self.mail_webview.hide();
+            }
         }
         self.mail_webview.poll_links();
 
@@ -2354,4 +2757,24 @@ impl App for MailboxApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.mail_webview.destroy();
     }
+}
+
+/// Minimal application/x-www-form-urlencoded encoder for GitHub issue query params.
+fn query_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push('%');
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0xf) as usize] as char);
+            }
+        }
+    }
+    out
 }

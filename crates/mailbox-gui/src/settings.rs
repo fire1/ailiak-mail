@@ -16,6 +16,7 @@ use crate::theme;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Appearance,
+    Sounds,
     Accounts,
     Folders,
     Ailiak,
@@ -48,6 +49,7 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
+            Self::Sounds => "Sounds",
             Self::Accounts => "Accounts",
             Self::Folders => "Folders",
             Self::Ailiak => "Ailiak",
@@ -57,14 +59,16 @@ impl SettingsSection {
     pub fn blurb(self) -> &'static str {
         match self {
             Self::Appearance => "Theme and accent",
+            Self::Sounds => "New mail and click tones",
             Self::Accounts => "Mail accounts and avatars",
             Self::Folders => "Show, hide, and auto sync",
             Self::Ailiak => "Desk token and hashtag",
         }
     }
 
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Appearance,
+        Self::Sounds,
         Self::Accounts,
         Self::Folders,
         Self::Ailiak,
@@ -166,6 +170,7 @@ impl MailboxApp {
                             ui.set_width(content_w.max(0.0) - 4.0);
                             match self.settings_section {
                                 SettingsSection::Appearance => self.appearance_panel(ui),
+                                SettingsSection::Sounds => self.sounds_panel(ui),
                                 SettingsSection::Accounts => self.accounts_panel(ui),
                                 SettingsSection::Folders => self.folders_panel(ui),
                                 SettingsSection::Ailiak => self.ailiak_panel(ui),
@@ -271,6 +276,20 @@ impl MailboxApp {
             theme::apply_appearance(ui.ctx(), self.config.ui.theme, &self.config.ui.accent);
             self.persist_ui_prefs(ui.ctx());
         }
+
+        ui.add_space(24.0);
+        ui.label(RichText::new("Company logos").strong());
+        let logos_on = crate::logo_dev::LogoCache::configured();
+        ui.label(
+            RichText::new(if logos_on {
+                "Logo.dev CDN is configured (LOGO_DEV_PUBLISHABLE_KEY). Staks and list avatars load company marks from img.logo.dev."
+            } else {
+                "Set LOGO_DEV_PUBLISHABLE_KEY in `.env` to load company logos from Logo.dev."
+            })
+            .small()
+            .color(theme::mute(ui.ctx())),
+        );
+        ui.hyperlink_to("Logos provided by Logo.dev", "https://www.logo.dev");
     }
 
     fn persist_ui_prefs(&mut self, _ctx: &egui::Context) {
@@ -282,6 +301,93 @@ impl MailboxApp {
                 theme::resolved_label(self.config.ui.theme),
                 theme::resolve_accent(&self.config.ui.accent).label
             );
+        }
+    }
+
+    fn sounds_panel(&mut self, ui: &mut Ui) {
+        use mailbox_core::SoundTheme;
+
+        ui.label(
+            RichText::new("Sounds")
+                .strong()
+                .size(16.0)
+                .family(theme::nav_family()),
+        );
+        ui.label(
+            RichText::new("Short tones for new mail and optional click feedback.")
+                .small()
+                .color(theme::mute(ui.ctx())),
+        );
+        ui.add_space(16.0);
+
+        let mut new_mail = self.config.ui.sound_new_mail;
+        let mut clicks = self.config.ui.sound_clicks;
+        let mut theme_sel = self.config.ui.sound_theme;
+        let mut changed = false;
+
+        ui.label(RichText::new("Theme").strong());
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            for t in SoundTheme::ALL {
+                let selected = theme_sel == t;
+                let resp = ui
+                    .selectable_label(selected, t.label())
+                    .on_hover_text(t.blurb());
+                if resp.clicked() && !selected {
+                    theme_sel = t;
+                    changed = true;
+                }
+            }
+        });
+        ui.label(
+            RichText::new(theme_sel.blurb())
+                .small()
+                .color(theme::mute(ui.ctx())),
+        );
+        ui.add_space(14.0);
+
+        if ui
+            .checkbox(&mut new_mail, "New message sound")
+            .on_hover_text("Play when a sync fetches messages (on by default)")
+            .changed()
+        {
+            changed = true;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            if ui.small_button("Preview").clicked() {
+                crate::sounds::play_new_mail(theme_sel);
+            }
+        });
+        ui.add_space(10.0);
+        if ui
+            .checkbox(&mut clicks, "Click sounds")
+            .on_hover_text("Soft tick on pointer clicks")
+            .changed()
+        {
+            changed = true;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            if ui.small_button("Preview").clicked() {
+                crate::sounds::play_click(theme_sel);
+            }
+        });
+
+        if changed {
+            self.config.ui.sound_new_mail = new_mail;
+            self.config.ui.sound_clicks = clicks;
+            self.config.ui.sound_theme = theme_sel;
+            if let Err(e) = self.config.save(&self.paths.config_file()) {
+                self.status = e.to_string();
+            } else {
+                self.status = format!(
+                    "Sounds: {} · new mail {} · clicks {}",
+                    theme_sel.label(),
+                    if new_mail { "on" } else { "off" },
+                    if clicks { "on" } else { "off" }
+                );
+            }
         }
     }
 

@@ -26,6 +26,7 @@ md-5 = "0.10"
 reqwest = { workspace = true, features = ["blocking"] }
 resvg = "0.45"
 rfd = "0.15"
+rodio = { version = "0.20", default-features = false }
 sha2 = "0.10"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

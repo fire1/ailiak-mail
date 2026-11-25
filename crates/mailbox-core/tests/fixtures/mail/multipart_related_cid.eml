@@ -1,0 +1,17 @@
+From: a@example.com
+To: b@example.com
+Subject: logo
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="r1"
+
+--r1
+Content-Type: text/html; charset=utf-8
+
+<html><body><img src="cid:img1.png@example.com" alt="logo"><p>Hello CID</p></body></html>
+--r1
+Content-Type: image/png
+Content-ID: <img1.png@example.com>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--r1--

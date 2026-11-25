@@ -4,7 +4,9 @@
 //! through `build_mail_body` / `parse_raw_message`.
 
 use mailbox_core::message_parse::parse_raw_message;
-use mailbox_core::{build_mail_body, BodyBlock, InlineSeg, MailBody};
+use mailbox_core::{
+    build_mail_body, build_mail_html_document, BodyBlock, InlineSeg, MailBody,
+};
 
 fn all_text(body: &MailBody) -> String {
     let mut out = String::new();
@@ -312,6 +314,43 @@ fn plain_only_multipart_fallback_still_linkifies() {
     assert!(all_text(&body).contains("Hello Ignite"));
     assert!(has_link(&body, "View as a web page", "https://emails.microsoft.com/v/x"));
     assert!(!body.has_remote_images);
+}
+
+#[test]
+fn multipart_related_resolves_cid_to_data_url() {
+    let raw = include_bytes!("fixtures/mail/multipart_related_cid.eml");
+    let msg = parse_raw_message("acct", "INBOX", 7, true, raw).expect("parse eml");
+    assert!(
+        msg.body_html.contains("data:image/png;base64,"),
+        "cid must become data: URL: {}",
+        msg.body_html
+    );
+    assert!(
+        !msg.body_html.to_ascii_lowercase().contains("cid:img1"),
+        "unresolved cid left in body: {}",
+        msg.body_html
+    );
+    assert!(msg.body_html.contains("Hello CID"), "{}", msg.body_html);
+
+    let doc = build_mail_html_document(&msg.body_html, false, false);
+    assert!(doc.contains("img-src data:"), "{doc}");
+    assert!(
+        doc.contains("data:image/png;base64,"),
+        "inline image must survive remotes-blocked CSP: {doc}"
+    );
+    assert!(doc.contains("Hello CID"), "{doc}");
+}
+
+#[test]
+fn plain_only_eml_stores_no_synthesized_html() {
+    let raw = include_bytes!("fixtures/mail/plain_only.eml");
+    let msg = parse_raw_message("acct", "INBOX", 8, true, raw).expect("parse eml");
+    assert!(
+        msg.body_html.is_empty(),
+        "mail-parser synthesized HTML must not be stored: {}",
+        msg.body_html
+    );
+    assert!(msg.body_text.contains("Hello plain only"), "{}", msg.body_text);
 }
 
 #[test]

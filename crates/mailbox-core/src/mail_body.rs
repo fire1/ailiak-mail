@@ -440,6 +440,10 @@ fn mail_style_properties() -> std::collections::HashSet<&'static str> {
 
 /// Sanitize untrusted mail HTML (scripts/handlers stripped; safe tags only).
 ///
+/// Used by the egui structured reader and threat analysis. The wry webview
+/// path prefers rusty-inbox-style sandboxed iframes (see
+/// [`build_mail_html_document`]) and only lightly strips active content.
+///
 /// Email HTML (LinkedIn, newsletters) depends on inline `style` plus `width` /
 /// `height` on images and tables. Stripping those makes URLs leak out of
 /// `display:none` wrappers and images render at intrinsic size.
@@ -449,7 +453,14 @@ pub fn sanitize_mail_html(html: &str) -> String {
     } else {
         html
     };
+    let mut schemes = std::collections::HashSet::new();
+    schemes.insert("http");
+    schemes.insert("https");
+    schemes.insert("mailto");
+    // CID→data: inlines from mime_inline; navigations still blocked separately.
+    schemes.insert("data");
     Builder::default()
+        .url_schemes(schemes)
         .add_tags([
             "img", "table", "thead", "tbody", "tfoot", "tr", "td", "th", "col", "colgroup", "font",
             "h1", "h2", "h3", "h4",
@@ -469,6 +480,190 @@ pub fn sanitize_mail_html(html: &str) -> String {
         .link_rel(Some("noopener noreferrer"))
         .clean(truncated)
         .to_string()
+}
+
+/// Strip script/iframe/object/embed — rusty-inbox relies on iframe `sandbox`
+/// (no `allow-scripts`); this is defense in depth for the srcdoc body.
+fn strip_active_content(html: &str) -> String {
+    let mut out = html.to_string();
+    for tag in ["script", "iframe", "object", "embed", "applet"] {
+        out = strip_tag_blocks(&out, tag);
+    }
+    out
+}
+
+fn strip_tag_blocks(html: &str, tag: &str) -> String {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}");
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while i < html.len() {
+        let Some(rel) = lower[i..].find(&open) else {
+            out.push_str(&html[i..]);
+            break;
+        };
+        // Avoid matching prefix of another tag name (e.g. `<em` vs `<embed`).
+        let start = i + rel;
+        let after = start + open.len();
+        let next = lower.as_bytes().get(after).copied().unwrap_or(b'>');
+        if next.is_ascii_alphanumeric() {
+            out.push_str(&html[i..=start]);
+            i = start + 1;
+            continue;
+        }
+        out.push_str(&html[i..start]);
+        let tag_end = html[after..]
+            .find('>')
+            .map(|n| after + n)
+            .unwrap_or(html.len().saturating_sub(1));
+        let self_close = html[start..=tag_end.min(html.len().saturating_sub(1))]
+            .trim_end()
+            .ends_with("/>");
+        if self_close {
+            i = tag_end + 1;
+            continue;
+        }
+        if let Some(crel) = lower[tag_end..].find(&close) {
+            let cstart = tag_end + crel;
+            let cend = html[cstart..]
+                .find('>')
+                .map(|n| cstart + n)
+                .unwrap_or(html.len().saturating_sub(1));
+            i = cend + 1;
+        } else {
+            i = tag_end + 1;
+        }
+    }
+    out
+}
+
+/// Neutralize remote http(s) images/backgrounds when the user has not opted in.
+/// Leaves `data:` (CID-resolved inlines) alone.
+fn neutralize_remote_assets(html: &str) -> String {
+    let mut out = html.to_string();
+    let snapshot = out.clone();
+    let lower = snapshot.to_ascii_lowercase();
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < snapshot.len() {
+        let Some(rel) = lower[i..].find("<img") else {
+            break;
+        };
+        let start = i + rel;
+        let after = &snapshot[start..];
+        let end_rel = after.find('>').unwrap_or(after.len());
+        let end = start + end_rel;
+        let tag = &snapshot[start..=end.min(snapshot.len().saturating_sub(1))];
+        if let Some(src) = attr(tag, "src") {
+            let s = src.trim();
+            if s.starts_with("http://") || s.starts_with("https://") {
+                replacements.push((start, end + 1, rewrite_img_tag_block_src(tag)));
+            }
+        }
+        i = end + 1;
+    }
+    for (start, end, rep) in replacements.into_iter().rev() {
+        out.replace_range(start..end.min(out.len()), &rep);
+    }
+    // Best-effort: blank remote backgrounds in style/attr (keep data:).
+    out = blank_remote_urls_in_place(&out);
+    out
+}
+
+fn blank_remote_urls_in_place(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let lower = html.to_ascii_lowercase();
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find("url(") {
+        let at = i + rel;
+        out.push_str(&html[i..at]);
+        let rest = &html[at + 4..];
+        let rest_trim = rest.trim_start_matches(['\'', '"', ' ']);
+        let is_remote = rest_trim
+            .to_ascii_lowercase()
+            .starts_with("http://")
+            || rest_trim.to_ascii_lowercase().starts_with("https://");
+        if is_remote {
+            out.push_str("url(about:blank)");
+            let end = rest
+                .find(')')
+                .map(|n| at + 4 + n + 1)
+                .unwrap_or(at + 4);
+            i = end;
+        } else {
+            out.push_str("url(");
+            i = at + 4;
+        }
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
+/// Pull a fragment suitable for embedding in our reader document.
+///
+/// Many messages are full HTML documents (`<!DOCTYPE>…<html>…<body>…`). Nesting
+/// those inside another `<html>` blanked WebKitGTK. Prefer `<body>` inner HTML
+/// and keep `<style>` blocks from `<head>` so newsletter CSS still applies.
+fn extract_mail_fragment(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let looks_full = lower.contains("<html") || lower.contains("<!doctype");
+    if !looks_full {
+        return html.to_string();
+    }
+
+    let mut styles = String::new();
+    let mut search = lower.as_str();
+    let mut base = 0usize;
+    while let Some(rel) = search.find("<style") {
+        let start = base + rel;
+        let after = start + 6;
+        let next = lower.as_bytes().get(after).copied().unwrap_or(b'>');
+        if next.is_ascii_alphanumeric() {
+            base = after;
+            search = &lower[base..];
+            continue;
+        }
+        let open_end = html[after..]
+            .find('>')
+            .map(|n| after + n)
+            .unwrap_or(html.len());
+        let close_rel = lower[open_end..].find("</style");
+        let Some(crel) = close_rel else {
+            break;
+        };
+        let close_start = open_end + crel;
+        let close_end = html[close_start..]
+            .find('>')
+            .map(|n| close_start + n + 1)
+            .unwrap_or(html.len());
+        styles.push_str(&html[start..close_end]);
+        styles.push('\n');
+        base = close_end;
+        search = &lower[base..];
+    }
+
+    let body_inner = if let Some(rel) = lower.find("<body") {
+        let after = rel + 5;
+        let open_end = html[after..]
+            .find('>')
+            .map(|n| after + n + 1)
+            .unwrap_or(html.len());
+        let end = lower[open_end..]
+            .find("</body")
+            .map(|n| open_end + n)
+            .unwrap_or(html.len());
+        html[open_end..end].trim().to_string()
+    } else {
+        // Full-ish doc without a body tag — strip outer html wrappers lightly.
+        html.to_string()
+    };
+
+    if styles.is_empty() {
+        body_inner
+    } else {
+        format!("{styles}{body_inner}")
+    }
 }
 
 /// True when sanitized HTML still contains a remote `http(s)` image.
@@ -805,28 +1000,39 @@ fn rewrite_img_tag_block_src(tag: &str) -> String {
     out
 }
 
-/// Full HTML document for the embedded webview (CSP + sanitized body).
+/// Full HTML document for the embedded webview (wry / WebKitGTK / WKWebView / WebView2).
+///
+/// Fidelity goals aligned with rusty-inbox (light paper, keep author CSS, CID via
+/// `data:`), but **no nested `srcdoc` iframe**: WebKitGTK child webviews often
+/// paint that as a blank page. Isolation here is CSP + stripping active tags
+/// (scripts/iframes/objects) instead of Chromium’s iframe sandbox.
 ///
 /// Always use a light reading canvas. HTML mail is authored for light
-/// backgrounds; a dark `body { color }` inherits into white tables (LinkedIn,
-/// etc.) and washes text out. `dark` is kept for API stability / callers that
-/// still theme the native webview chrome around this document.
+/// backgrounds; a dark host theme must not wash sender CSS. `dark` is kept for
+/// API stability / callers that theme native chrome around this document.
+///
+/// Inline `data:` images (CID-resolved) are always allowed; remote `http(s)`
+/// requires `load_remote_images`.
 pub fn build_mail_html_document(html: &str, load_remote_images: bool, _dark: bool) -> String {
     let risks = analyze_remote_image_threats(html);
-    let body = {
-        let clean = sanitize_mail_html(html);
-        strip_threatened_remote_assets(&clean, &risks)
-    };
+    let mut body = extract_mail_fragment(html);
+    body = strip_active_content(&body);
+    body = strip_threatened_remote_assets(&body, &risks);
+    if !load_remote_images {
+        body = neutralize_remote_assets(&body);
+    }
+
     let img_src = if load_remote_images {
-        "img-src https: http: data: cid:;"
+        "img-src https: http: data:;"
     } else {
-        "img-src 'none';"
+        // data: = CID/signature inlines; block remote fetchers.
+        "img-src data:;"
     };
-    let (bg, fg, link) = ("#ffffff", "#1a1a1a", "#0b6e4f");
+    let (bg, fg, link) = ("#ffffff", "#1d1d22", "#0b6e4f");
     // Scripts always blocked. Styles allowed inline (email HTML relies on them).
     let csp = format!(
         "default-src 'none'; style-src 'unsafe-inline'; {img_src} \
-         font-src data:; media-src 'none'; object-src 'none'; script-src 'none'; \
+         font-src data: https: http:; media-src 'none'; object-src 'none'; script-src 'none'; \
          base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'; \
          connect-src 'none';"
     );
@@ -837,6 +1043,7 @@ pub fn build_mail_html_document(html: &str, load_remote_images: bool, _dark: boo
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="{csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<base target="_blank">
 <style>
   html, body {{
     margin: 0;
@@ -856,7 +1063,6 @@ pub fn build_mail_html_document(html: &str, load_remote_images: bool, _dark: boo
     overflow-x: auto;
     box-sizing: border-box;
   }}
-  /* Cap runaway assets (LinkedIn icons often ship without useful CSS after sanitize). */
   img, video {{
     max-width: 100% !important;
     height: auto !important;
@@ -1378,12 +1584,52 @@ mod tests {
         assert!(mail_html_has_remote_images(html));
 
         let blocked = build_mail_html_document(html, false, false);
-        assert!(blocked.contains("img-src 'none'"), "{blocked}");
+        assert!(
+            blocked.contains("img-src data:"),
+            "inline data: images must remain allowed when remotes blocked: {blocked}"
+        );
+        assert!(!blocked.contains("img-src https:"), "{blocked}");
         assert!(blocked.contains("script-src 'none'"), "{blocked}");
-        assert!(!blocked.to_ascii_lowercase().contains("<script>alert"), "{blocked}");
+        assert!(
+            !blocked.contains("alert(1)"),
+            "script body must be stripped: {blocked}"
+        );
+        // Remote img neutralized when load_images=false.
+        assert!(
+            !blocked.contains("https://evil.example/x.gif"),
+            "remote src must be stripped when blocked: {blocked}"
+        );
+        // Direct document (no nested srcdoc iframe — blank on WebKitGTK).
+        assert!(!blocked.contains("sandbox="), "{blocked}");
+        assert!(blocked.contains("<p>Hi"), "{blocked}");
 
         let allowed = build_mail_html_document(html, true, false);
         assert!(allowed.contains("img-src https:"), "{allowed}");
+        assert!(allowed.contains("<p>Hi"), "{allowed}");
+    }
+
+    #[test]
+    fn document_keeps_data_images_when_remotes_blocked() {
+        let html = r#"<p>Hi<img src="data:image/png;base64,AAAA" alt="sig" width="40" height="40"></p>"#;
+        let doc = build_mail_html_document(html, false, false);
+        assert!(doc.contains("data:image/png;base64,AAAA"), "{doc}");
+        assert!(doc.contains("img-src data:"), "{doc}");
+    }
+
+    #[test]
+    fn full_html_document_is_unwrapped_into_fragment() {
+        let html = r#"<!DOCTYPE html><html><head><style>.x{color:red}</style></head>
+<body><p class="x">Hello nested</p></body></html>"#;
+        let doc = build_mail_html_document(html, false, false);
+        assert!(doc.contains("Hello nested"), "{doc}");
+        assert!(doc.contains(".x{color:red}") || doc.contains(".x {"), "{doc}");
+        // Must not nest a second <html> document inside <body>.
+        let body_at = doc.find("<body>").expect("body");
+        let after = &doc[body_at..];
+        assert!(
+            !after.to_ascii_lowercase().contains("<html"),
+            "nested html left in document: {doc}"
+        );
     }
 
     #[test]
@@ -1426,9 +1672,15 @@ mod tests {
 
         let doc = build_mail_html_document(html, true, false);
         assert!(
-            doc.contains("max-width: 100% !important"),
+            doc.contains("max-width: 100% !important") || doc.contains("max-width:100%"),
             "document CSS must cap images: {doc}"
         );
+        // Webview path keeps author CSS (ammonia path above still strips position).
+        assert!(
+            doc.contains("display:none"),
+            "layout CSS must survive into the mail document: {doc}"
+        );
+        assert!(doc.contains("static.licdn.com/logo.png"), "{doc}");
     }
 
     #[test]

@@ -1,9 +1,12 @@
 //! Native OS webview (wry) for HTML mail — WebKitGTK / WKWebView / WebView2.
 //!
-//! Security: document is ammonia-sanitized + CSP; navigations are allowlisted;
-//! remote images require an explicit opt-in rebuild.
+//! Document is CSP-locked + script-stripped (see
+//! `mailbox_core::build_mail_html_document`). Navigations are allowlisted;
+//! remote images require an explicit opt-in rebuild; CID inlines are `data:` URLs.
+//! Nested `srcdoc` iframes are avoided — they paint blank under WebKitGTK.
 
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use egui::Rect;
 use mailbox_core::oauth::open_url;
@@ -16,6 +19,8 @@ use wry::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
 use wry::raw_window_handle::HasWindowHandle;
 use wry::{NewWindowResponse, Rect as WryRect, WebView, WebViewBuilder};
+
+use crate::theme;
 
 enum ExtLink {
     Open(String),
@@ -34,6 +39,16 @@ pub struct MailWebViewRequest {
     pub dark: bool,
 }
 
+/// Pending HTML load — waits out rapid list navigation so WebKit does not thrash
+/// (black flash) through every intermediate message.
+struct PendingLoad {
+    msg_id: MessageId,
+    body_html: String,
+    load_images: bool,
+    dark: bool,
+    since: Instant,
+}
+
 pub struct MailWebView {
     webview: Option<WebView>,
     /// (msg_id, load_images, dark)
@@ -46,6 +61,7 @@ pub struct MailWebView {
     visible: bool,
     link_tx: Sender<ExtLink>,
     link_rx: Receiver<ExtLink>,
+    pending: Option<PendingLoad>,
     /// Last create error (e.g. Wayland without child webview support).
     pub last_error: Option<String>,
 }
@@ -62,10 +78,14 @@ impl Default for MailWebView {
             visible: false,
             link_tx,
             link_rx,
+            pending: None,
             last_error: None,
         }
     }
 }
+
+/// Settle time before committing a new message body (skips black flashes on fast clicks).
+const LOAD_DEBOUNCE: Duration = Duration::from_millis(70);
 
 impl MailWebView {
     /// Pump GTK on Linux (required alongside winit/eframe).
@@ -102,10 +122,23 @@ impl MailWebView {
             return;
         }
         self.visible = false;
+        self.pending = None;
         if let Some(wv) = &self.webview {
-            // gtk_widget_hide can assert on a dead GdkFrameClock for X11 child
-            // views; ignore errors and avoid repeat hide calls.
-            let _ = wv.set_visible(false);
+            #[cfg(target_os = "linux")]
+            {
+                // Do not call set_visible(false): gtk_widget_hide /
+                // _gdk_frame_clock_freeze asserts GDK_IS_FRAME_CLOCK on wry’s
+                // X11 child WebKit views. Park off-screen instead.
+                let park = WryRect {
+                    position: Position::Physical(PhysicalPosition::new(-10_000, -10_000)),
+                    size: Size::Physical(PhysicalSize::new(1, 1)),
+                };
+                let _ = wv.set_bounds(park);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = wv.set_visible(false);
+            }
         }
     }
 
@@ -120,6 +153,7 @@ impl MailWebView {
         self.last_bounds = None;
         self.last_ppp = 0.0;
         self.visible = false;
+        self.pending = None;
         drop(wv);
         Self::pump_platform();
     }
@@ -154,81 +188,121 @@ impl MailWebView {
         }
 
         let ppp = pixels_per_point.max(0.1);
-
-        let needs_reload = self
-            .loaded
-            .as_ref()
-            .map(|(id, imgs, was_dark)| {
-                id != msg_id || *imgs != load_images || *was_dark != dark
-            })
-            .unwrap_or(true);
-
-        // Mail document + native chrome are always light; theme flips don't need recreate.
+        let theme_changed = self.dark != dark;
         self.dark = dark;
 
-        // On Linux, prefer recreate over set_bounds: wry sizes the X11 child at create,
-        // but set_bounds uses GTK's scale (often 1.0) and shrinks/misplaces the view.
-        // Elsewhere, set_bounds is fine for small moves. Also recreate on DPI/scale change
-        // (e.g. dragged to another monitor) — physical pixels depend on ppp.
-        if self.webview.is_some() && self.needs_recreate_for_bounds(bounds, ppp) {
+        let already = self
+            .loaded
+            .as_ref()
+            .is_some_and(|(id, imgs, was_dark)| {
+                id == msg_id && *imgs == load_images && *was_dark == dark
+            });
+
+        if already {
+            self.pending = None;
+        } else {
+            let same_pending = self.pending.as_ref().is_some_and(|p| {
+                p.msg_id == *msg_id && p.load_images == load_images && p.dark == dark
+            });
+            if !same_pending {
+                self.pending = Some(PendingLoad {
+                    msg_id: msg_id.clone(),
+                    body_html: body_html.to_string(),
+                    load_images,
+                    dark,
+                    since: Instant::now(),
+                });
+                // Paint theme chrome immediately so WebKit does not sit on black
+                // while the debounce waits / HTML parses.
+                self.apply_shell_backdrop(dark);
+            }
+        }
+
+        // Recreate only on DPI change — destroy/recreate thrashing trips
+        // Gdk-CRITICAL `_gdk_frame_clock_freeze` on Linux X11 child views.
+        // Position/size drift uses set_bounds with Physical pixels (same as create).
+        if self.webview.is_some() && self.needs_recreate_for_ppp(ppp) {
             self.destroy();
         }
 
         if self.webview.is_none() {
-            match self.create(window, bounds, ppp) {
+            match self.create(window, bounds, ppp, dark) {
                 Ok(()) => self.last_error = None,
                 Err(e) => {
                     self.last_error = Some(e);
                     return;
                 }
             }
+        } else if theme_changed {
+            self.apply_shell_backdrop(dark);
         }
 
         if let Some(wv) = &self.webview {
+            let was_hidden = !self.visible;
+            let drifted = self.last_bounds.is_none_or(|prev| {
+                (prev.min.x - bounds.min.x).abs() > 0.5
+                    || (prev.min.y - bounds.min.y).abs() > 0.5
+                    || (prev.width() - bounds.width()).abs() > 0.5
+                    || (prev.height() - bounds.height()).abs() > 0.5
+            });
+            // Always restore bounds after a park-hide, and on ordinary moves.
+            if was_hidden || drifted {
+                let _ = wv.set_bounds(to_wry_rect(bounds, ppp));
+                self.last_bounds = Some(bounds);
+                self.last_ppp = ppp;
+            }
             #[cfg(not(target_os = "linux"))]
-            {
-                let drifted = self.last_bounds.is_none_or(|prev| {
-                    (prev.min.x - bounds.min.x).abs() > 0.5
-                        || (prev.min.y - bounds.min.y).abs() > 0.5
-                        || (prev.width() - bounds.width()).abs() > 0.5
-                        || (prev.height() - bounds.height()).abs() > 0.5
-                });
-                if drifted {
-                    let _ = wv.set_bounds(to_wry_rect(bounds, ppp));
-                    self.last_bounds = Some(bounds);
-                }
-            }
-            // Linux: create() already applied bounds; set_bounds fights GTK vs winit scale.
-            if !self.visible {
+            if was_hidden {
                 let _ = wv.set_visible(true);
-                self.visible = true;
             }
-            if needs_reload {
-                let doc = build_mail_html_document(body_html, load_images, dark);
-                if let Err(e) = wv.load_html(&doc) {
-                    self.last_error = Some(format!("load_html: {e}"));
-                    return;
-                }
-                self.loaded = Some((msg_id.clone(), load_images, dark));
+            self.visible = true;
+        }
+
+        let commit = self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.since.elapsed() >= LOAD_DEBOUNCE);
+        if commit {
+            if let Some(pending) = self.pending.take() {
+                self.commit_html(
+                    &pending.msg_id,
+                    &pending.body_html,
+                    pending.load_images,
+                    pending.dark,
+                );
             }
+        } else if self.pending.is_some() {
+            // Keep animating until debounce elapses.
+            // Caller’s egui spinner path already request_repaints while is_loading.
         }
     }
 
-    fn needs_recreate_for_bounds(&self, bounds: Rect, ppp: f32) -> bool {
-        if self.last_ppp > 0.0 && (self.last_ppp - ppp).abs() > 0.01 {
-            return true;
-        }
-        let Some(prev) = self.last_bounds else {
-            return false;
+    fn apply_shell_backdrop(&self, dark: bool) {
+        let Some(wv) = &self.webview else {
+            return;
         };
-        // Linux: recreate on drift (set_bounds fights X11 DPI). Slightly larger
-        // threshold cuts recreate thrash that trips Gdk frame-clock asserts.
-        // Elsewhere: only large jumps; small moves use set_bounds.
-        let thresh = if cfg!(target_os = "linux") { 8.0 } else { 8.0 };
-        (prev.width() - bounds.width()).abs() > thresh
-            || (prev.height() - bounds.height()).abs() > thresh
-            || (prev.min.x - bounds.min.x).abs() > thresh
-            || (prev.min.y - bounds.min.y).abs() > thresh
+        let bg = theme::mail_webview_backdrop_rgba(dark);
+        // Color only while debouncing — avoid load_html thrash (WebKit/GDK
+        // frame-clock churn) on every intermediate list selection.
+        let _ = wv.set_background_color(bg);
+    }
+
+    fn commit_html(&mut self, msg_id: &MessageId, body_html: &str, load_images: bool, dark: bool) {
+        let Some(wv) = &self.webview else {
+            return;
+        };
+        let bg = theme::mail_webview_backdrop_rgba(dark);
+        let _ = wv.set_background_color(bg);
+        let doc = build_mail_html_document(body_html, load_images, dark);
+        if let Err(e) = wv.load_html(&doc) {
+            self.last_error = Some(format!("load_html: {e}"));
+            return;
+        }
+        self.loaded = Some((msg_id.clone(), load_images, dark));
+    }
+
+    fn needs_recreate_for_ppp(&self, ppp: f32) -> bool {
+        self.last_ppp > 0.0 && (self.last_ppp - ppp).abs() > 0.01
     }
 
     fn create(
@@ -236,16 +310,17 @@ impl MailWebView {
         window: &impl HasWindowHandle,
         bounds: Rect,
         pixels_per_point: f32,
+        dark: bool,
     ) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         ensure_gtk();
 
         let tx = self.link_tx.clone();
-        // HTML mail always paints on a light canvas (see build_mail_html_document).
-        // Keep the native view white too so dark app chrome doesn't letterbox the body.
-        let bg_rgba = (255, 255, 255, 255);
-        let placeholder =
-            "<!DOCTYPE html><html><body style=\"background:#fff;margin:0\"></body></html>";
+        let bg_rgba = theme::mail_webview_backdrop_rgba(dark);
+        let css = theme::mail_webview_backdrop_css(dark);
+        let placeholder = format!(
+            "<!DOCTYPE html><html><body style=\"background:{css};margin:0\"></body></html>"
+        );
         let builder = WebViewBuilder::new()
             .with_transparent(false)
             .with_background_color(bg_rgba)
@@ -305,6 +380,7 @@ set GDK_BACKEND=x11 or restart AiliakMail)"
         self.last_bounds = Some(bounds);
         self.last_ppp = pixels_per_point.max(0.1);
         self.visible = true;
+        self.dark = dark;
         Ok(())
     }
 }

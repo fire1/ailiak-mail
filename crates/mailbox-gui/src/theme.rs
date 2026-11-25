@@ -94,6 +94,8 @@ pub struct Palette {
     pub list_card: Color32,
     /// Mail reader card fill.
     pub reader_card: Color32,
+    /// Unread message row fill (stands out on dark list chrome).
+    pub unread_row: Color32,
 }
 
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -122,6 +124,8 @@ fn light_palette(accent: Color32) -> Palette {
         // Very light accent wash (Sass-like mix of white ← accent).
         list_card: mix(Color32::WHITE, accent, 0.045),
         reader_card: Color32::WHITE,
+        // Soft lift vs list_card wash so unread still reads as “new”.
+        unread_row: Color32::WHITE,
     }
 }
 
@@ -144,6 +148,8 @@ fn dark_palette(accent: Color32) -> Palette {
         // Slightly darker than paper, with a touch of accent.
         list_card: mix(mix(paper, Color32::BLACK, 0.08), accent, 0.08),
         reader_card: paper,
+        // White rows on the darker list card so new mail is obvious.
+        unread_row: Color32::WHITE,
     }
 }
 
@@ -517,6 +523,19 @@ pub fn unread(ctx: &egui::Context) -> Color32 {
     palette(ctx).unread
 }
 
+pub fn unread_row(ctx: &egui::Context) -> Color32 {
+    palette(ctx).unread_row
+}
+
+/// Ink / mute / accent for text painted on [`unread_row`] (always light surface).
+pub fn unread_row_ink() -> Color32 {
+    Color32::from_rgb(0x3a, 0x42, 0x40)
+}
+
+pub fn unread_row_mute() -> Color32 {
+    Color32::from_rgb(0x6e, 0x74, 0x72)
+}
+
 pub fn panel(ctx: &egui::Context) -> Color32 {
     palette(ctx).panel
 }
@@ -560,4 +579,27 @@ pub fn list_scroll_style() -> egui::style::ScrollStyle {
 
 pub fn reader_card(ctx: &egui::Context) -> Color32 {
     palette(ctx).reader_card
+}
+
+/// Native webview / loading underlay while HTML mail paints (matches reader chrome).
+/// HTML message content stays on a light paper inside the document; this color is
+/// what you see between messages so WebKit does not flash pure black.
+pub fn mail_webview_backdrop(dark: bool) -> Color32 {
+    // Accent does not affect reader_card; pass a dummy.
+    let accent = Color32::from_rgb(0x0b, 0x6e, 0x4f);
+    if dark {
+        dark_palette(accent).reader_card
+    } else {
+        light_palette(accent).reader_card
+    }
+}
+
+pub fn mail_webview_backdrop_rgba(dark: bool) -> (u8, u8, u8, u8) {
+    let c = mail_webview_backdrop(dark);
+    (c.r(), c.g(), c.b(), 255)
+}
+
+pub fn mail_webview_backdrop_css(dark: bool) -> String {
+    let c = mail_webview_backdrop(dark);
+    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
 }

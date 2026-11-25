@@ -100,11 +100,17 @@ pub(crate) fn known_brand(domain: &str) -> Option<(&'static str, &'static str)> 
         ("meta.com", "meta", "Meta"),
         ("twitter.com", "x", "X"),
         ("x.com", "x", "X"),
+        ("x.ai", "x", "X"),
         ("linkedin.com", "linkedin", "LinkedIn"),
         ("github.com", "github", "GitHub"),
         ("gitlab.com", "gitlab", "GitLab"),
         ("discord.com", "discord", "Discord"),
         ("discordapp.com", "discord", "Discord"),
+        // Teams before generic microsoft.com so notification hosts get the Teams mark.
+        ("teams.mail.microsoft.com", "teams", "Teams"),
+        ("email.teams.microsoft.com", "teams", "Teams"),
+        ("teams.microsoft.com", "teams", "Teams"),
+        ("teams.mail.microsoft", "teams", "Teams"),
         ("microsoft.com", "microsoft", "Microsoft"),
         ("outlook.com", "microsoft", "Microsoft"),
         ("hotmail.com", "microsoft", "Microsoft"),
@@ -232,5 +238,19 @@ mod tests {
             Some("facebook")
         );
         assert_eq!(brand_id_for_addr("hello@tm.openai.com"), Some("openai"));
+    }
+
+    #[test]
+    fn maps_x_ai_and_teams() {
+        assert_eq!(brand_id_for_addr("noreply@x.com"), Some("x"));
+        assert_eq!(brand_id_for_addr("hello@mail.x.ai"), Some("x"));
+        assert_eq!(
+            brand_id_for_addr("noreply@email.teams.microsoft.com"),
+            Some("teams")
+        );
+        assert_eq!(
+            brand_id_for_addr("bot@teams.mail.microsoft"),
+            Some("teams")
+        );
     }
 }

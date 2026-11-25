@@ -42,14 +42,26 @@ pub fn parse_raw_message(
     let cc = addresses(parsed.cc());
 
     let (mut body_text, mut body_html) = extract_bodies(&parsed);
+
+    // mail-parser synthesizes HTML from plain; only keep HTML when a real part exists.
+    if !crate::mime_inline::message_has_real_html(raw) {
+        body_html.clear();
+    } else if crate::mime_inline::has_cid_refs(&body_html) {
+        // Resolve before truncate so data: URLs are not cut mid-stream.
+        body_html = crate::mime_inline::resolve_inline_images(&body_html, raw);
+    }
+
     let snippet = snippet_from(&body_text);
 
     if body_text.len() > 512 * 1024 {
         body_text.truncate(512 * 1024);
         body_text.push_str("\n…[truncated]");
     }
-    if body_html.len() > 512 * 1024 {
-        body_html.truncate(512 * 1024);
+    // Cap after CID→data: rewrite. Large inlines can exceed 512 KiB; keep a higher
+    // ceiling so signatures/logos survive.
+    const HTML_CAP: usize = 2 * 1024 * 1024;
+    if body_html.len() > HTML_CAP {
+        body_html.truncate(HTML_CAP);
     }
 
     Some(Message {

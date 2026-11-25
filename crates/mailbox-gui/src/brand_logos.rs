@@ -4,11 +4,11 @@ use egui::{ColorImage, Context, Id, TextureHandle, TextureOptions};
 
 use crate::svg_tex;
 
-const LOGO_PX: u32 = 64;
+const LOGO_PX: u32 = 96;
 
 /// On-screen size in the Staks rail / list avatars.
-pub const DISPLAY_SIZE: f32 = 18.0;
-pub const LIST_SIZE: f32 = 26.0;
+pub const DISPLAY_SIZE: f32 = 20.0;
+pub const LIST_SIZE: f32 = 28.0;
 
 #[derive(Clone)]
 struct BrandPack {
@@ -22,6 +22,7 @@ struct BrandPack {
     gitlab: TextureHandle,
     discord: TextureHandle,
     microsoft: TextureHandle,
+    teams: TextureHandle,
     apple: TextureHandle,
     amazon: TextureHandle,
     stripe: TextureHandle,
@@ -54,7 +55,7 @@ fn load(ctx: &Context, name: &str, svg: &str) -> TextureHandle {
 
 fn pack(ctx: &Context) -> BrandPack {
     // Bump id when brand set changes so cached textures refresh.
-    let id = Id::new("ailiakmail_brand_logos_v2");
+    let id = Id::new("ailiakmail_brand_logos_v7");
     if let Some(p) = ctx.data(|d| d.get_temp::<BrandPack>(id)) {
         return p;
     }
@@ -89,6 +90,7 @@ fn pack(ctx: &Context) -> BrandPack {
             "brand-microsoft",
             include_str!("../assets/brands/microsoft.svg"),
         ),
+        teams: load(ctx, "brand-teams", include_str!("../assets/brands/teams.svg")),
         apple: load(ctx, "brand-apple", include_str!("../assets/brands/apple.svg")),
         amazon: load(ctx, "brand-amazon", include_str!("../assets/brands/amazon.svg")),
         stripe: load(ctx, "brand-stripe", include_str!("../assets/brands/stripe.svg")),
@@ -157,6 +159,7 @@ fn tex_for<'a>(pack: &'a BrandPack, brand_id: &str) -> Option<&'a TextureHandle>
         "gitlab" => &pack.gitlab,
         "discord" => &pack.discord,
         "microsoft" => &pack.microsoft,
+        "teams" => &pack.teams,
         "apple" => &pack.apple,
         "amazon" => &pack.amazon,
         "stripe" => &pack.stripe,
@@ -186,4 +189,18 @@ fn tex_for<'a>(pack: &'a BrandPack, brand_id: &str) -> Option<&'a TextureHandle>
 
 pub fn texture(ctx: &Context, brand_id: &str) -> Option<TextureHandle> {
     tex_for(&pack(ctx), brand_id).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn teams_official_svg_rasterizes() {
+        let svg = include_str!("../assets/brands/teams.svg");
+        let img = crate::svg_tex::rasterize_svg(svg, 64);
+        assert_eq!(img.width(), 64);
+        assert!(img.height() >= 48);
+        // Must have opaque purple/white pixels (not empty).
+        let opaque = img.pixels.iter().filter(|c| c.a() > 200).count();
+        assert!(opaque > 100, "expected filled Teams mark, opaque={opaque}");
+    }
 }

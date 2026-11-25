@@ -330,40 +330,180 @@ pub struct UiConfig {
     /// Minutes between automatic syncs. `0` disables auto sync. Default: 60 (1 hour).
     #[serde(default = "default_auto_sync_mins")]
     pub auto_sync_mins: u32,
-    /// Lowercased `From` addresses allowed to load remote images (privacy allowlist).
+    /// Remote-image allowlist entries: apex domains (`google.com`) and/or legacy
+    /// full addresses (`noreply@accounts.google.com`). New allows store the domain
+    /// so a whole Stak (e.g. Google) shares one click.
     #[serde(default)]
     pub remote_image_senders: Vec<String>,
     /// Show Gmail “All Mail” in the Folders rail (hidden by default — use Archive).
     #[serde(default)]
     pub show_all_mail: bool,
+    /// Play a short tone when sync fetches messages. Default: on.
+    #[serde(default = "default_sound_new_mail")]
+    pub sound_new_mail: bool,
+    /// Soft click tone for pointer clicks. Default: off.
+    #[serde(default)]
+    pub sound_clicks: bool,
+    /// Tone set for new-mail / click sounds.
+    #[serde(default)]
+    pub sound_theme: SoundTheme,
+}
+
+/// Preset tone packs for UI / new-mail sounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SoundTheme {
+    /// Two soft mid tones (default).
+    #[default]
+    Calm,
+    /// Higher sparkle chime.
+    Bright,
+    /// Lower warm taps.
+    Soft,
+}
+
+impl SoundTheme {
+    pub const ALL: [Self; 3] = [Self::Calm, Self::Bright, Self::Soft];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Calm => "calm",
+            Self::Bright => "bright",
+            Self::Soft => "soft",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Calm => "Calm",
+            Self::Bright => "Bright",
+            Self::Soft => "Soft",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Self::Calm => "Gentle two-note chime",
+            Self::Bright => "Sparkly high chime",
+            Self::Soft => "Warm low taps",
+        }
+    }
 }
 
 /// Normalize a mail address for allowlist lookup (trim + lowercase).
 pub fn normalize_mail_addr(addr: &str) -> String {
-    addr.trim().to_lowercase()
+    addr.trim()
+        .trim_matches(|c| c == '<' || c == '>')
+        .to_lowercase()
+}
+
+/// Host part of an address (`accounts.google.com` from `a@accounts.google.com`).
+pub fn mail_host(from_addr: &str) -> String {
+    let addr = normalize_mail_addr(from_addr);
+    let host = addr.rsplit('@').next().unwrap_or("").trim();
+    host.trim_matches(|c| c == '<' || c == '>').to_string()
+}
+
+/// Apex domain for image allowlisting (`google.com` from `accounts.google.com`).
+///
+/// Uses a small multi-part TLD list (`.co.uk`, …); everything else keeps the
+/// last two labels — enough for Google / Microsoft / LinkedIn stacks.
+pub fn remote_image_domain(from_addr: &str) -> String {
+    apex_domain(&mail_host(from_addr))
+}
+
+fn apex_domain(host: &str) -> String {
+    let host = host.trim().trim_start_matches('.').to_ascii_lowercase();
+    if host.is_empty() || !host.contains('.') {
+        return host;
+    }
+    let parts: Vec<&str> = host.split('.').filter(|p| !p.is_empty()).collect();
+    if parts.len() <= 2 {
+        return parts.join(".");
+    }
+    const MULTI: &[&str] = &[
+        "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz",
+        "co.jp", "com.br", "co.in", "com.mx", "co.za", "com.sg", "com.hk",
+    ];
+    let last2 = format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
+    if MULTI.iter().any(|s| *s == last2) {
+        format!(
+            "{}.{}.{}",
+            parts[parts.len() - 3],
+            parts[parts.len() - 2],
+            parts[parts.len() - 1]
+        )
+    } else {
+        last2
+    }
+}
+
+fn entry_matches_sender(entry: &str, addr: &str, domain: &str) -> bool {
+    if entry.is_empty() {
+        return false;
+    }
+    if entry == addr || entry == domain {
+        return true;
+    }
+    // Legacy full-address entries still match exact From.
+    if entry.contains('@') {
+        return false;
+    }
+    // Domain entry: exact apex match (google.com ↔ accounts.google.com → google.com).
+    entry == domain
 }
 
 impl UiConfig {
     pub fn allows_remote_images(&self, from_addr: &str) -> bool {
-        let key = normalize_mail_addr(from_addr);
-        !key.is_empty() && self.remote_image_senders.iter().any(|s| s == &key)
+        let addr = normalize_mail_addr(from_addr);
+        let domain = remote_image_domain(from_addr);
+        if addr.is_empty() && domain.is_empty() {
+            return false;
+        }
+        self.remote_image_senders
+            .iter()
+            .any(|s| entry_matches_sender(s, &addr, &domain))
     }
 
-    /// Remember this sender so later messages auto-load remote images.
+    /// Remember this sender’s **domain** so later stack mail (same org) loads images.
     pub fn allow_remote_images_sender(&mut self, from_addr: &str) {
-        let key = normalize_mail_addr(from_addr);
-        if key.is_empty() {
+        let domain = remote_image_domain(from_addr);
+        if domain.is_empty() {
+            // No usable domain — fall back to exact address.
+            let key = normalize_mail_addr(from_addr);
+            if key.is_empty() {
+                return;
+            }
+            if !self.remote_image_senders.iter().any(|s| s == &key) {
+                self.remote_image_senders.push(key);
+            }
             return;
         }
-        if !self.remote_image_senders.iter().any(|s| s == &key) {
-            self.remote_image_senders.push(key);
+        if !self.remote_image_senders.iter().any(|s| s == &domain) {
+            self.remote_image_senders.push(domain.clone());
         }
+        // Drop redundant legacy exact-address entries under this domain.
+        self.remote_image_senders.retain(|s| {
+            if s == &domain {
+                return true;
+            }
+            !(s.contains('@') && remote_image_domain(s) == domain)
+        });
     }
 
-    /// Forget this sender; remote images stay blocked again.
+    /// Forget this sender’s domain (and legacy exact addresses under it).
     pub fn block_remote_images_sender(&mut self, from_addr: &str) {
-        let key = normalize_mail_addr(from_addr);
-        self.remote_image_senders.retain(|s| s != &key);
+        let domain = remote_image_domain(from_addr);
+        let addr = normalize_mail_addr(from_addr);
+        self.remote_image_senders.retain(|s| {
+            if s == &addr || (!domain.is_empty() && s == &domain) {
+                return false;
+            }
+            if !domain.is_empty() && s.contains('@') && remote_image_domain(s) == domain {
+                return false;
+            }
+            true
+        });
     }
 }
 
@@ -379,6 +519,10 @@ fn default_auto_sync_mins() -> u32 {
     60
 }
 
+fn default_sound_new_mail() -> bool {
+    true
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -389,6 +533,9 @@ impl Default for UiConfig {
             auto_sync_mins: default_auto_sync_mins(),
             remote_image_senders: Vec::new(),
             show_all_mail: false,
+            sound_new_mail: default_sound_new_mail(),
+            sound_clicks: false,
+            sound_theme: SoundTheme::default(),
         }
     }
 }
@@ -508,5 +655,45 @@ mod tests {
             "a1",
             "invalid default falls back to first"
         );
+    }
+
+    #[test]
+    fn remote_image_domain_apex() {
+        assert_eq!(remote_image_domain("noreply@accounts.google.com"), "google.com");
+        assert_eq!(remote_image_domain("a@google.com"), "google.com");
+        assert_eq!(remote_image_domain("x@mail.company.co.uk"), "company.co.uk");
+        assert_eq!(remote_image_domain("solo@localhost"), "localhost");
+    }
+
+    #[test]
+    fn remote_images_allow_by_domain_covers_stack() {
+        let mut ui = UiConfig::default();
+        ui.allow_remote_images_sender("noreply@accounts.google.com");
+        assert_eq!(ui.remote_image_senders, vec!["google.com".to_string()]);
+        assert!(ui.allows_remote_images("noreply@accounts.google.com"));
+        assert!(ui.allows_remote_images("mailer-daemon@google.com"));
+        assert!(ui.allows_remote_images("alerts@mail.google.com"));
+        assert!(!ui.allows_remote_images("someone@gmail.com"));
+        assert!(!ui.allows_remote_images("a@microsoft.com"));
+
+        ui.block_remote_images_sender("other@google.com");
+        assert!(!ui.allows_remote_images("noreply@accounts.google.com"));
+        assert!(ui.remote_image_senders.is_empty());
+    }
+
+    #[test]
+    fn remote_images_legacy_exact_address_still_matches() {
+        let mut ui = UiConfig::default();
+        ui.remote_image_senders
+            .push("noreply@accounts.google.com".into());
+        assert!(ui.allows_remote_images("noreply@accounts.google.com"));
+        assert!(
+            !ui.allows_remote_images("other@accounts.google.com"),
+            "legacy exact entry must not widen until re-allowed"
+        );
+        // Re-allow promotes to domain and drops the legacy row.
+        ui.allow_remote_images_sender("noreply@accounts.google.com");
+        assert_eq!(ui.remote_image_senders, vec!["google.com".to_string()]);
+        assert!(ui.allows_remote_images("other@accounts.google.com"));
     }
 }
