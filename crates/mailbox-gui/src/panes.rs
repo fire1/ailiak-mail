@@ -60,8 +60,9 @@ impl MailboxApp {
             });
         });
 
-        // Right (L→R): Done, Trash, Archive, Reply, Reply all, Load, Sync
+        // Right (L→R): Done, Trash, Reply, Reply all, Load, Sync
         // Painted right-to-left so Sync stays on the far right.
+        // Archive icon omitted — Done (✓) archives (same action).
         let right = Rect::from_min_max(
             egui::pos2(bar.right() - (bar.width() * 0.34).max(320.0), bar.top()),
             bar.right_bottom(),
@@ -141,23 +142,7 @@ impl MailboxApp {
                         self.open_reply(false);
                     }
                 }
-                // Snooze toolbar control hidden for now (feature kept in code).
-                let archive_tip = if self.selected_person.is_some() {
-                    "Archive this People conversation"
-                } else {
-                    "Archive current message"
-                };
-                if icons::toolbar_icon_button(
-                    ui,
-                    icons::ToolbarIcon::Archive,
-                    archive_tip,
-                    has_msg && !self.busy.moving(),
-                    self.busy.archive,
-                )
-                .clicked()
-                {
-                    self.move_current_message(mailbox_core::SpecialFolderKind::Archive);
-                }
+                // Snooze / Archive toolbar icons hidden — Done (✓) archives.
                 let trash_tip = if self.selected_person.is_some() {
                     "Trash this People conversation (#)"
                 } else {
@@ -895,15 +880,6 @@ impl MailboxApp {
         } else {
             "Trash all messages in this folder/label (asks first)"
         };
-        let archive_tip = if multi {
-            if selected_n > 1 {
-                "Archive selected messages (asks first)"
-            } else {
-                "Archive selected message"
-            }
-        } else {
-            "Archive all messages in this folder/label (asks first)"
-        };
         let read_tip = if multi {
             if selected_n > 1 {
                 "Mark selected messages as read (asks first)"
@@ -915,7 +891,7 @@ impl MailboxApp {
         };
         // Title left, actions flush right — allocate remaining width so RTL
         // doesn't pack the buttons beside the title.
-        // Visual L→R: Mark read, Archive, Trash
+        // Visual L→R: Mark read, Trash (Archive removed — use top-bar Done / `e`).
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(title)
@@ -938,17 +914,6 @@ impl MailboxApp {
                     .clicked()
                     {
                         self.move_listed_messages(mailbox_core::SpecialFolderKind::Trash);
-                    }
-                    if icons::toolbar_icon_button(
-                        ui,
-                        icons::ToolbarIcon::Archive,
-                        archive_tip,
-                        move_enabled,
-                        self.busy.archive,
-                    )
-                    .clicked()
-                    {
-                        self.move_listed_messages(mailbox_core::SpecialFolderKind::Archive);
                     }
                     if icons::toolbar_icon_button(
                         ui,

@@ -453,6 +453,50 @@ pub fn install(ctx: &egui::Context, mode: ThemeMode, accent_id: &str) {
         opt.fallback_theme = Theme::Light;
     });
     apply_appearance(ctx, mode, accent_id);
+    apply_screen_zoom(ctx);
+}
+
+/// Content zoom from display size (1.0 on laptop-sized screens, slightly higher on large PCs).
+///
+/// Uses the monitor short side when known, else the window. Never shrinks below 1.0 so the
+/// current laptop look stays; caps the bump so large monitors only get a mild enlarge.
+pub fn screen_content_zoom(short_side_pts: f32) -> f32 {
+    // ~800pt short side ≈ 1080p laptop / typical maximized window feeling “right”.
+    const REF: f32 = 800.0;
+    // At 1.5× REF (~1200pt short, big desktop), apply +15% content zoom.
+    const MAX_EXTRA: f32 = 0.15;
+    let raw = (short_side_pts / REF).clamp(1.0, 1.5);
+    let t = (raw - 1.0) / 0.5;
+    1.0 + MAX_EXTRA * t
+}
+
+fn viewport_short_side_pts(ctx: &egui::Context) -> f32 {
+    ctx.input(|i| {
+        let vp = i.viewport();
+        if let Some(size) = vp.monitor_size {
+            size.x.min(size.y)
+        } else if let Some(outer) = vp.outer_rect {
+            outer.width().min(outer.height())
+        } else if let Some(inner) = vp.inner_rect {
+            inner.width().min(inner.height())
+        } else {
+            REF_FALLBACK_SHORT
+        }
+    })
+}
+
+const REF_FALLBACK_SHORT: f32 = 800.0;
+
+/// Multiply native DPI by [`screen_content_zoom`] so text/controls grow a bit on large screens
+/// without changing layout ratios (same as a mild OS-level zoom).
+pub fn apply_screen_zoom(ctx: &egui::Context) {
+    let native = ctx.native_pixels_per_point().unwrap_or(1.0);
+    let zoom = screen_content_zoom(viewport_short_side_pts(ctx));
+    let want = native * zoom;
+    let cur = ctx.pixels_per_point();
+    if (want - cur).abs() > 0.008 {
+        ctx.set_pixels_per_point(want);
+    }
 }
 
 /// Rebuild light/dark styles for the chosen accent and apply theme preference.
@@ -613,4 +657,24 @@ pub fn mail_webview_backdrop_rgba(dark: bool) -> (u8, u8, u8, u8) {
 pub fn mail_webview_backdrop_css(dark: bool) -> String {
     let c = mail_webview_backdrop(dark);
     format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_zoom_laptop_stays_one() {
+        assert!((screen_content_zoom(720.0) - 1.0).abs() < f32::EPSILON);
+        assert!((screen_content_zoom(800.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn screen_zoom_large_display_nudges_up() {
+        let mid = screen_content_zoom(1000.0);
+        let big = screen_content_zoom(1200.0);
+        assert!(mid > 1.0 && mid < 1.15, "mid={mid}");
+        assert!((big - 1.15).abs() < 0.001, "big={big}");
+        assert!(big >= mid);
+    }
 }

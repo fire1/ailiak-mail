@@ -38,26 +38,58 @@ jobs:
             libfuse2 || sudo apt-get install -y libfuse2t64 || true
 
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.os != 'macOS'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'macOS'
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
 
-      - name: Package
+      - name: Package (Linux / Windows)
+        if: runner.os != 'macOS'
         run: cargo packager --release --formats ${{ matrix.formats }}
 
-      # cargo-packager writes into target/release/ (not dist/).
-      - name: Archive macOS .app
+      # Apple Silicon runner: native arm64 + cross-compile Intel (x86_64).
+      # Set CARGO_BUILD_TARGET so before-packaging-command builds the same triple.
+      - name: Package macOS arm64 + Intel
         if: runner.os == 'macOS'
         run: |
-          cd target/release
-          tar czf AiliakMail.app.tar.gz AiliakMail.app
+          set -euo pipefail
+          mkdir -p dist
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            case "$triple" in
+              aarch64-apple-darwin) arch=aarch64 ;;
+              x86_64-apple-darwin) arch=x86_64 ;;
+            esac
+            echo "::group::packager $triple"
+            CARGO_BUILD_TARGET="$triple" \
+              cargo packager --release --formats app,dmg --target "$triple"
+            echo "::endgroup::"
+
+            # Outputs land under target/<triple>/release/ when --target is set.
+            bundle="target/${triple}/release"
+            ls -la "$bundle" || true
+            for dmg in "$bundle"/AiliakMail_*.dmg "$bundle"/*.dmg; do
+              [[ -f "$dmg" ]] || continue
+              cp -f "$dmg" "dist/$(basename "$dmg")"
+            done
+            if [[ -d "$bundle/AiliakMail.app" ]]; then
+              tar -C "$bundle" -czf "dist/AiliakMail-${arch}.app.tar.gz" AiliakMail.app
+            fi
+          done
+          ls -la dist
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ailiakmail-${{ matrix.os }}
           path: |
+            dist/*
             target/release/*.dmg
             target/release/*.app.tar.gz
             target/release/*.deb
@@ -71,6 +103,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            dist/*
             target/release/*.dmg
             target/release/*.app.tar.gz
             target/release/*.deb

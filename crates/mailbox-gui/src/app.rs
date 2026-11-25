@@ -2909,6 +2909,9 @@ impl App for MailboxApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Mild zoom on large monitors (laptop stay ~1.0). Uniform PPP keeps layout ratios.
+        theme::apply_screen_zoom(ctx);
+
         // Tear down WebKitGTK *before* winit destroys the host window — otherwise
         // wry’s Drop (destroy + X11 child teardown) can freeze the process on close.
         if self.exit_after_webview {

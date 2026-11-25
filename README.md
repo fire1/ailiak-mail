@@ -15,6 +15,23 @@
 - **Themes** — system / light / dark, pastel mint UI  
 - **Installers** — Linux, macOS, Windows via `cargo-packager` + GitHub Actions  
 
+## Download the latest version
+
+Pre-built installs are on GitHub Releases (newest tag first):
+
+**https://github.com/fire1/ailiak-mail/releases/latest**
+
+| OS | What to download |
+|----|------------------|
+| **macOS** (Apple Silicon) | `AiliakMail_*_aarch64.dmg` or `AiliakMail-aarch64.app.tar.gz` |
+| **macOS** (Intel) | `AiliakMail_*_x64.dmg` / `*_x86_64.dmg` or `AiliakMail-x86_64.app.tar.gz` |
+| **Windows** | `ailiakmail_*_x64-setup.exe` (or `ailiakmail.exe`) |
+| **Linux** | `.deb` / AppImage when present on that release |
+
+Open the release page → **Assets** → pick the file for your OS. macOS CI builds both **arm64** and **Intel (x86_64)**.
+
+To build from source instead, see [Quick start](#quick-start) below.
+
 ## Quick start
 
 ```bash
