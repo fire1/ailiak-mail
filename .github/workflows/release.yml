@@ -34,6 +34,7 @@ jobs:
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libssl-dev pkg-config \
             libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libasound2-dev \
             libfuse2 || sudo apt-get install -y libfuse2t64 || true
 
       - uses: dtolnay/rust-toolchain@stable
@@ -45,12 +46,24 @@ jobs:
       - name: Package
         run: cargo packager --release --formats ${{ matrix.formats }}
 
+      # cargo-packager writes into target/release/ (not dist/).
+      - name: Archive macOS .app
+        if: runner.os == 'macOS'
+        run: |
+          cd target/release
+          tar czf AiliakMail.app.tar.gz AiliakMail.app
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ailiakmail-${{ matrix.os }}
           path: |
-            dist/*
+            target/release/*.dmg
+            target/release/*.app.tar.gz
+            target/release/*.deb
+            target/release/*.AppImage
+            target/release/*.exe
+            target/release/*.msi
           if-no-files-found: warn
 
       - name: Attach to GitHub Release
@@ -58,10 +71,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.dmg
-            dist/*.app.tar.gz
-            dist/*.deb
-            dist/*.AppImage
-            dist/*.exe
-            dist/*.msi
+            target/release/*.dmg
+            target/release/*.app.tar.gz
+            target/release/*.deb
+            target/release/*.AppImage
+            target/release/*.exe
+            target/release/*.msi
           fail_on_unmatched_files: false
