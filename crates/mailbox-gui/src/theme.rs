@@ -147,7 +147,9 @@ fn dark_palette(accent: Color32) -> Palette {
         chip,
         // Slightly darker than paper, with a touch of accent.
         list_card: mix(mix(paper, Color32::BLACK, 0.08), accent, 0.08),
-        reader_card: paper,
+        // HTML mail is authored for light paper — keep the reader card white
+        // even when shell chrome is dark (see reader_ink / reader_mute).
+        reader_card: Color32::WHITE,
         // White rows on the darker list card so new mail is obvious.
         unread_row: Color32::WHITE,
     }
@@ -581,17 +583,26 @@ pub fn reader_card(ctx: &egui::Context) -> Color32 {
     palette(ctx).reader_card
 }
 
-/// Native webview / loading underlay while HTML mail paints (matches reader chrome).
-/// HTML message content stays on a light paper inside the document; this color is
-/// what you see between messages so WebKit does not flash pure black.
-pub fn mail_webview_backdrop(dark: bool) -> Color32 {
-    // Accent does not affect reader_card; pass a dummy.
-    let accent = Color32::from_rgb(0x0b, 0x6e, 0x4f);
-    if dark {
-        dark_palette(accent).reader_card
-    } else {
-        light_palette(accent).reader_card
-    }
+/// Ink for text on [`reader_card`] / unread white rows (always light-surface colors).
+pub fn reader_ink() -> Color32 {
+    Color32::from_rgb(0x3a, 0x42, 0x40)
+}
+
+/// Mute label color on [`reader_card`] (always light-surface).
+pub fn reader_mute() -> Color32 {
+    Color32::from_rgb(0x6e, 0x74, 0x72)
+}
+
+/// Chip / hint plate on [`reader_card`] (always light-surface).
+pub fn reader_chip() -> Color32 {
+    Color32::from_rgb(0xe4, 0xe6, 0xe7)
+}
+
+/// Native webview / loading underlay while HTML mail paints.
+/// Always light paper so it matches the HTML document and white reader card
+/// (avoids a dark flash between messages in dark shell theme).
+pub fn mail_webview_backdrop(_dark: bool) -> Color32 {
+    Color32::WHITE
 }
 
 pub fn mail_webview_backdrop_rgba(dark: bool) -> (u8, u8, u8, u8) {

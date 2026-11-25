@@ -385,7 +385,7 @@ set GDK_BACKEND=x11 or restart AiliakMail)"
     }
 }
 
-fn to_wry_rect(bounds: Rect, pixels_per_point: f32) -> WryRect {
+pub(crate) fn to_wry_rect(bounds: Rect, pixels_per_point: f32) -> WryRect {
     // Linux/X11: wry's create path uses scale_factor_from_x11 (screen mm → often
     // ~1.0 on XWayland) while winit/egui guess ~1.17. Passing Logical egui points
     // under-sizes/shifts the child left. Physical pixels (= points * ppp) match
@@ -424,7 +424,7 @@ fn to_wry_rect(bounds: Rect, pixels_per_point: f32) -> WryRect {
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_gtk() {
+pub(crate) fn ensure_gtk() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {

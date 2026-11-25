@@ -243,10 +243,20 @@ impl Store {
         Ok(())
     }
 
-    pub fn upsert_message(&self, msg: &Message) -> Result<()> {
+    /// Insert or refresh a cached message. Returns `true` when the row was newly inserted.
+    pub fn upsert_message(&self, msg: &Message) -> Result<bool> {
         let to = serde_json::to_string(&msg.to).unwrap_or_else(|_| "[]".into());
         let cc = serde_json::to_string(&msg.cc).unwrap_or_else(|_| "[]".into());
         let e = &msg.envelope;
+        let existed: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE id = ?1",
+                params![e.id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
         self.conn.execute(
             r#"
             INSERT INTO messages (
@@ -296,7 +306,7 @@ impl Store {
                 e.thread_id,
             ],
         )?;
-        Ok(())
+        Ok(!existed)
     }
 
     pub fn list_envelopes(&self, account_id: &str, folder_path: &str) -> Result<Vec<Envelope>> {

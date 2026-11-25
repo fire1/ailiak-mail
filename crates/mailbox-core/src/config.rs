@@ -347,6 +347,9 @@ pub struct UiConfig {
     /// Tone set for new-mail / click sounds.
     #[serde(default)]
     pub sound_theme: SoundTheme,
+    /// Desktop notification when sync inserts new messages. Default: on.
+    #[serde(default = "default_notify_new_mail")]
+    pub notify_new_mail: bool,
 }
 
 /// Preset tone packs for UI / new-mail sounds.
@@ -523,6 +526,10 @@ fn default_sound_new_mail() -> bool {
     true
 }
 
+fn default_notify_new_mail() -> bool {
+    true
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -536,6 +543,7 @@ impl Default for UiConfig {
             sound_new_mail: default_sound_new_mail(),
             sound_clicks: false,
             sound_theme: SoundTheme::default(),
+            notify_new_mail: default_notify_new_mail(),
         }
     }
 }

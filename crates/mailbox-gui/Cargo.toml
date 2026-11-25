@@ -23,6 +23,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 mailbox-ailiak.workspace = true
 mailbox-core.workspace = true
 md-5 = "0.10"
+notify-rust = "4"
 reqwest = { workspace = true, features = ["blocking"] }
 resvg = "0.45"
 rfd = "0.15"

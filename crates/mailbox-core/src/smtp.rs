@@ -25,6 +25,9 @@ pub struct OutgoingMail {
     pub bcc: Vec<String>,
     pub subject: String,
     pub body_text: String,
+    /// Optional HTML body. When set, the message is sent as
+    /// `multipart/alternative` (plain + HTML).
+    pub body_html: Option<String>,
     /// Message-ID of the message being replied to (bare or angle-bracketed).
     pub in_reply_to: Option<String>,
     /// Full References chain for the reply.
@@ -147,16 +150,51 @@ pub fn send(
         .header(ContentType::TEXT_PLAIN)
         .body(mail.body_text.clone());
 
-    let mut mixed = MultiPart::mixed().singlepart(text);
-    for att in &mail.attachments {
-        let ct = content_type_for(&att.mime);
-        mixed = mixed.singlepart(
-            Attachment::new(att.filename.clone())
-                .body(att.bytes.clone(), ct),
-        );
-    }
+    let html = mail
+        .body_html
+        .as_ref()
+        .map(|h| h.trim())
+        .filter(|h| !h.is_empty())
+        .map(|h| {
+            SinglePart::builder()
+                .header(ContentType::TEXT_HTML)
+                .body(h.to_string())
+        });
 
-    let msg = builder.multipart(mixed).context("build MIME message")?;
+    let msg = match (html, mail.attachments.is_empty()) {
+        (None, true) => builder.singlepart(text).context("build MIME message")?,
+        (None, false) => {
+            let mut mixed = MultiPart::mixed().singlepart(text);
+            for att in &mail.attachments {
+                let ct = content_type_for(&att.mime);
+                mixed = mixed.singlepart(
+                    Attachment::new(att.filename.clone())
+                        .body(att.bytes.clone(), ct),
+                );
+            }
+            builder.multipart(mixed).context("build MIME message")?
+        }
+        (Some(html_part), true) => {
+            let alt = MultiPart::alternative()
+                .singlepart(text)
+                .singlepart(html_part);
+            builder.multipart(alt).context("build MIME message")?
+        }
+        (Some(html_part), false) => {
+            let alt = MultiPart::alternative()
+                .singlepart(text)
+                .singlepart(html_part);
+            let mut mixed = MultiPart::mixed().multipart(alt);
+            for att in &mail.attachments {
+                let ct = content_type_for(&att.mime);
+                mixed = mixed.singlepart(
+                    Attachment::new(att.filename.clone())
+                        .body(att.bytes.clone(), ct),
+                );
+            }
+            builder.multipart(mixed).context("build MIME message")?
+        }
+    };
 
     let creds = match credential {
         MailCredential::Password(pass) => Credentials::new(account.username.clone(), pass.clone()),

@@ -145,7 +145,7 @@ pub fn show_body(
     if body.has_image_threats() {
         let n = body.image_threats.len();
         egui::Frame::none()
-            .fill(theme::chip(ui.ctx()))
+            .fill(theme::reader_chip())
             .rounding(8.0)
             .inner_margin(egui::Margin::symmetric(10.0, 8.0))
             .show(ui, |ui| {
@@ -154,13 +154,13 @@ pub fn show_body(
                         "{n} tracking-like image(s) blocked for privacy (always, even if this sender is allowed)."
                     ))
                     .small()
-                    .color(theme::mute(ui.ctx())),
+                    .color(theme::reader_mute()),
                 );
             });
         ui.add_space(10.0);
     } else if body.has_remote_images && !load_images {
         egui::Frame::none()
-            .fill(theme::chip(ui.ctx()))
+            .fill(theme::reader_chip())
             .rounding(8.0)
             .inner_margin(egui::Margin::symmetric(10.0, 8.0))
             .show(ui, |ui| {
@@ -169,7 +169,7 @@ pub fn show_body(
                         "This message includes remote images. They are blocked until you allow this sender (privacy / tracking).",
                     )
                     .small()
-                    .color(theme::mute(ui.ctx())),
+                    .color(theme::reader_mute()),
                 );
             });
         ui.add_space(10.0);
@@ -194,7 +194,7 @@ pub fn show_body(
             }
             BodyBlock::Bullet(spans) => {
                 ui.horizontal_top(|ui| {
-                    ui.label(RichText::new("•").color(theme::mute(ui.ctx())));
+                    ui.label(RichText::new("•").color(theme::reader_mute()));
                     ui.vertical(|ui| {
                         show_spans(ui, spans, 13.0, false);
                     });
@@ -203,7 +203,7 @@ pub fn show_body(
             }
             BodyBlock::Quote(spans) => {
                 egui::Frame::none()
-                    .stroke(egui::Stroke::new(2.0_f32, theme::mute(ui.ctx())))
+                    .stroke(egui::Stroke::new(2.0_f32, theme::reader_mute()))
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                     .show(ui, |ui| {
                         show_spans(ui, spans, 13.0, false);
@@ -219,7 +219,7 @@ pub fn show_body(
                     RichText::new(format!("[Image blocked — {alt}]"))
                         .italics()
                         .small()
-                        .color(theme::mute(ui.ctx())),
+                        .color(theme::reader_mute()),
                 );
                 ui.add_space(6.0);
             }
@@ -236,13 +236,13 @@ pub fn show_body(
                     ui.label(
                         RichText::new(format!("[Image failed — {alt}]"))
                             .small()
-                            .color(theme::mute(ui.ctx())),
+                            .color(theme::reader_mute()),
                     );
                 } else {
                     ui.label(
                         RichText::new(format!("Loading image… ({alt})"))
                             .small()
-                            .color(theme::mute(ui.ctx())),
+                            .color(theme::reader_mute()),
                     );
                 }
                 ui.add_space(8.0);
@@ -257,7 +257,7 @@ fn show_spans(ui: &mut Ui, spans: &[InlineSeg], size: f32, strong: bool) {
         for seg in spans {
             match seg {
                 InlineSeg::Text(t) => {
-                    let mut rt = RichText::new(t).size(size).color(theme::ink(ui.ctx()));
+                    let mut rt = RichText::new(t).size(size).color(theme::reader_ink());
                     if strong {
                         rt = rt.strong();
                     }

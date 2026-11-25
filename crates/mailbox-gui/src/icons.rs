@@ -66,7 +66,6 @@ pub enum ToolbarIcon {
     MarkRead,
     Archive,
     Trash,
-    Snooze,
 }
 
 impl ToolbarIcon {
@@ -78,15 +77,14 @@ impl ToolbarIcon {
             Self::Reply => ph::ARROW_BEND_UP_LEFT,
             Self::ReplyAll => ph::ARROW_BEND_DOUBLE_UP_LEFT,
             Self::Done => ph::CHECK,
-            Self::MarkRead => ph::ENVELOPE_OPEN,
+            Self::MarkRead => ph::CHECK,
             Self::Archive => ph::ARCHIVE,
             Self::Trash => ph::TRASH,
-            Self::Snooze => ph::CLOCK_AFTERNOON,
         }
     }
 }
 
-/// Icon-only toolbar control (Done / Archive / Trash / Snooze). Shows a spinner when `busy`.
+/// Icon-only toolbar control (Archive / Trash / Mark read / …). Shows a spinner when `busy`.
 pub fn toolbar_icon_button(
     ui: &mut Ui,
     kind: ToolbarIcon,

@@ -513,6 +513,7 @@ impl MailboxApp {
                     let header = nav_accordion_header(
                         ui,
                         "Folders",
+                        egui_phosphor::regular::FOLDER,
                         open,
                         mute,
                         collapsed,
@@ -571,6 +572,7 @@ impl MailboxApp {
                     let header = nav_accordion_header(
                         ui,
                         "Staks",
+                        egui_phosphor::regular::STACK,
                         open,
                         mute,
                         collapsed,
@@ -615,6 +617,7 @@ impl MailboxApp {
                     let header = nav_accordion_header(
                         ui,
                         "People",
+                        egui_phosphor::regular::USER,
                         open,
                         mute,
                         collapsed,
@@ -660,6 +663,7 @@ impl MailboxApp {
                     let header = nav_accordion_header(
                         ui,
                         "Labels",
+                        egui_phosphor::regular::TAG,
                         open,
                         mute,
                         collapsed,
@@ -1335,7 +1339,7 @@ impl MailboxApp {
             ui.label(
                 RichText::new(msg.display_from())
                     .small()
-                    .color(theme::mute(ui.ctx())),
+                    .color(theme::reader_mute()),
             );
             ui.add_space(6.0);
             ScrollArea::vertical()
@@ -1372,13 +1376,16 @@ impl MailboxApp {
                     self.busy.send,
                     window_h,
                 );
+                self.apply_compose_webview_result(&draft, &res, ui.ctx());
                 if res.send {
                     self.compose = Some(draft);
                     self.submit_compose();
                 } else if res.open_full {
                     draft.inline = false;
                     self.compose = Some(draft);
-                } else if !res.close {
+                } else if res.close {
+                    self.compose_webview.hide();
+                } else {
                     self.compose = Some(draft);
                 }
             }
@@ -1404,9 +1411,9 @@ impl MailboxApp {
                 RichText::new(&title)
                     .size(18.0)
                     .strong()
-                    .color(theme::ink(ui.ctx())),
+                    .color(theme::reader_ink()),
             );
-            ui.label(RichText::new(&peer).small().color(theme::mute(ui.ctx())));
+            ui.label(RichText::new(&peer).small().color(theme::reader_mute()));
         });
         ui.add_space(8.0);
         ui.separator();
@@ -1439,16 +1446,17 @@ impl MailboxApp {
                             RichText::new(
                                 "No messages with this person in the local cache yet.",
                             )
-                            .color(theme::mute(ui.ctx())),
+                            .color(theme::reader_mute()),
                         );
                         return;
                     }
                     for msg in &self.chat_messages {
                         let mine = msg.envelope.from_addr.trim().eq_ignore_ascii_case(&me);
+                        // Light-surface bubbles on the white reader card.
                         let bubble_fill = if mine {
-                            theme::select(ui.ctx())
+                            theme::reader_chip()
                         } else {
-                            theme::panel(ui.ctx())
+                            Color32::from_rgb(0xf0, 0xf1, 0xf2)
                         };
                         let align = if mine {
                             egui::Align::Max
@@ -1476,7 +1484,7 @@ impl MailboxApp {
                                             msg.envelope.date.format("%b %d %H:%M")
                                         ))
                                         .small()
-                                        .color(theme::mute(ui.ctx())),
+                                        .color(theme::reader_mute()),
                                     );
                                     if !msg.envelope.subject.is_empty() {
                                         ui.label(
@@ -1528,20 +1536,22 @@ impl MailboxApp {
             self.submit_chat_reply();
         }
         if dock.open_full {
+            let plain = std::mem::take(&mut self.chat_reply);
+            let atts = std::mem::take(&mut self.chat_attachments);
             if let Some(msg) = self.chat_messages.last().cloned() {
                 self.open_message = Some(msg);
                 self.open_reply(false);
                 if let Some(draft) = self.compose.as_mut() {
                     draft.inline = false;
-                    draft.body = std::mem::take(&mut self.chat_reply);
-                    draft.attachments = std::mem::take(&mut self.chat_attachments);
+                    draft.set_plain_body(plain);
+                    draft.attachments = atts;
                 }
             } else {
                 let mut draft = crate::compose::ComposeDraft::new_blank();
                 draft.to = peer;
                 draft.from_email = from_email;
-                draft.body = std::mem::take(&mut self.chat_reply);
-                draft.attachments = std::mem::take(&mut self.chat_attachments);
+                draft.set_plain_body(plain);
+                draft.attachments = atts;
                 self.compose = Some(draft);
             }
         }
@@ -1555,7 +1565,7 @@ impl MailboxApp {
                 RichText::new("(no subject)")
                     .size(size)
                     .italics()
-                    .color(theme::mute(ui.ctx())),
+                    .color(theme::reader_mute()),
             );
             return;
         }
@@ -1585,7 +1595,7 @@ impl MailboxApp {
         let label = RichText::new(&shown)
             .size(size)
             .strong()
-            .color(theme::ink(ui.ctx()));
+            .color(theme::reader_ink());
         let resp = if expanded {
             ui.add(egui::Label::new(label).wrap().sense(Sense::click()))
         } else {
@@ -1615,7 +1625,7 @@ impl MailboxApp {
     ) {
         use egui_phosphor::regular as ph;
 
-        let mute = theme::mute(ui.ctx());
+        let mute = theme::reader_mute();
         let expanded = self.reader_headers_expanded;
         let caret = if expanded {
             ph::CARET_DOWN
@@ -1706,7 +1716,29 @@ impl MailboxApp {
         }
     }
 
+    /// New message / expanded reply — fills the mail body card.
+    fn paint_compose_reader(&mut self, ui: &mut Ui) {
+        if let Some(mut draft) = self.compose.take() {
+            let res = crate::compose::show_reader_compose(ui, &mut draft, self.busy.send);
+            self.apply_compose_webview_result(&draft, &res, ui.ctx());
+            if res.send {
+                self.compose = Some(draft);
+                self.submit_compose();
+            } else if res.close {
+                self.compose_webview.hide();
+            } else {
+                self.compose = Some(draft);
+            }
+        }
+    }
+
     pub(crate) fn reader_pane(&mut self, ui: &mut Ui) {
+        // Full-card composer (new mail, or reply expanded from the dock).
+        if self.compose.as_ref().is_some_and(|c| !c.inline) {
+            self.paint_compose_reader(ui);
+            return;
+        }
+
         if self.selected_person.is_some() {
             self.chat_reader_pane(ui);
             return;
@@ -1714,7 +1746,7 @@ impl MailboxApp {
 
         let Some(msg) = self.open_message.clone() else {
             ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("Select a message").color(theme::mute(ui.ctx())));
+                ui.label(RichText::new("Select a message").color(theme::reader_mute()));
             });
             return;
         };
@@ -1756,7 +1788,7 @@ impl MailboxApp {
                         "Remote images blocked until you allow this domain (toolbar image icon).",
                     )
                     .small()
-                    .color(theme::mute(ui.ctx())),
+                    .color(theme::reader_mute()),
                 );
                 ui.add_space(6.0);
             }
@@ -1768,7 +1800,7 @@ impl MailboxApp {
                         "HTML webview unavailable ({err}). Falling back to plain text."
                     ))
                     .small()
-                    .color(theme::mute(ui.ctx())),
+                    .color(theme::reader_mute()),
                 );
                 ui.add_space(6.0);
                 let body = self.cached_mail_body().cloned();
@@ -1799,7 +1831,7 @@ impl MailboxApp {
                 if loading {
                     ui.put(
                         rect,
-                        egui::Spinner::new().size(22.0).color(theme::mute(ui.ctx())),
+                        egui::Spinner::new().size(22.0).color(theme::reader_mute()),
                     );
                     ui.ctx().request_repaint();
                 }
@@ -2311,6 +2343,11 @@ impl MailboxApp {
                     egui::Margin::same(16.0)
                 };
                 layout::content_card(reader_card, card_gutter, reader_pad).show(ui, |ui| {
+                    // Reader card is always white paper; force light widgets so
+                    // TextEdit / separators stay dark-on-light in a dark shell.
+                    if ui.visuals().dark_mode {
+                        ui.set_style((*ui.ctx().style_of(egui::Theme::Light)).clone());
+                    }
                     let h = ui.available_height();
                     if inline_reply_open {
                         // Cap height so the dock cannot push the card past the status bar.
@@ -2338,10 +2375,11 @@ struct NavAccordionResult {
 }
 
 /// Collapsible section title (no unread badge — badges stay on inner rows only).
-/// In the icon rail (`collapsed`), only a centered caret is shown.
+/// Idle: group icon. Hover: collapse/expand caret. Collapsed rail: icon-only.
 fn nav_accordion_header(
     ui: &mut Ui,
     title: &str,
+    group_icon: &'static str,
     open: bool,
     mute: Color32,
     collapsed: bool,
@@ -2372,10 +2410,12 @@ fn nav_accordion_header(
             if resp.hovered() {
                 ui.painter().rect_filled(rect, 6.0, theme::chip(ui.ctx()));
             }
+            // Group icon at rest; caret reveals collapse state on hover.
+            let glyph = if resp.hovered() { caret } else { group_icon };
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                caret,
+                glyph,
                 theme::icon_font(14.0),
                 mute,
             );
@@ -2392,21 +2432,21 @@ fn nav_accordion_header(
     let header_rect =
         egui::Rect::from_min_size(peek.min, egui::vec2(peek.width(), row_h));
     let row_hovered = ui.rect_contains_pointer(header_rect);
+    let leading = if row_hovered { caret } else { group_icon };
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        // Phosphor caret must use icon_family — nav_family (Roboto Mono) shows tofu.
-        let caret_resp = ui
-            .add(
-                egui::Button::new(
-                    RichText::new(caret)
-                        .family(theme::icon_family())
-                        .size(11.0)
-                        .color(mute),
-                )
-                .frame(false),
-            )
-            .on_hover_text(&tip);
+        // Fixed slot so swapping group icon ↔ caret does not shift the title.
+        let icon_slot = egui::vec2(16.0, 16.0);
+        let (icon_rect, icon_resp) = ui.allocate_exact_size(icon_slot, Sense::click());
+        ui.painter().text(
+            icon_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            leading,
+            theme::icon_font(13.0),
+            mute,
+        );
+        let icon_resp = icon_resp.on_hover_text(&tip);
         let title_resp = ui
             .add(
                 egui::Button::new(
@@ -2418,7 +2458,7 @@ fn nav_accordion_header(
                 .frame(false),
             )
             .on_hover_text(&tip);
-        if caret_resp.clicked() || title_resp.clicked() {
+        if icon_resp.clicked() || title_resp.clicked() {
             result.toggle = true;
         }
 

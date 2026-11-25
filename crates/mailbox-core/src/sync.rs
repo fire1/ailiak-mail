@@ -14,6 +14,12 @@ use crate::types::{parse_imap_uid, Folder, MessageId, SpecialFolderKind};
 pub struct SyncReport {
     pub folders: usize,
     pub messages: usize,
+    /// Messages that were not in the local cache before this sync.
+    pub new_messages: usize,
+    /// Sender label for the newest newly-inserted message (for notifications).
+    pub new_from: String,
+    /// Subject for the newest newly-inserted message (for notifications).
+    pub new_subject: String,
     pub folder_path: String,
     /// Human-readable detail (e.g. POP3 server message count).
     pub detail: String,
@@ -129,6 +135,9 @@ async fn sync_imap(
     };
 
     let mut total_messages = 0usize;
+    let mut new_messages = 0usize;
+    let mut new_from = String::new();
+    let mut new_subject = String::new();
     let mut primary = targets.first().cloned().unwrap_or_else(|| "INBOX".into());
     for path in &targets {
         match imap::sync_folder(&mut session, &account.id, path, opts.max_messages).await {
@@ -139,7 +148,14 @@ async fn sync_imap(
                     let _ = store.upsert_folder(&updated);
                 }
                 for msg in &messages {
-                    store.upsert_message(msg)?;
+                    if store.upsert_message(msg)? {
+                        new_messages += 1;
+                        // Prefer the first newly inserted in this batch (newest-first fetch).
+                        if new_from.is_empty() && new_subject.is_empty() {
+                            new_from = preview_from(&msg.envelope.from_name, &msg.envelope.from_addr);
+                            new_subject = preview_subject(&msg.envelope.subject);
+                        }
+                    }
                 }
                 total_messages += messages.len();
                 if path == &opts.folder_path || targets.len() == 1 {
@@ -170,6 +186,9 @@ async fn sync_imap(
     Ok(SyncReport {
         folders: folders.len(),
         messages: total_messages,
+        new_messages,
+        new_from,
+        new_subject,
         folder_path: primary,
         detail,
     })
@@ -325,8 +344,17 @@ async fn sync_pop3(
         &folders.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
     )?;
 
+    let mut new_messages = 0usize;
+    let mut new_from = String::new();
+    let mut new_subject = String::new();
     for msg in &messages {
-        store.upsert_message(msg)?;
+        if store.upsert_message(msg)? {
+            new_messages += 1;
+            if new_from.is_empty() && new_subject.is_empty() {
+                new_from = preview_from(&msg.envelope.from_name, &msg.envelope.from_addr);
+                new_subject = preview_subject(&msg.envelope.subject);
+            }
+        }
     }
 
     let pop3_folder_note =
@@ -347,7 +375,28 @@ async fn sync_pop3(
     Ok(SyncReport {
         folders: folders.len(),
         messages: messages.len(),
+        new_messages,
+        new_from,
+        new_subject,
         folder_path: "INBOX".into(),
         detail,
     })
+}
+
+fn preview_from(name: &str, addr: &str) -> String {
+    let name = name.trim();
+    if !name.is_empty() {
+        name.to_string()
+    } else {
+        addr.trim().to_string()
+    }
+}
+
+fn preview_subject(subject: &str) -> String {
+    let s = subject.trim();
+    if s.is_empty() {
+        "(no subject)".into()
+    } else {
+        s.to_string()
+    }
 }

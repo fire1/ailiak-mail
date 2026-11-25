@@ -1,13 +1,14 @@
-//! Floating compose + Talanoa-style inline reply dock + attachments.
+//! Reader-card compose + Talanoa-style inline reply dock + attachments.
 
 use std::path::PathBuf;
 
-use egui::{Align2, Area, Color32, Frame, Id, Key, Order, RichText, Sense, Ui, Vec2};
+use egui::{Align2, Color32, Frame, Key, Rect, RichText, Sense, Ui, Vec2};
 use egui_phosphor::regular as ph;
 
 use mailbox_core::types::Message;
 use mailbox_core::{reply_references, reply_subject};
 
+use crate::compose_webview::{plain_to_editor_html, quote_plain_to_html, ComposeFmtState};
 use crate::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,13 +20,6 @@ pub enum ComposeMode {
     Forward,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposeWindowMode {
-    Compact,
-    Modal,
-    Full,
-}
-
 #[derive(Debug, Clone)]
 pub struct ComposeAttachment {
     pub path: PathBuf,
@@ -35,16 +29,20 @@ pub struct ComposeAttachment {
 #[derive(Debug, Clone)]
 pub struct ComposeDraft {
     pub mode: ComposeMode,
-    pub window: ComposeWindowMode,
-    pub minimized: bool,
-    /// Reply/Reply-all sit inside the reader (avoids wry webview covering egui).
+    /// `true` = reply dock under the original; `false` = full reader-card composer.
     pub inline: bool,
     pub to: String,
     pub cc: String,
     pub bcc: String,
     pub subject: String,
-    /// Visible editor body (user typing). Quote is kept separately.
+    /// Plain-text mirror of the WYSIWYG body (from the editor webview).
     pub body: String,
+    /// HTML body from the contenteditable editor.
+    pub body_html: String,
+    /// Bumped when `body_html` must be pushed into the editor webview.
+    pub editor_rev: u64,
+    /// Live format state under the caret (for toolbar highlights).
+    pub fmt: ComposeFmtState,
     /// Appended after `body` on send (classic mail quote).
     pub quote_on_send: String,
     pub in_reply_to: Option<String>,
@@ -66,14 +64,15 @@ impl ComposeDraft {
     pub fn new_blank() -> Self {
         Self {
             mode: ComposeMode::New,
-            window: ComposeWindowMode::Modal,
-            minimized: false,
             inline: false,
             to: String::new(),
             cc: String::new(),
             bcc: String::new(),
             subject: String::new(),
             body: String::new(),
+            body_html: String::new(),
+            editor_rev: 1,
+            fmt: ComposeFmtState::default(),
             quote_on_send: String::new(),
             in_reply_to: None,
             references: None,
@@ -95,11 +94,38 @@ impl ComposeDraft {
         let mut out = self.body.trim_end().to_string();
         if !self.quote_on_send.is_empty() {
             if !out.is_empty() {
-                out.push_str("\n");
+                out.push('\n');
             }
             out.push_str(&self.quote_on_send);
         }
         out
+    }
+
+    /// HTML for SMTP `multipart/alternative`, including the reply quote.
+    pub fn body_html_for_send(&self) -> String {
+        let mut html = self.body_html.trim().to_string();
+        if html_body_is_empty(&html) {
+            if !self.body.trim().is_empty() {
+                html = plain_to_editor_html(&self.body);
+            } else {
+                html.clear();
+            }
+        }
+        if !self.quote_on_send.is_empty() {
+            html.push_str(&quote_plain_to_html(&self.quote_on_send));
+        }
+        html
+    }
+
+    /// Seed the editor from plain text (e.g. promoting the chat dock).
+    pub fn set_plain_body(&mut self, plain: String) {
+        self.body = plain;
+        self.body_html = plain_to_editor_html(&self.body);
+        self.editor_rev = self.editor_rev.saturating_add(1).max(1);
+    }
+
+    pub fn body_is_empty(&self) -> bool {
+        self.body.trim().is_empty() && html_body_is_empty(&self.body_html)
     }
 
     pub fn from_reply(msg: &Message, all: bool, account_email: &str) -> Self {
@@ -130,14 +156,15 @@ impl ComposeDraft {
             } else {
                 ComposeMode::Reply
             },
-            window: ComposeWindowMode::Modal,
-            minimized: false,
             inline: true,
             to,
             cc: String::new(),
             bcc: String::new(),
             subject: reply_subject(&msg.envelope.subject),
             body: String::new(),
+            body_html: String::new(),
+            editor_rev: 1,
+            fmt: ComposeFmtState::default(),
             quote_on_send: quote_body(msg),
             in_reply_to: Some(msg.envelope.message_id.clone()),
             references: Some(reply_references(
@@ -225,6 +252,68 @@ fn quote_body(msg: &Message) -> String {
     out
 }
 
+fn html_body_is_empty(html: &str) -> bool {
+    let mut text = String::new();
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    text.replace('\u{a0}', " ")
+        .replace("&nbsp;", " ")
+        .chars()
+        .all(|c| c.is_whitespace())
+}
+
+fn fmt_btn(ui: &mut Ui, glyph: &str, tip: &str, active: bool) -> egui::Response {
+    let size = Vec2::splat(28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let mute = ui.visuals().weak_text_color();
+    let accent = theme::accent(ui.ctx());
+    if active {
+        ui.painter()
+            .rect_filled(rect, 6.0, accent.linear_multiply(0.22));
+    } else if resp.hovered() || resp.is_pointer_button_down_on() {
+        ui.painter()
+            .rect_filled(rect, 6.0, ui.visuals().widgets.hovered.bg_fill);
+    }
+    paint_glyph(ui, rect.shrink(6.0), glyph, if active { accent } else { mute });
+    resp.on_hover_text(tip)
+}
+
+fn paint_format_toolbar(ui: &mut Ui, draft: &ComposeDraft, result: &mut ComposeUiResult) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        if fmt_btn(ui, ph::TEXT_B, "Bold (Ctrl+B)", draft.fmt.bold).clicked() {
+            result.exec = Some("bold");
+        }
+        if fmt_btn(ui, ph::TEXT_ITALIC, "Italic (Ctrl+I)", draft.fmt.italic).clicked() {
+            result.exec = Some("italic");
+        }
+        if fmt_btn(ui, ph::TEXT_UNDERLINE, "Underline (Ctrl+U)", draft.fmt.underline).clicked()
+        {
+            result.exec = Some("underline");
+        }
+        if fmt_btn(ui, ph::TEXT_STRIKETHROUGH, "Strikethrough", draft.fmt.strike).clicked() {
+            result.exec = Some("strikeThrough");
+        }
+        ui.add_space(4.0);
+        if fmt_btn(ui, ph::LIST_BULLETS, "Bullet list", draft.fmt.ul).clicked() {
+            result.exec = Some("insertUnorderedList");
+        }
+        if fmt_btn(ui, ph::LIST_NUMBERS, "Numbered list", draft.fmt.ol).clicked() {
+            result.exec = Some("insertOrderedList");
+        }
+        if fmt_btn(ui, ph::TEXT_T_SLASH, "Clear formatting", false).clicked() {
+            result.exec = Some("removeFormat");
+        }
+    });
+}
+
 fn paint_glyph(ui: &Ui, rect: egui::Rect, glyph: &str, color: Color32) {
     let size = rect.width().min(rect.height());
     ui.painter().text(
@@ -239,10 +328,12 @@ fn paint_glyph(ui: &Ui, rect: egui::Rect, glyph: &str, color: Color32) {
 fn icon_btn(ui: &mut Ui, glyph: &str, tip: &str) -> egui::Response {
     let size = Vec2::splat(28.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let mute = theme::mute(ui.ctx());
+    // Follow Ui visuals so inline (forced light on white reader) and floating
+    // (dark paper) both keep readable icons.
+    let mute = ui.visuals().weak_text_color();
     if resp.hovered() || resp.is_pointer_button_down_on() {
         ui.painter()
-            .rect_filled(rect, 6.0, theme::chip(ui.ctx()));
+            .rect_filled(rect, 6.0, ui.visuals().widgets.hovered.bg_fill);
     }
     paint_glyph(ui, rect.shrink(6.0), glyph, mute);
     resp.on_hover_text(tip)
@@ -302,6 +393,10 @@ pub struct ComposeUiResult {
     pub close: bool,
     pub send: bool,
     pub open_full: bool,
+    /// Screen rect for the WYSIWYG editor webview (None when there is no room).
+    pub editor_bounds: Option<Rect>,
+    /// `document.execCommand` name requested by the format toolbar.
+    pub exec: Option<&'static str>,
 }
 
 fn paint_attachment_chips(ui: &mut Ui, draft: &mut ComposeDraft) {
@@ -333,30 +428,60 @@ fn paint_attachment_chips(ui: &mut Ui, draft: &mut ComposeDraft) {
     ui.add_space(4.0);
 }
 
-/// Shared full form for floating New compose.
-pub fn paint_compose_form(
+/// Full composer painted inside the mail body / reader card.
+pub fn show_reader_compose(
     ui: &mut Ui,
     draft: &mut ComposeDraft,
     sending: bool,
-    show_chrome: bool,
 ) -> ComposeUiResult {
     let mut result = ComposeUiResult::default();
-    if show_chrome {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(compose_title(draft)).strong().size(14.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icon_btn(ui, ph::X, "Close").clicked() {
-                    result.close = true;
-                }
-            });
-        });
-        ui.separator();
-    }
+    let mute = theme::reader_mute();
+    let ink = theme::reader_ink();
+    let field_fill = Color32::from_rgb(0xf3, 0xf4, 0xf6);
+
     ui.horizontal(|ui| {
-        ui.label("To");
-        ui.add(
-            egui::TextEdit::singleline(&mut draft.to).desired_width(ui.available_width() - 80.0),
+        ui.label(
+            RichText::new(compose_title(draft))
+                .strong()
+                .size(18.0)
+                .color(ink),
         );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if icon_btn(ui, ph::X, "Discard").clicked() {
+                result.close = true;
+            }
+            if !draft.from_email.is_empty() {
+                ui.label(
+                    RichText::new(format!("from {}", draft.from_email))
+                        .small()
+                        .color(mute),
+                );
+            }
+        });
+    });
+    ui.add_space(8.0);
+
+    let label_w = 56.0;
+    let field = |ui: &mut Ui, value: &mut String| {
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .desired_width(ui.available_width())
+                .frame(false),
+        );
+    };
+
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [label_w, 20.0],
+            egui::Label::new(RichText::new("To").color(mute)),
+        );
+        Frame::none()
+            .fill(field_fill)
+            .rounding(8.0)
+            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .show(ui, |ui| {
+                field(ui, &mut draft.to);
+            });
         if !draft.show_cc && ui.small_button("Cc").clicked() {
             draft.show_cc = true;
         }
@@ -365,35 +490,64 @@ pub fn paint_compose_form(
         }
     });
     if draft.show_cc {
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label("Cc");
-            ui.add(egui::TextEdit::singleline(&mut draft.cc).desired_width(ui.available_width()));
+            ui.add_sized(
+                [label_w, 20.0],
+                egui::Label::new(RichText::new("Cc").color(mute)),
+            );
+            Frame::none()
+                .fill(field_fill)
+                .rounding(8.0)
+                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                .show(ui, |ui| {
+                    field(ui, &mut draft.cc);
+                });
         });
     }
     if draft.show_bcc {
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label("Bcc");
-            ui.add(egui::TextEdit::singleline(&mut draft.bcc).desired_width(ui.available_width()));
+            ui.add_sized(
+                [label_w, 20.0],
+                egui::Label::new(RichText::new("Bcc").color(mute)),
+            );
+            Frame::none()
+                .fill(field_fill)
+                .rounding(8.0)
+                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                .show(ui, |ui| {
+                    field(ui, &mut draft.bcc);
+                });
         });
     }
-    ui.horizontal(|ui| {
-        ui.label("Subject");
-        ui.add(
-            egui::TextEdit::singleline(&mut draft.subject).desired_width(ui.available_width()),
-        );
-    });
     ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [label_w, 20.0],
+            egui::Label::new(RichText::new("Subject").color(mute)),
+        );
+        Frame::none()
+            .fill(field_fill)
+            .rounding(8.0)
+            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .show(ui, |ui| {
+                field(ui, &mut draft.subject);
+            });
+    });
+    ui.add_space(6.0);
     paint_attachment_chips(ui, draft);
-    let body_h = (ui.available_height() - 48.0).max(100.0);
-    egui::ScrollArea::vertical()
-        .max_height(body_h)
-        .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut draft.body)
-                    .desired_width(ui.available_width())
-                    .desired_rows(12),
-            );
-        });
+    paint_format_toolbar(ui, draft, &mut result);
+    ui.add_space(4.0);
+
+    let action_h = 40.0;
+    let body_h = (ui.available_height() - action_h - 4.0).max(120.0);
+    let (editor_rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), body_h), Sense::hover());
+    ui.painter().rect_filled(editor_rect, 10.0, field_fill);
+    result.editor_bounds = Some(editor_rect);
+
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         if icon_btn(ui, ph::PLUS, "Attach files").clicked() {
             draft.pick_attachments();
@@ -423,14 +577,11 @@ pub fn show_inline_compose(
     _window_height: f32,
 ) -> ComposeUiResult {
     let mut result = ComposeUiResult::default();
-    let mute = theme::mute(ui.ctx());
+    let mute = theme::reader_mute();
     let accent = theme::accent(ui.ctx());
     let paper = theme::reader_card(ui.ctx());
-    let input_fill = if ui.visuals().dark_mode {
-        theme::panel(ui.ctx())
-    } else {
-        Color32::from_rgb(0xf3, 0xf4, 0xf6)
-    };
+    // Dock always sits on white reader paper.
+    let input_fill = Color32::from_rgb(0xf3, 0xf4, 0xf6);
 
     // Opaque fill; stay inside the caller-allocated dock rect.
     let dock = ui.max_rect();
@@ -495,8 +646,8 @@ pub fn show_inline_compose(
         paint_attachment_chips(ui, draft);
     });
 
-    // Soft input card — leftover dock height only; toolbar stays inside the card.
-    let toolbar_h = 36.0;
+    // Soft input card — leftover dock height only; format + send stay inside.
+    let action_h = 36.0;
     let card_h = ui.available_height().max(0.0);
     let (card_rect, _) = ui.allocate_exact_size(Vec2::new(width, card_h), Sense::hover());
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(card_rect), |ui| {
@@ -507,25 +658,16 @@ pub fn show_inline_compose(
             .inner_margin(egui::Margin::symmetric(12.0, 8.0))
             .show(ui, |ui| {
                 let gap = ui.spacing().item_spacing.y + 2.0;
-                let edit_h = (ui.available_height() - toolbar_h - gap).max(28.0);
-                let hint = if draft.reply_to_name.is_empty() {
-                    "Write a reply…".to_string()
-                } else {
-                    format!("Reply to {}…", draft.reply_to_name)
-                };
-                let edit = egui::TextEdit::multiline(&mut draft.body)
-                    .desired_width(ui.available_width())
-                    .desired_rows(if draft.dock_focused { 3 } else { 2 })
-                    .frame(false)
-                    .hint_text(hint);
-                let resp = ui.add_sized([ui.available_width(), edit_h], edit);
-                if resp.gained_focus() || resp.has_focus() {
+                paint_format_toolbar(ui, draft, &mut result);
+                let edit_h = (ui.available_height() - action_h - gap).max(28.0);
+                let (editor_rect, editor_resp) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), edit_h), Sense::click());
+                ui.painter().rect_filled(editor_rect, 8.0, input_fill);
+                result.editor_bounds = Some(editor_rect);
+                if editor_resp.clicked() || editor_resp.has_focus() {
                     draft.dock_focused = true;
-                } else if resp.lost_focus()
-                    && draft.body.trim().is_empty()
-                    && draft.attachments.is_empty()
-                {
-                    draft.dock_focused = false;
+                } else if draft.body_is_empty() && draft.attachments.is_empty() {
+                    // Collapse when empty and not interacting — webview focus is opaque to egui.
                 }
 
                 ui.add_space(2.0);
@@ -533,19 +675,27 @@ pub fn show_inline_compose(
                     if icon_btn(ui, ph::PLUS, "Attach files").clicked() {
                         draft.pick_attachments();
                     }
-                    if icon_btn(ui, ph::ARROWS_OUT, "Open full composer").clicked() {
+                    if icon_btn(ui, ph::ARROWS_OUT, "Expand in reader").clicked() {
                         draft.inline = false;
-                        draft.window = ComposeWindowMode::Modal;
-                        if !draft.quote_on_send.is_empty() && !draft.body.contains('>') {
-                            draft.body.push_str(&draft.quote_on_send);
-                            draft.quote_on_send.clear();
+                        if !draft.quote_on_send.is_empty()
+                            && !draft.body.contains('>')
+                            && !draft.body_html.contains("blockquote")
+                        {
+                            let q = std::mem::take(&mut draft.quote_on_send);
+                            draft.body.push_str(&q);
+                            if !draft.body_html.is_empty() {
+                                draft.body_html.push_str(&quote_plain_to_html(&q));
+                            } else {
+                                draft.body_html = plain_to_editor_html(&draft.body);
+                            }
+                            draft.editor_rev = draft.editor_rev.saturating_add(1).max(1);
                         }
                         result.open_full = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let can_send = !sending
                             && !draft.to.trim().is_empty()
-                            && (!draft.body.trim().is_empty() || !draft.attachments.is_empty());
+                            && (!draft.body_is_empty() || !draft.attachments.is_empty());
                         if send_button(ui, can_send, sending).clicked() {
                             result.send = true;
                         }
@@ -557,127 +707,6 @@ pub fn show_inline_compose(
     if ui.input(|i| i.key_pressed(Key::Escape)) {
         result.close = true;
     }
-    result
-}
-
-pub fn show_floating_compose(
-    ctx: &egui::Context,
-    draft: &mut ComposeDraft,
-    sending: bool,
-) -> ComposeUiResult {
-    let mut result = ComposeUiResult::default();
-    if draft.minimized {
-        Area::new(Id::new("compose_minimized"))
-            .order(Order::Foreground)
-            .anchor(Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -16.0))
-            .show(ctx, |ui| {
-                let title = compose_title(draft);
-                Frame::popup(ui.style())
-                    .fill(theme::paper(ctx))
-                    .rounding(8.0)
-                    .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui.small_button("▢").on_hover_text("Restore").clicked() {
-                                draft.minimized = false;
-                            }
-                            ui.label(RichText::new(title).strong());
-                            if icon_btn(ui, ph::X, "Close").clicked() {
-                                result.close = true;
-                            }
-                        });
-                    });
-            });
-        return result;
-    }
-
-    let screen = ctx.screen_rect();
-    let (size, pos) = match draft.window {
-        ComposeWindowMode::Compact => {
-            let size = Vec2::new(550.0, 350.0);
-            let pos = egui::pos2(
-                screen.right() - size.x - 10.0,
-                screen.bottom() - size.y - 10.0,
-            );
-            (size, pos)
-        }
-        ComposeWindowMode::Modal => {
-            let size = Vec2::new(
-                (680.0_f32).min(screen.width() * 0.9),
-                (screen.height() * 0.8).min(900.0),
-            );
-            let pos = egui::pos2(
-                screen.center().x - size.x * 0.5,
-                screen.center().y - size.y * 0.5,
-            );
-            (size, pos)
-        }
-        ComposeWindowMode::Full => {
-            let size = Vec2::new(screen.width() * 0.5, screen.height() - 16.0);
-            let pos = egui::pos2(screen.right() - size.x - 8.0, 8.0);
-            (size, pos)
-        }
-    };
-
-    if draft.window == ComposeWindowMode::Modal {
-        Area::new(Id::new("compose_backdrop"))
-            .order(Order::Foreground)
-            .fixed_pos(screen.min)
-            .show(ctx, |ui| {
-                let (rect, _resp) = ui.allocate_exact_size(screen.size(), Sense::click());
-                ui.painter()
-                    .rect_filled(rect, 0.0, Color32::from_black_alpha(60));
-            });
-    }
-
-    Area::new(Id::new("compose_window"))
-        .order(Order::Foreground)
-        .fixed_pos(pos)
-        .movable(draft.window == ComposeWindowMode::Compact)
-        .show(ctx, |ui| {
-            Frame::popup(ui.style())
-                .fill(theme::paper(ctx))
-                .stroke(egui::Stroke::new(1.0_f32, theme::mute(ctx).linear_multiply(0.35)))
-                .rounding(10.0)
-                .inner_margin(egui::Margin::same(12.0))
-                .show(ui, |ui| {
-                    ui.set_min_size(size);
-                    ui.set_max_size(size);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(compose_title(draft)).strong().size(14.0));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if icon_btn(ui, ph::X, "Close").clicked() {
-                                result.close = true;
-                            }
-                            if ui.small_button("—").on_hover_text("Minimize").clicked() {
-                                draft.minimized = true;
-                            }
-                            let next = match draft.window {
-                                ComposeWindowMode::Compact => ComposeWindowMode::Modal,
-                                ComposeWindowMode::Modal => ComposeWindowMode::Full,
-                                ComposeWindowMode::Full => ComposeWindowMode::Compact,
-                            };
-                            let tip = match next {
-                                ComposeWindowMode::Compact => "Compact",
-                                ComposeWindowMode::Modal => "Modal",
-                                ComposeWindowMode::Full => "Full",
-                            };
-                            if ui.small_button("⤢").on_hover_text(tip).clicked() {
-                                draft.window = next;
-                            }
-                        });
-                    });
-                    ui.separator();
-                    let form = paint_compose_form(ui, draft, sending, false);
-                    if form.close {
-                        result.close = true;
-                    }
-                    if form.send {
-                        result.send = true;
-                    }
-                });
-        });
-
     result
 }
 
@@ -816,7 +845,7 @@ pub fn show_chat_reply_dock(
                             }
                         }
                     }
-                    if icon_btn(ui, ph::ARROWS_OUT, "Open full composer").clicked() {
+                    if icon_btn(ui, ph::ARROWS_OUT, "Expand in reader").clicked() {
                         out.open_full = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

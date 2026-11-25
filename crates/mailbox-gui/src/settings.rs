@@ -49,7 +49,7 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
-            Self::Sounds => "Sounds",
+            Self::Sounds => "Sounds & alerts",
             Self::Accounts => "Accounts",
             Self::Folders => "Folders",
             Self::Ailiak => "Ailiak",
@@ -59,7 +59,7 @@ impl SettingsSection {
     pub fn blurb(self) -> &'static str {
         match self {
             Self::Appearance => "Theme and accent",
-            Self::Sounds => "New mail and click tones",
+            Self::Sounds => "New mail sound, clicks, and desktop notifications",
             Self::Accounts => "Mail accounts and avatars",
             Self::Folders => "Show, hide, and auto sync",
             Self::Ailiak => "Desk token and hashtag",
@@ -308,20 +308,23 @@ impl MailboxApp {
         use mailbox_core::SoundTheme;
 
         ui.label(
-            RichText::new("Sounds")
+            RichText::new("Sounds & alerts")
                 .strong()
                 .size(16.0)
                 .family(theme::nav_family()),
         );
         ui.label(
-            RichText::new("Short tones for new mail and optional click feedback.")
-                .small()
-                .color(theme::mute(ui.ctx())),
+            RichText::new(
+                "Short tones for new mail, optional click feedback, and desktop notifications.",
+            )
+            .small()
+            .color(theme::mute(ui.ctx())),
         );
         ui.add_space(16.0);
 
         let mut new_mail = self.config.ui.sound_new_mail;
         let mut clicks = self.config.ui.sound_clicks;
+        let mut notify = self.config.ui.notify_new_mail;
         let mut theme_sel = self.config.ui.sound_theme;
         let mut changed = false;
 
@@ -348,7 +351,7 @@ impl MailboxApp {
 
         if ui
             .checkbox(&mut new_mail, "New message sound")
-            .on_hover_text("Play when a sync fetches messages (on by default)")
+            .on_hover_text("Play when sync inserts new messages (on by default)")
             .changed()
         {
             changed = true;
@@ -357,6 +360,24 @@ impl MailboxApp {
             ui.add_space(24.0);
             if ui.small_button("Preview").clicked() {
                 crate::sounds::play_new_mail(theme_sel);
+            }
+        });
+        ui.add_space(10.0);
+        if ui
+            .checkbox(&mut notify, "Desktop notifications")
+            .on_hover_text("System notification when new mail arrives (on by default)")
+            .changed()
+        {
+            changed = true;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            if ui.small_button("Preview").clicked() {
+                crate::notifications::notify_new_mail(
+                    1,
+                    "Ada Lovelace",
+                    "Notes on the Analytical Engine",
+                );
             }
         });
         ui.add_space(10.0);
@@ -377,14 +398,16 @@ impl MailboxApp {
         if changed {
             self.config.ui.sound_new_mail = new_mail;
             self.config.ui.sound_clicks = clicks;
+            self.config.ui.notify_new_mail = notify;
             self.config.ui.sound_theme = theme_sel;
             if let Err(e) = self.config.save(&self.paths.config_file()) {
                 self.status = e.to_string();
             } else {
                 self.status = format!(
-                    "Sounds: {} · new mail {} · clicks {}",
+                    "Alerts: {} · sound {} · notify {} · clicks {}",
                     theme_sel.label(),
                     if new_mail { "on" } else { "off" },
+                    if notify { "on" } else { "off" },
                     if clicks { "on" } else { "off" }
                 );
             }

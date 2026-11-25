@@ -53,6 +53,9 @@ enum BgMsg {
         account_id: String,
         folders: usize,
         messages: usize,
+        new_messages: usize,
+        new_from: String,
+        new_subject: String,
         folder_path: String,
         detail: String,
     },
@@ -136,6 +139,12 @@ pub struct MailboxApp {
     pub(crate) mail_webview_req: Option<crate::mail_webview::MailWebViewRequest>,
     /// Consecutive frames without a mail webview request (debounce hide).
     mail_webview_miss_frames: u8,
+    /// WYSIWYG compose body (contenteditable wry view).
+    pub(crate) compose_webview: crate::compose_webview::ComposeWebView,
+    /// Set each frame while the composer shows an editor rect.
+    pub(crate) compose_webview_req: Option<crate::compose_webview::ComposeWebViewRequest>,
+    /// Waiting for a definitive HTML flush before SMTP send.
+    pending_compose_send: bool,
     pub(crate) search: String,
     /// Request keyboard focus on the top-bar search field (set by `/`).
     pub(crate) focus_search: bool,
@@ -287,6 +296,9 @@ impl MailboxApp {
             mail_webview: crate::mail_webview::MailWebView::default(),
             mail_webview_req: None,
             mail_webview_miss_frames: 0,
+            compose_webview: crate::compose_webview::ComposeWebView::default(),
+            compose_webview_req: None,
+            pending_compose_send: false,
             search: String::new(),
             focus_search: false,
             status,
@@ -1515,6 +1527,9 @@ and paste it here."
                         account_id,
                         folders: report.folders,
                         messages: report.messages,
+                        new_messages: report.new_messages,
+                        new_from: report.new_from,
+                        new_subject: report.new_subject,
                         folder_path: report.folder_path,
                         detail: report.detail,
                     });
@@ -1606,6 +1621,8 @@ and paste it here."
     }
 
     /// Snooze open message for later — keeps it unread and hides it from the folder list.
+    /// Toolbar entry is hidden for now; keep this ready to wire back up.
+    #[allow(dead_code)]
     pub(crate) fn snooze_current_message(&mut self) {
         if self.busy.snooze {
             return;
@@ -1709,8 +1726,12 @@ and paste it here."
     }
 
     pub(crate) fn open_compose_new(&mut self) {
+        // Leave People chat so the reader card can host the composer.
+        self.selected_person = None;
         let mut draft = crate::compose::ComposeDraft::new_blank();
         draft.from_email = self.account_email();
+        // `inline: false` → full reader-card composer (not the reply dock).
+        draft.inline = false;
         self.compose = Some(draft);
     }
 
@@ -1752,6 +1773,29 @@ and paste it here."
     }
 
     pub(crate) fn submit_compose(&mut self) {
+        let Some(draft) = self.compose.as_ref() else {
+            return;
+        };
+        if crate::compose::ComposeDraft::parse_recipients(&draft.to).is_empty() {
+            self.status = "Add at least one To recipient".into();
+            return;
+        }
+        if !self.config.accounts.iter().any(|a| a.id == self.account_id) {
+            self.status = "Add an account in Settings before sending".into();
+            return;
+        }
+        // Pull a definitive HTML snapshot from the editor before SMTP.
+        if self.compose_webview.is_alive() {
+            self.pending_compose_send = true;
+            self.compose_webview.request_flush();
+            self.status = "Sending…".into();
+            return;
+        }
+        self.finish_submit_compose();
+    }
+
+    fn finish_submit_compose(&mut self) {
+        self.pending_compose_send = false;
         let Some(draft) = self.compose.clone() else {
             return;
         };
@@ -1772,12 +1816,18 @@ and paste it here."
                 return;
             }
         };
+        let html = draft.body_html_for_send();
         let mail = mailbox_core::OutgoingMail {
             to: crate::compose::ComposeDraft::parse_recipients(&draft.to),
             cc: crate::compose::ComposeDraft::parse_recipients(&draft.cc),
             bcc: crate::compose::ComposeDraft::parse_recipients(&draft.bcc),
             subject: draft.subject.clone(),
             body_text: draft.body_for_send(),
+            body_html: if html.trim().is_empty() {
+                None
+            } else {
+                Some(html)
+            },
             in_reply_to: draft.in_reply_to.clone(),
             references: draft.references.clone(),
             attachments,
@@ -1805,6 +1855,53 @@ and paste it here."
                 }
             }
         });
+    }
+
+    pub(crate) fn apply_compose_webview_result(
+        &mut self,
+        draft: &crate::compose::ComposeDraft,
+        res: &crate::compose::ComposeUiResult,
+        ctx: &egui::Context,
+    ) {
+        if let Some(cmd) = res.exec {
+            self.compose_webview.exec_command(cmd);
+        }
+        if let Some(bounds) = res.editor_bounds {
+            let placeholder = if draft.is_reply() {
+                if draft.reply_to_name.is_empty() {
+                    "Write a reply…".into()
+                } else {
+                    format!("Reply to {}…", draft.reply_to_name)
+                }
+            } else {
+                "Write your message…".into()
+            };
+            self.compose_webview_req = Some(crate::compose_webview::ComposeWebViewRequest {
+                bounds,
+                pixels_per_point: ctx.pixels_per_point(),
+                editor_rev: draft.editor_rev,
+                initial_html: draft.body_html.clone(),
+                // Reader card is always light paper.
+                dark: false,
+                placeholder,
+            });
+        }
+    }
+
+    fn sync_compose_from_webview(&mut self) {
+        let _ = self.compose_webview.poll();
+        let Some(draft) = self.compose.as_mut() else {
+            return;
+        };
+        if !self.compose_webview.is_synced(draft.editor_rev) {
+            return;
+        }
+        draft.body = self.compose_webview.content.text.clone();
+        draft.body_html = self.compose_webview.content.html.clone();
+        draft.fmt = self.compose_webview.fmt;
+        if !draft.body_is_empty() || !draft.attachments.is_empty() {
+            draft.dock_focused = true;
+        }
     }
 
     pub(crate) fn submit_chat_reply(&mut self) {
@@ -1852,6 +1949,7 @@ and paste it here."
             bcc: vec![],
             subject,
             body_text: body,
+            body_html: None,
             in_reply_to,
             references,
             attachments,
@@ -1891,7 +1989,7 @@ and paste it here."
             return Ok(());
         }
 
-        // Switching messages dismisses an in-reader reply (floating New can stay).
+        // Switching messages dismisses an in-reader reply dock (full-card New stays).
         if self.compose.as_ref().is_some_and(|c| c.inline) {
             self.compose = None;
         }
@@ -2042,6 +2140,8 @@ and paste it here."
                     self.busy.send = false;
                     self.status = "Message sent".into();
                     self.compose = None;
+                    self.pending_compose_send = false;
+                    self.compose_webview.hide();
                     self.chat_reply.clear();
                     self.chat_reply_focused = false;
                     self.chat_attachments.clear();
@@ -2138,14 +2238,24 @@ and paste it here."
                     account_id,
                     folders,
                     messages,
+                    new_messages,
+                    new_from,
+                    new_subject,
                     folder_path,
                     detail,
                 } => {
                     self.busy.sync = false;
                     self.last_sync_at = Instant::now();
                     self.note_sync_stamp();
-                    if messages > 0 && self.config.ui.sound_new_mail {
+                    if new_messages > 0 && self.config.ui.sound_new_mail {
                         crate::sounds::play_new_mail(self.config.ui.sound_theme);
+                    }
+                    if new_messages > 0 && self.config.ui.notify_new_mail {
+                        crate::notifications::notify_new_mail(
+                            new_messages,
+                            &new_from,
+                            &new_subject,
+                        );
                     }
                     self.account_id = account_id;
                     self.selected_folder = folder_path.clone();
@@ -2806,8 +2916,11 @@ impl App for MailboxApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if ctx.input(|i| i.viewport().close_requested()) && self.mail_webview.is_alive() {
+        if ctx.input(|i| i.viewport().close_requested())
+            && (self.mail_webview.is_alive() || self.compose_webview.is_alive())
+        {
             self.mail_webview.destroy();
+            self.compose_webview.destroy();
             self.exit_after_webview = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.request_repaint();
@@ -2819,12 +2932,27 @@ impl App for MailboxApp {
         self.logos.poll(ctx);
         self.mail_images.poll(ctx);
         crate::mail_webview::MailWebView::pump_platform();
+        self.sync_compose_from_webview();
+        if self.pending_compose_send {
+            if let Some(c) = self.compose_webview.take_flush() {
+                if let Some(draft) = self.compose.as_mut() {
+                    draft.body = c.text;
+                    draft.body_html = c.html;
+                }
+                self.finish_submit_compose();
+            } else if !self.compose_webview.is_alive() {
+                self.finish_submit_compose();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+        }
         theme::sync_system(ctx, self.config.ui.theme);
         self.handle_keys(ctx);
         self.tick_auto_sync(ctx);
 
-        // Reader sets this while painting; clear first so a missing request hides the view.
+        // Reader / composer set these while painting; clear first so a missing request hides.
         self.mail_webview_req = None;
+        self.compose_webview_req = None;
 
         if self.show_help {
             self.help_window(ctx);
@@ -2842,22 +2970,9 @@ impl App for MailboxApp {
             crate::sounds::play_click(self.config.ui.sound_theme);
         }
 
-        // Floating compose for New (and reply promoted to full via ⤢).
-        if let Some(mut draft) = self.compose.take() {
-            if draft.inline {
-                self.compose = Some(draft);
-            } else {
-                let res = crate::compose::show_floating_compose(ctx, &mut draft, self.busy.send);
-                if res.send {
-                    self.compose = Some(draft);
-                    self.submit_compose();
-                } else if !res.close {
-                    self.compose = Some(draft);
-                }
-            }
-        }
+        // Compose paints inside the reader card (see reader_pane).
 
-        // wry child views always sit above egui — hide whenever composing.
+        // Compose editor webview (above egui). Hide mail reader while composing.
         let hide_mail = self.show_settings
             || self.show_help
             || self.show_feedback
@@ -2887,8 +3002,16 @@ impl App for MailboxApp {
         }
         self.mail_webview.poll_links();
 
+        if let Some(req) = self.compose_webview_req.take() {
+            self.compose_webview.show(frame, &req);
+            ctx.request_repaint_after(Duration::from_millis(50));
+        } else {
+            self.compose_webview.hide();
+        }
+
         if self.busy.any()
             || self.calendar.loading
+            || self.pending_compose_send
             || (!self.status.contains("Ready") && self.status.ends_with('…'))
         {
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -2896,6 +3019,7 @@ impl App for MailboxApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.compose_webview.destroy();
         self.mail_webview.destroy();
     }
 }
