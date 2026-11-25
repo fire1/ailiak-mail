@@ -428,6 +428,52 @@ fn paint_attachment_chips(ui: &mut Ui, draft: &mut ComposeDraft) {
     ui.add_space(4.0);
 }
 
+/// Labeled single-line field that stays inside the row (no horizontal overflow).
+///
+/// Optional `trailing` runs first via right-to-left so Cc/Bcc (etc.) keep their
+/// space and the input only uses what's left.
+fn compose_labeled_field(
+    ui: &mut Ui,
+    label: &str,
+    label_w: f32,
+    value: &mut String,
+    field_fill: Color32,
+    mute: Color32,
+    trailing: impl FnOnce(&mut Ui),
+) {
+    ui.horizontal(|ui| {
+        ui.set_max_width(ui.available_width());
+        ui.add_sized(
+            [label_w, 20.0],
+            egui::Label::new(RichText::new(label).color(mute)),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            trailing(ui);
+            let field_w = ui.available_width().max(48.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(field_w, 32.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(field_w);
+                    ui.set_max_width(field_w);
+                    Frame::none()
+                        .fill(field_fill)
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.add(
+                                egui::TextEdit::singleline(value)
+                                    .desired_width(ui.available_width())
+                                    .frame(false),
+                            );
+                        });
+                },
+            );
+        });
+    });
+}
+
 /// Full composer painted inside the mail body / reader card.
 pub fn show_reader_compose(
     ui: &mut Ui,
@@ -439,9 +485,16 @@ pub fn show_reader_compose(
     let ink = theme::reader_ink();
     let field_fill = Color32::from_rgb(0xf3, 0xf4, 0xf6);
 
+    // Keep To / Subject / editor inside the reader card.
+    let card = ui.max_rect();
+    ui.set_clip_rect(card);
+    ui.set_max_width(card.width());
+
     ui.horizontal(|ui| {
+        ui.set_max_width(ui.available_width());
+        let title = compose_title(draft);
         ui.label(
-            RichText::new(compose_title(draft))
+            RichText::new(&title)
                 .strong()
                 .size(18.0)
                 .color(ink),
@@ -451,10 +504,9 @@ pub fn show_reader_compose(
                 result.close = true;
             }
             if !draft.from_email.is_empty() {
-                ui.label(
-                    RichText::new(format!("from {}", draft.from_email))
-                        .small()
-                        .color(mute),
+                let from = format!("from {}", draft.from_email);
+                ui.add(
+                    egui::Label::new(RichText::new(from).small().color(mute)).truncate(),
                 );
             }
         });
@@ -462,79 +514,32 @@ pub fn show_reader_compose(
     ui.add_space(8.0);
 
     let label_w = 56.0;
-    let field = |ui: &mut Ui, value: &mut String| {
-        ui.add(
-            egui::TextEdit::singleline(value)
-                .desired_width(ui.available_width())
-                .frame(false),
-        );
-    };
-
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [label_w, 20.0],
-            egui::Label::new(RichText::new("To").color(mute)),
-        );
-        Frame::none()
-            .fill(field_fill)
-            .rounding(8.0)
-            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-            .show(ui, |ui| {
-                field(ui, &mut draft.to);
-            });
-        if !draft.show_cc && ui.small_button("Cc").clicked() {
-            draft.show_cc = true;
-        }
+    compose_labeled_field(ui, "To", label_w, &mut draft.to, field_fill, mute, |ui| {
         if !draft.show_bcc && ui.small_button("Bcc").clicked() {
             draft.show_bcc = true;
+        }
+        if !draft.show_cc && ui.small_button("Cc").clicked() {
+            draft.show_cc = true;
         }
     });
     if draft.show_cc {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [label_w, 20.0],
-                egui::Label::new(RichText::new("Cc").color(mute)),
-            );
-            Frame::none()
-                .fill(field_fill)
-                .rounding(8.0)
-                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-                .show(ui, |ui| {
-                    field(ui, &mut draft.cc);
-                });
-        });
+        compose_labeled_field(ui, "Cc", label_w, &mut draft.cc, field_fill, mute, |_| {});
     }
     if draft.show_bcc {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [label_w, 20.0],
-                egui::Label::new(RichText::new("Bcc").color(mute)),
-            );
-            Frame::none()
-                .fill(field_fill)
-                .rounding(8.0)
-                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-                .show(ui, |ui| {
-                    field(ui, &mut draft.bcc);
-                });
-        });
+        compose_labeled_field(ui, "Bcc", label_w, &mut draft.bcc, field_fill, mute, |_| {});
     }
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [label_w, 20.0],
-            egui::Label::new(RichText::new("Subject").color(mute)),
-        );
-        Frame::none()
-            .fill(field_fill)
-            .rounding(8.0)
-            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-            .show(ui, |ui| {
-                field(ui, &mut draft.subject);
-            });
-    });
+    compose_labeled_field(
+        ui,
+        "Subject",
+        label_w,
+        &mut draft.subject,
+        field_fill,
+        mute,
+        |_| {},
+    );
     ui.add_space(6.0);
     paint_attachment_chips(ui, draft);
     paint_format_toolbar(ui, draft, &mut result);
@@ -542,8 +547,9 @@ pub fn show_reader_compose(
 
     let action_h = 40.0;
     let body_h = (ui.available_height() - action_h - 4.0).max(120.0);
+    let body_w = ui.available_width().min(card.width()).max(0.0);
     let (editor_rect, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), body_h), Sense::hover());
+        ui.allocate_exact_size(Vec2::new(body_w, body_h), Sense::hover());
     ui.painter().rect_filled(editor_rect, 10.0, field_fill);
     result.editor_bounds = Some(editor_rect);
 
