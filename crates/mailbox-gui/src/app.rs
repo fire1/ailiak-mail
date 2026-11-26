@@ -130,6 +130,8 @@ pub struct MailboxApp {
     pub(crate) chat_attachments: Vec<crate::compose::ComposeAttachment>,
     /// Floating compose draft (None = closed).
     pub(crate) compose: Option<crate::compose::ComposeDraft>,
+    /// Full-card “Message sent” notice after SMTP success (compose form cleared).
+    pub(crate) compose_sent: Option<crate::compose::ComposeSentNotice>,
     /// `(name, email)` suggestions for compose To/Cc/Bcc.
     pub(crate) compose_hints: Vec<(String, String)>,
     /// Focus the To field once when the full composer opens.
@@ -301,6 +303,7 @@ impl MailboxApp {
             chat_reply_focused: false,
             chat_attachments: Vec::new(),
             compose: None,
+            compose_sent: None,
             compose_hints: Vec::new(),
             compose_autofocus_to: false,
             compose_autofocus_subject: false,
@@ -1738,6 +1741,7 @@ and paste it here."
     pub(crate) fn open_compose_new(&mut self) {
         // Leave People chat so the reader card can host the composer.
         self.selected_person = None;
+        self.compose_sent = None;
         let mut draft = crate::compose::ComposeDraft::new_blank();
         draft.from_email = self.account_email();
         // `inline: false` → full reader-card composer (not the reply dock).
@@ -1753,6 +1757,7 @@ and paste it here."
     /// Feedback: full composer with To locked to [`FEEDBACK_TO_ADDR`].
     pub(crate) fn open_compose_feedback(&mut self) {
         self.selected_person = None;
+        self.compose_sent = None;
         self.show_help = false;
         self.show_feedback = false;
         let mut draft = crate::compose::ComposeDraft::new_feedback(FEEDBACK_TO_ADDR);
@@ -1764,6 +1769,10 @@ and paste it here."
         self.compose_body_focused = false;
         self.compose = Some(draft);
         self.status = format!("Feedback — sending to {FEEDBACK_TO_ADDR}");
+    }
+
+    pub(crate) fn dismiss_compose_sent(&mut self) {
+        self.compose_sent = None;
     }
 
     /// Load frequent From addresses for the composer suggestion popup.
@@ -1788,6 +1797,7 @@ and paste it here."
             self.status = "Open a message to reply".into();
             return;
         };
+        self.compose_sent = None;
         let email = self.account_email();
         self.compose = Some(crate::compose::ComposeDraft::from_reply(&msg, all, &email));
     }
@@ -1942,6 +1952,13 @@ and paste it here."
             }
         }
         if let Some(bounds) = res.editor_bounds {
+            // Native webview sits above egui — pull it back under recipient suggestions etc.
+            let Some(bounds) = crate::compose::inset_editor_bounds_for_overlays(
+                bounds,
+                &res.egui_overlays,
+            ) else {
+                return;
+            };
             // Webview is a native child above egui — clicks often never reach egui.
             // Use pointer position + IPC focus from the editor to drop To/Subject focus.
             let press_in_editor = ctx.input(|i| {
@@ -2468,15 +2485,25 @@ impl MailboxApp {
                 }
                 BgMsg::SendOk => {
                     self.busy.send = false;
-                    self.status = "Message sent".into();
-                    self.compose = None;
                     self.pending_compose_send = false;
                     self.pending_compose_send_frames = 0;
-                    self.compose_webview.hide();
+                    self.compose_body_focused = false;
+                    self.compose_autofocus_to = false;
+                    self.compose_autofocus_subject = false;
+                    // Snapshot recipients/subject, then wipe the draft + native editor.
+                    let notice = self
+                        .compose
+                        .take()
+                        .map(|d| crate::compose::ComposeSentNotice::from_draft(&d));
+                    self.compose_webview.reset_after_send();
+                    self.compose_webview_req = None;
+                    self.compose_sent = notice;
+                    self.status = "Message sent".into();
                     self.chat_reply.clear();
                     self.chat_reply_focused = false;
                     self.chat_attachments.clear();
                     if let Some(peer) = self.selected_person.clone() {
+                        // Chat dock send: refresh the thread; full-card notice still shows.
                         self.open_person_chat(&peer);
                     }
                 }

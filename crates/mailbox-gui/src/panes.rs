@@ -1826,6 +1826,20 @@ impl MailboxApp {
     }
 
     pub(crate) fn reader_pane(&mut self, ui: &mut Ui) {
+        // Post-send confirmation replaces the compose form until dismissed.
+        if let Some(notice) = self.compose_sent.clone() {
+            match crate::compose::show_compose_sent(ui, &notice) {
+                crate::compose::ComposeSentAction::WriteAnother => {
+                    self.open_compose_new();
+                }
+                crate::compose::ComposeSentAction::Done => {
+                    self.dismiss_compose_sent();
+                }
+                crate::compose::ComposeSentAction::None => {}
+            }
+            return;
+        }
+
         // Full-card composer (new mail, or reply expanded from the dock).
         if self.compose.as_ref().is_some_and(|c| !c.inline) {
             self.paint_compose_reader(ui);

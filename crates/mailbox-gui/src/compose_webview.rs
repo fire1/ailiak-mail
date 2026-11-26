@@ -166,6 +166,22 @@ impl ComposeWebView {
         crate::mail_webview::MailWebView::pump_platform();
     }
 
+    /// After a successful send: tear down the native editor and clear cached HTML
+    /// so the next compose opens empty (not the previous message).
+    pub fn reset_after_send(&mut self) {
+        self.destroy();
+        self.content = ComposeContent {
+            html: String::new(),
+            text: String::new(),
+        };
+        self.fmt = ComposeFmtState::default();
+        self.host_cmds.clear();
+        self.editor_focused = false;
+        self.send_hotkey = false;
+        self.flush_failed_flag = false;
+        self.last_error = None;
+    }
+
     /// Drain IPC: content, format state, ready. Returns true if content changed.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
