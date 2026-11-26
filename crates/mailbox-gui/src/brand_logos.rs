@@ -46,6 +46,7 @@ struct BrandPack {
     telegram: TextureHandle,
     zed: TextureHandle,
     gnome: TextureHandle,
+    mozilla: TextureHandle,
 }
 
 fn load(ctx: &Context, name: &str, svg: &str) -> TextureHandle {
@@ -55,7 +56,7 @@ fn load(ctx: &Context, name: &str, svg: &str) -> TextureHandle {
 
 fn pack(ctx: &Context) -> BrandPack {
     // Bump id when brand set changes so cached textures refresh.
-    let id = Id::new("ailiakmail_brand_logos_v7");
+    let id = Id::new("ailiakmail_brand_logos_v8");
     if let Some(p) = ctx.data(|d| d.get_temp::<BrandPack>(id)) {
         return p;
     }
@@ -142,6 +143,11 @@ fn pack(ctx: &Context) -> BrandPack {
         ),
         zed: load(ctx, "brand-zed", include_str!("../assets/brands/zed.svg")),
         gnome: load(ctx, "brand-gnome", include_str!("../assets/brands/gnome.svg")),
+        mozilla: load(
+            ctx,
+            "brand-mozilla",
+            include_str!("../assets/brands/mozilla.svg"),
+        ),
     };
     ctx.data_mut(|d| d.insert_temp(id, p.clone()));
     p
@@ -183,6 +189,7 @@ fn tex_for<'a>(pack: &'a BrandPack, brand_id: &str) -> Option<&'a TextureHandle>
         "telegram" => &pack.telegram,
         "zed" => &pack.zed,
         "gnome" => &pack.gnome,
+        "mozilla" | "firefox" => &pack.mozilla,
         _ => return None,
     })
 }

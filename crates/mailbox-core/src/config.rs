@@ -351,7 +351,7 @@ pub struct UiConfig {
     #[serde(default = "default_notify_new_mail")]
     pub notify_new_mail: bool,
     /// Desktop notification when a message is opened in the reader (Desk follow-up cue).
-    /// Default: on.
+    /// Default: off — opening mail from the list must not spam the desktop.
     #[serde(default = "default_notify_opened_mail")]
     pub notify_opened_mail: bool,
 }
@@ -535,7 +535,7 @@ fn default_notify_new_mail() -> bool {
 }
 
 fn default_notify_opened_mail() -> bool {
-    true
+    false
 }
 
 impl Default for UiConfig {

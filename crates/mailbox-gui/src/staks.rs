@@ -153,6 +153,9 @@ pub(crate) fn known_brand(domain: &str) -> Option<(&'static str, &'static str)> 
         ("t.me", "telegram", "Telegram"),
         ("zed.dev", "zed", "Zed"),
         ("gnome.org", "gnome", "GNOME"),
+        ("mozilla.org", "mozilla", "Mozilla"),
+        ("mozilla.com", "mozilla", "Mozilla"),
+        ("firefox.com", "mozilla", "Mozilla"),
         ("abv.bg", "abv", "ABV"),
     ];
     for (suffix, id, label) in BRANDS {
@@ -281,6 +284,14 @@ mod tests {
         assert_eq!(
             brand_id_for_addr("bot@teams.mail.microsoft"),
             Some("teams")
+        );
+        assert_eq!(
+            brand_id_for_addr("accounts@firefox.com"),
+            Some("mozilla")
+        );
+        assert_eq!(
+            brand_id_for_addr("firefox@mail.mozilla.org"),
+            Some("mozilla")
         );
     }
 }

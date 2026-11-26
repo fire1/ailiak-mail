@@ -282,9 +282,9 @@ impl MailboxApp {
         let logos_on = crate::logo_dev::LogoCache::configured();
         ui.label(
             RichText::new(if logos_on {
-                "Logo.dev CDN is configured (LOGO_DEV_PUBLISHABLE_KEY). Marks are cached under the app data logos/ folder; the CDN is only contacted when a logo is missing locally."
+                "Logo.dev CDN is configured (LOGO_DEV_PUBLISHABLE_KEY). Marks are cached under the app data logos/ folder; the CDN is only contacted when a logo is missing locally. Favicons are used as a fallback."
             } else {
-                "Set LOGO_DEV_PUBLISHABLE_KEY in `.env` to load company logos from Logo.dev."
+                "Company logos load via site favicons (no key). Set LOGO_DEV_PUBLISHABLE_KEY in `.env` for sharper Logo.dev marks when available."
             })
             .small()
             .color(theme::mute(ui.ctx())),
@@ -385,7 +385,7 @@ impl MailboxApp {
         if ui
             .checkbox(&mut notify_opened, "Opened mail notifications")
             .on_hover_text(
-                "System notification when you open a message — Desk follow-up cue (on by default)",
+                "System notification when you open a message — Desk follow-up cue (off by default)",
             )
             .changed()
         {

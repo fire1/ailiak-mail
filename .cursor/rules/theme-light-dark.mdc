@@ -1,0 +1,13 @@
+---
+description: Always update light and dark theme visuals together
+alwaysApply: true
+---
+
+# Theme: light + dark together
+
+When changing any visual (colors, fills, text, chips, cards, avatars, overlays, backgrounds):
+
+- Update **both** light and dark in the same change via `theme.rs` palette tokens.
+- Do not hard-code white/light plates for shell UI that must follow dark mode (unread rows, list chrome, etc.).
+- Intentional exception: HTML mail reader card / webview backdrop stay light paper.
+- See root `AGENTS.md` for the full note.

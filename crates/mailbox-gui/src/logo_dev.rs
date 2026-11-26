@@ -1,9 +1,10 @@
-//! Company logos from [Logo.dev](https://www.logo.dev) CDN (`img.logo.dev`).
+//! Company logos: prefer [Logo.dev](https://www.logo.dev) when a publishable key
+//! is set, otherwise fall back to Google’s favicon CDN (no key required).
 //!
-//! **Caching:** memory → on-disk PNG under the app data `logos/` dir → CDN only
-//! when neither has the mark. HTTP 404s are remembered as `.miss` files so we
-//! do not re-hit the API for known-missing domains. Transient network errors
-//! are session-only misses (retry next launch).
+//! **Caching:** memory → on-disk PNG under the app data `logos/` dir → network
+//! only when neither has the mark. Permanent misses (both sources empty) are
+//! remembered as `.miss` files. Transient network errors are session-only
+//! (retry next launch).
 //!
 //! Keys (never commit): `LOGO_DEV_PUBLISHABLE_KEY` / `LOGO_DEV_SECRET_KEY`
 //! (also accepts `AILIAKMAIL_LOGO_DEV_*`). Publishable (`pk_`) is used for CDN
@@ -23,7 +24,8 @@ const FETCH_PX: u32 = 128;
 /// Texture uploaded to egui (displayed ~20–28 CSS px).
 const TEX_PX: u32 = 64;
 /// Current on-disk PNG suffix (`{domain}.{CACHE_VER}.png`).
-const CACHE_VER: &str = "v2";
+/// Bumped when fetch strategy changes so old Logo.dev-only `.miss` markers retry.
+const CACHE_VER: &str = "v3";
 
 enum LogoMsg {
     Ready { key: String, rgba: ColorImage },
@@ -121,6 +123,7 @@ impl LogoCache {
             "telegram" => "telegram.org",
             "zed" => "zed.dev",
             "gnome" => "gnome.org",
+            "mozilla" | "firefox" => "mozilla.org",
             "abv" => "abv.bg",
             other if other.contains('.') && !other.contains(' ') => other,
             _ => return None,
@@ -235,16 +238,15 @@ impl LogoCache {
         if self.pending.contains(&key) {
             return None;
         }
-        let Some(token) = Self::publishable_key() else {
-            return None;
-        };
 
+        // Fetch even without Logo.dev — favicon CDN needs no key.
+        let token = Self::publishable_key();
         self.pending.insert(key.clone());
         let tx = self.tx.clone();
         let logos_dir = logos_dir.to_path_buf();
         thread::Builder::new()
             .name("logo-dev-fetch".into())
-            .spawn(move || match fetch_logo(&domain, &token, &logos_dir) {
+            .spawn(move || match fetch_logo(&domain, token.as_deref(), &logos_dir) {
                 Ok(FetchOutcome::Image(img)) => {
                     let _ = tx.send(LogoMsg::Ready { key, rgba: img });
                 }
@@ -294,35 +296,28 @@ fn rgba_to_color_image(img: &image::RgbaImage) -> ColorImage {
     ColorImage::from_rgba_unmultiplied(size, img.as_raw())
 }
 
-fn fetch_logo(domain: &str, token: &str, logos_dir: &Path) -> Result<FetchOutcome, String> {
-    // Full-color PNG — avoid `theme=` (washes marks) and prefer a large source
-    // then Lanczos to TEX_PX so 20–28px UI stays sharp.
-    let url = format!(
-        "https://img.logo.dev/{domain}?token={token}&format=png&size={FETCH_PX}&retina=true&fallback=404"
-    );
-    let client = reqwest::blocking::Client::builder()
+fn http_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
         .user_agent(concat!("AiliakMail/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| e.to_string())?;
-    let resp = client.get(&url).send().map_err(|e| e.to_string())?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        let _ = fs::create_dir_all(logos_dir);
-        let _ = fs::write(LogoCache::miss_path(logos_dir, domain), b"");
-        return Ok(FetchOutcome::NotFound);
-    }
-    if !resp.status().is_success() {
-        return Err(format!("logo.dev HTTP {}", resp.status()));
-    }
-    let bytes = resp.bytes().map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+}
+
+fn save_processed_logo(
+    logos_dir: &Path,
+    domain: &str,
+    bytes: &[u8],
+) -> Result<FetchOutcome, String> {
     if bytes.is_empty() {
-        let _ = fs::create_dir_all(logos_dir);
-        let _ = fs::write(LogoCache::miss_path(logos_dir, domain), b"");
         return Ok(FetchOutcome::NotFound);
     }
-    let decoded = image::load_from_memory(&bytes)
+    let decoded = image::load_from_memory(bytes)
         .map_err(|e| e.to_string())?
         .to_rgba8();
+    if decoded.width() < 8 || decoded.height() < 8 {
+        return Ok(FetchOutcome::NotFound);
+    }
     let processed = process_logo_rgba(decoded);
     let _ = fs::create_dir_all(logos_dir);
     let path = LogoCache::cache_path(logos_dir, domain);
@@ -331,6 +326,75 @@ fn fetch_logo(domain: &str, token: &str, logos_dir: &Path) -> Result<FetchOutcom
         .map_err(|e| format!("save logo cache {}: {e}", path.display()))?;
     let _ = fs::remove_file(LogoCache::miss_path(logos_dir, domain));
     Ok(FetchOutcome::Image(rgba_to_color_image(&processed)))
+}
+
+fn fetch_logo_dev(domain: &str, token: &str) -> Result<Option<Vec<u8>>, String> {
+    // Full-color PNG — avoid `theme=` (washes marks) and prefer a large source
+    // then Lanczos to TEX_PX so 20–28px UI stays sharp.
+    let url = format!(
+        "https://img.logo.dev/{domain}?token={token}&format=png&size={FETCH_PX}&retina=true&fallback=404"
+    );
+    let client = http_client()?;
+    let resp = client.get(&url).send().map_err(|e| e.to_string())?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        // 401/403/5xx → caller may fall back to favicons.
+        return Err(format!("logo.dev HTTP {}", resp.status()));
+    }
+    let bytes = resp.bytes().map_err(|e| e.to_string())?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(bytes.to_vec()))
+}
+
+/// Key-free fallback when Logo.dev is unset or fails (company marks for Staks / list).
+fn fetch_favicon(domain: &str) -> Result<Option<Vec<u8>>, String> {
+    let url = format!("https://www.google.com/s2/favicons?domain={domain}&sz={FETCH_PX}");
+    let client = http_client()?;
+    let resp = client.get(&url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let bytes = resp.bytes().map_err(|e| e.to_string())?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(bytes.to_vec()))
+}
+
+fn fetch_logo(
+    domain: &str,
+    token: Option<&str>,
+    logos_dir: &Path,
+) -> Result<FetchOutcome, String> {
+    if let Some(token) = token {
+        match fetch_logo_dev(domain, token) {
+            Ok(Some(bytes)) => return save_processed_logo(logos_dir, domain, &bytes),
+            Ok(None) => {} // 404 — try favicon
+            Err(e) => {
+                tracing::debug!(domain, error = %e, "logo.dev fetch failed; trying favicon");
+            }
+        }
+    }
+
+    match fetch_favicon(domain)? {
+        Some(bytes) => match save_processed_logo(logos_dir, domain, &bytes)? {
+            FetchOutcome::Image(img) => Ok(FetchOutcome::Image(img)),
+            FetchOutcome::NotFound => {
+                let _ = fs::create_dir_all(logos_dir);
+                let _ = fs::write(LogoCache::miss_path(logos_dir, domain), b"");
+                Ok(FetchOutcome::NotFound)
+            }
+        },
+        None => {
+            let _ = fs::create_dir_all(logos_dir);
+            let _ = fs::write(LogoCache::miss_path(logos_dir, domain), b"");
+            Ok(FetchOutcome::NotFound)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +406,10 @@ mod tests {
         assert_eq!(
             LogoCache::domain_for("aliexpress").as_deref(),
             Some("aliexpress.com")
+        );
+        assert_eq!(
+            LogoCache::domain_for("mozilla").as_deref(),
+            Some("mozilla.org")
         );
         assert_eq!(
             LogoCache::domain_for("shopify.com").as_deref(),
@@ -361,7 +429,10 @@ mod tests {
     fn disk_candidates_prefer_current_then_legacy() {
         let dir = Path::new("/tmp/ailiakmail-logos-test");
         let paths = LogoCache::disk_candidates(dir, "Example.COM");
-        assert!(paths[0].ends_with("Example.COM.v2.png") || paths[0].to_string_lossy().contains("Example.COM.v2.png"));
+        assert!(
+            paths[0].ends_with("Example.COM.v3.png")
+                || paths[0].to_string_lossy().contains("Example.COM.v3.png")
+        );
         assert!(paths.iter().any(|p| p.to_string_lossy().ends_with(".l.png")));
         assert_eq!(LogoCache::safe_stem("a/b c.com"), "a_b_c.com");
     }

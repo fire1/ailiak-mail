@@ -1092,6 +1092,14 @@ pub fn show_reader_compose(
         if close_icon_btn(ui, "Discard").clicked() {
             result.close = true;
         }
+        // Reply opened full-size from the dock — offer shrink back under the mail.
+        if draft.is_reply() && draft.reply_source_id.is_some() {
+            ui.add_space(4.0);
+            if hover_text_above(icon_btn(ui, ph::ARROWS_IN), "Shrink reply").clicked() {
+                draft.inline = true;
+                draft.dock_focused = true;
+            }
+        }
         ui.add_space(6.0);
         ui.label(
             RichText::new(compose_title(draft))
@@ -1317,7 +1325,7 @@ pub fn show_reader_compose(
     ui.painter().hline(
         sep_rect.x_range(),
         sep_rect.center().y,
-        egui::Stroke::new(1.0, Color32::from_rgb(0xe5, 0xe7, 0xe5)),
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(0xe5, 0xe7, 0xe5)),
     );
     ui.add_space(8.0);
 
@@ -1488,7 +1496,14 @@ pub fn show_inline_compose(
                     if attach_button(ui).clicked() {
                         draft.pick_attachments();
                     }
-                    if hover_text_below(icon_btn(ui, ph::ARROWS_OUT), "Expand in reader").clicked()
+                    if draft.dock_focused {
+                        if hover_text_below(icon_btn(ui, ph::ARROWS_IN), "Shrink reply")
+                            .clicked()
+                        {
+                            draft.dock_focused = false;
+                        }
+                    }
+                    if hover_text_below(icon_btn(ui, ph::ARROWS_OUT), "Full size").clicked()
                     {
                         draft.inline = false;
                         if !draft.quote_on_send.is_empty()

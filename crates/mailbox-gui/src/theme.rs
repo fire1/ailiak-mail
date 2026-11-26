@@ -94,7 +94,7 @@ pub struct Palette {
     pub list_card: Color32,
     /// Mail reader card fill.
     pub reader_card: Color32,
-    /// Unread message row fill (stands out on dark list chrome).
+    /// Unread message row fill (theme-aware lift vs list_card).
     pub unread_row: Color32,
 }
 
@@ -150,8 +150,8 @@ fn dark_palette(accent: Color32) -> Palette {
         // HTML mail is authored for light paper — keep the reader card white
         // even when shell chrome is dark (see reader_ink / reader_mute).
         reader_card: Color32::WHITE,
-        // White rows on the darker list card so new mail is obvious.
-        unread_row: Color32::WHITE,
+        // Dark elevated row (not white) so unread stays on-theme vs list_card.
+        unread_row: mix(mix(paper, Color32::WHITE, 0.10), accent, 0.14),
     }
 }
 
@@ -573,13 +573,14 @@ pub fn unread_row(ctx: &egui::Context) -> Color32 {
     palette(ctx).unread_row
 }
 
-/// Ink / mute / accent for text painted on [`unread_row`] (always light surface).
-pub fn unread_row_ink() -> Color32 {
-    Color32::from_rgb(0x3a, 0x42, 0x40)
+/// Ink for text on [`unread_row`] — follows light/dark shell.
+pub fn unread_row_ink(ctx: &egui::Context) -> Color32 {
+    ink(ctx)
 }
 
-pub fn unread_row_mute() -> Color32 {
-    Color32::from_rgb(0x6e, 0x74, 0x72)
+/// Mute label color on [`unread_row`].
+pub fn unread_row_mute(ctx: &egui::Context) -> Color32 {
+    mute(ctx)
 }
 
 pub fn panel(ctx: &egui::Context) -> Color32 {

@@ -1062,14 +1062,14 @@ impl MailboxApp {
                         from_name.as_str()
                     };
                     let date = list_date_label(date_ts);
-                    // Unread rows use a white fill — force dark text so dark theme stays readable.
+                    // Unread rows use a theme-aware fill; ink/mute follow light/dark.
                     let name_style = if seen {
                         RichText::new(from).size(12.0)
                     } else {
                         RichText::new(from)
                             .strong()
                             .size(12.0)
-                            .color(theme::unread_row_ink())
+                            .color(theme::unread_row_ink(ui.ctx()))
                     };
                     let subject = if seen {
                         RichText::new(&subject_s)
@@ -1083,7 +1083,7 @@ impl MailboxApp {
                     let date_color = if seen {
                         theme::mute(ui.ctx())
                     } else {
-                        theme::unread_row_mute()
+                        theme::unread_row_mute(ui.ctx())
                     };
 
                     // Personal hosts (gmail.com, outlook.com, …) → profile photo / initials.
@@ -1281,7 +1281,7 @@ impl MailboxApp {
                                                 let chip_fg = if seen {
                                                     theme::mute(ui.ctx())
                                                 } else {
-                                                    theme::unread_row_mute()
+                                                    theme::unread_row_mute(ui.ctx())
                                                 };
                                                 let chip_bg = theme::chip(ui.ctx());
                                                 for lab in labels.iter().take(4) {
@@ -1320,7 +1320,7 @@ impl MailboxApp {
                                         let snippet_color = if seen {
                                             theme::mute(ui.ctx())
                                         } else {
-                                            theme::unread_row_mute()
+                                            theme::unread_row_mute(ui.ctx())
                                         };
                                         ui.add(
                                             egui::Label::new(
@@ -1400,10 +1400,12 @@ impl MailboxApp {
         let min_top = 72.0;
         let budget = ui.available_height().min(ui.clip_rect().height()).max(0.0);
         let compose_cap = (budget - bottom_clearance - gap - min_top).max(140.0);
+        // Default dock is a bit taller; focus grows further. Full panel uses
+        // `inline = false` (ARROWS_OUT) and can shrink back with ARROWS_IN.
         let compose_h = if focused {
-            (budget * 0.32).clamp(180.0, 260.0)
+            (budget * 0.42).clamp(240.0, 380.0)
         } else {
-            176.0
+            220.0
         }
         .min(compose_cap);
         let top_h = (budget - compose_h - gap - bottom_clearance).max(0.0);
