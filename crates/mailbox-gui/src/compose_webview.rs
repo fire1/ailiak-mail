@@ -56,10 +56,12 @@ pub struct ComposeWebViewRequest {
     pub initial_html: String,
     pub dark: bool,
     pub placeholder: String,
+    /// App accent as `#rrggbb` — custom caret bar color (native caret is hidden).
+    pub accent_css: String,
 }
 
 /// Bump when `editor_document` HTML/JS changes so an existing webview reloads.
-const EDITOR_SHELL_REV: u32 = 9;
+const EDITOR_SHELL_REV: u32 = 17;
 
 pub struct ComposeWebView {
     webview: Option<WebView>,
@@ -69,6 +71,7 @@ pub struct ComposeWebView {
     last_bounds: Option<Rect>,
     last_ppp: f32,
     dark: bool,
+    accent_css: String,
     visible: bool,
     ipc_tx: Sender<IpcMsg>,
     ipc_rx: Receiver<IpcMsg>,
@@ -99,6 +102,7 @@ impl Default for ComposeWebView {
             last_bounds: None,
             last_ppp: 0.0,
             dark: false,
+            accent_css: String::new(),
             visible: false,
             ipc_tx,
             ipc_rx,
@@ -276,19 +280,37 @@ impl ComposeWebView {
         let _ = wv.evaluate_script(&js);
     }
 
+    /// Bookmark the current caret so a modal file dialog cannot wipe the insert point.
+    pub fn prepare_insert(&self) {
+        let Some(wv) = &self.webview else {
+            return;
+        };
+        let _ = wv.evaluate_script(
+            "if(typeof saveInsertPoint==='function')saveInsertPoint();",
+        );
+    }
+
     /// Insert HTML at the caret (inline images, styled blocks, …).
     pub fn insert_html(&self, html: &str) {
         let Some(wv) = &self.webview else {
             return;
         };
+        // Use the page helper — restores the bookmarked caret after the OS file dialog
+        // steals focus (bare execCommand('insertHTML') silently no-ops with no selection).
         let js = format!(
-            "document.execCommand('insertHTML',false,{});var ed=document.getElementById('ed');if(ed)ed.focus();emit();",
-            serde_json_str(html)
+            "if(typeof insertHtmlAtCaret==='function')insertHtmlAtCaret({});\
+             else{{document.execCommand('insertHTML',false,{});var ed=document.getElementById('ed');if(ed)ed.focus();emit();}}",
+            serde_json_str(html),
+            serde_json_str(html),
         );
         let _ = wv.evaluate_script(&js);
     }
 
     /// Move keyboard focus into the contenteditable (clear egui field focus first).
+    ///
+    /// Call only when transferring focus from egui (underlay click). Do **not** call
+    /// on every IPC `focus` — the webview already has focus and re-running this
+    /// via `evaluate_script` fights GTK and freezes the UI.
     pub fn focus_editor(&self) {
         let Some(wv) = &self.webview else {
             return;
@@ -296,17 +318,19 @@ impl ComposeWebView {
         let _ = wv.evaluate_script(
             r#"var ed=document.getElementById('ed');
 if(ed){
-  var empty=!(ed.innerText||'').replace(/\u00a0/g,' ').trim();
-  if(empty&&!ed.querySelector('br')) ed.innerHTML='<br>';
   ed.focus();
   var sel=window.getSelection();
   if(!sel.rangeCount||!ed.contains(sel.anchorNode)){
-    var r=document.createRange();
-    r.selectNodeContents(ed);
-    r.collapse(false);
-    sel.removeAllRanges();
-    sel.addRange(r);
+    if(typeof placeCaretEnd==='function') placeCaretEnd();
+    else {
+      var r=document.createRange();
+      r.selectNodeContents(ed);
+      r.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
   }
+  if(typeof updateCaret==='function') updateCaret();
 }"#,
         );
     }
@@ -323,15 +347,23 @@ if(ed){
         }
 
         let ppp = req.pixels_per_point.max(0.1);
-        let theme_changed = self.dark != req.dark;
+        let theme_changed = self.dark != req.dark || self.accent_css != req.accent_css;
         self.dark = req.dark;
+        self.accent_css = req.accent_css.clone();
 
         if self.webview.is_some() && self.needs_recreate_for_ppp(ppp) {
             self.destroy();
         }
 
         if self.webview.is_none() {
-            match self.create(window, req.bounds, ppp, req.dark, &req.placeholder) {
+            match self.create(
+                window,
+                req.bounds,
+                ppp,
+                req.dark,
+                &req.placeholder,
+                &req.accent_css,
+            ) {
                 Ok(()) => {
                     self.last_error = None;
                     self.shell_rev = EDITOR_SHELL_REV;
@@ -342,14 +374,14 @@ if(ed){
                 }
             }
         } else if theme_changed {
-            self.reload_shell(&req.placeholder);
+            self.reload_shell(&req.placeholder, &req.accent_css);
             self.shell_rev = EDITOR_SHELL_REV;
             self.loaded_rev = None;
             self.ready = false;
         }
 
         if self.webview.is_some() && self.shell_rev != EDITOR_SHELL_REV {
-            self.reload_shell(&req.placeholder);
+            self.reload_shell(&req.placeholder, &req.accent_css);
             self.shell_rev = EDITOR_SHELL_REV;
             self.loaded_rev = None;
             self.ready = false;
@@ -393,11 +425,11 @@ if(ed){
         self.last_ppp > 0.0 && (self.last_ppp - ppp).abs() > 0.01
     }
 
-    fn reload_shell(&self, placeholder: &str) {
+    fn reload_shell(&self, placeholder: &str, accent_css: &str) {
         let Some(wv) = &self.webview else {
             return;
         };
-        let doc = editor_document(self.dark, placeholder);
+        let doc = editor_document(self.dark, placeholder, accent_css);
         let _ = wv.load_html(&doc);
     }
 
@@ -408,13 +440,14 @@ if(ed){
         pixels_per_point: f32,
         dark: bool,
         placeholder: &str,
+        accent_css: &str,
     ) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         ensure_gtk();
 
         let tx = self.ipc_tx.clone();
         let bg = theme::mail_webview_backdrop_rgba(dark);
-        let doc = editor_document(dark, placeholder);
+        let doc = editor_document(dark, placeholder, accent_css);
 
         let builder = WebViewBuilder::new()
             .with_transparent(false)
@@ -568,15 +601,18 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
     None
 }
 
-fn editor_document(dark: bool, placeholder: &str) -> String {
+fn editor_document(dark: bool, placeholder: &str, accent_css: &str) -> String {
     let bg = theme::mail_webview_backdrop_css(dark);
-    // Compose editor always uses dark ink on a light-ish field; match reader paper
-    // for readability in both app themes.
-    // High-contrast caret — WebKitGTK often hides soft/green carets on light paper.
-    let (fg, mute, caret) = if dark {
-        ("#e8eaed", "#9aa0a6", "#ffffff")
+    // Native WebKitGTK caret is unreliable here — hide it and paint a terminal-style bar.
+    let (fg, mute) = if dark {
+        ("#e8eaed", "#9aa0a6")
     } else {
-        ("#1f2328", "#6b7280", "#111111")
+        ("#1f2328", "#6b7280")
+    };
+    let accent = if accent_css.starts_with('#') && accent_css.len() >= 4 {
+        accent_css
+    } else {
+        "#169f84"
     };
     let ph = html_escape(placeholder);
     format!(
@@ -584,17 +620,25 @@ fn editor_document(dark: bool, placeholder: &str) -> String {
 html,body{{margin:0;height:100%;background:{bg};color:{fg};
 font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;}}
 #ed{{min-height:100%;outline:none;padding:8px 10px;box-sizing:border-box;word-wrap:break-word;
-  white-space:pre-wrap;caret-color:{caret};cursor:text;color:{fg};
-  -webkit-text-fill-color:{fg};}}
-#ed.ph:before{{content:attr(data-ph);color:{mute};-webkit-text-fill-color:{mute};
-  pointer-events:none;float:left;height:0;}}
-#ed:focus{{caret-color:{caret};}}
+  cursor:text;color:{fg};caret-color:transparent;}}
+#ed:empty:before{{content:attr(data-ph);color:{mute};pointer-events:none;}}
 #ed blockquote{{margin:0.6em 0;padding-left:0.8em;border-left:3px solid {mute};color:{mute};}}
 #ed h1{{font-size:1.6em;margin:0.4em 0;}}
 #ed h2{{font-size:1.35em;margin:0.4em 0;}}
 #ed h3{{font-size:1.15em;margin:0.4em 0;}}
-#ed img{{max-width:100%;height:auto;border-radius:4px;}}
-a{{color:#169f84;}}
+#ed p{{margin:0 0 0.6em;}}
+#ed img{{max-width:100%;height:auto;border-radius:4px;cursor:pointer;}}
+#ed img.sel{{outline:2px solid {accent};outline-offset:2px;}}
+a{{color:{accent};}}
+/* Terminal-style bar caret — WebKitGTK native caret often never paints. */
+#caret{{display:none;position:fixed;z-index:10;width:3px;border-radius:1px;
+  background:{accent};pointer-events:none;will-change:opacity;
+  animation:caretBlink 1.05s step-end infinite;}}
+@keyframes caretBlink{{50%{{opacity:0;}}}}
+/* Drag handle — bottom-right of the selected image. */
+#imgHandle{{display:none;position:fixed;z-index:16;width:14px;height:14px;box-sizing:border-box;
+  background:{accent};border:2px solid #fff;border-radius:3px;cursor:nwse-resize;
+  box-shadow:0 1px 4px rgba(0,0,0,.25);}}
 #slash{{display:none;position:fixed;z-index:20;min-width:220px;max-height:280px;overflow:auto;
   background:#fff;color:#1f2328;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);
   border:1px solid #e5e7eb;padding:6px 0;font:13px/1.35 system-ui,sans-serif;}}
@@ -604,12 +648,16 @@ a{{color:#169f84;}}
 #slash .row.sel{{background:#ede9fe;outline:2px solid #a78bfa;outline-offset:-2px;}}
 #slash .ico{{width:22px;color:#6b7280;font-weight:600;font-size:12px;}}
 </style></head><body>
-<div id="ed" contenteditable="true" class="ph" data-ph="{ph}"><br></div>
+<div id="ed" contenteditable="true" data-ph="{ph}"></div>
+<div id="caret"></div>
+<div id="imgHandle" title="Drag to resize"></div>
 <div id="slash"></div>
 <script>
 var ed=document.getElementById('ed');
+var caretEl=document.getElementById('caret');
 var slash=document.getElementById('slash');
 var slashOpen=false,slashIdx=0,slashQuery='',slashRange=null;
+var lastInsertSel=null;
 var STYLES=[
   {{id:'p',label:'Text',ico:'T'}},
   {{id:'h1',label:'Heading 1',ico:'H1'}},
@@ -625,34 +673,70 @@ function isEmpty(){{
   var t=(ed.innerText||'').replace(/\u00a0/g,' ').trim();
   return !t;
 }}
-function syncPh(){{
-  if(isEmpty()) ed.classList.add('ph');
-  else ed.classList.remove('ph');
-}}
-function ensureCaretScaffold(){{
-  // WebKit needs a line box (<br>) or the caret stays invisible when empty.
-  if(isEmpty()&&!ed.querySelector('br')) ed.innerHTML='<br>';
+function ensureBlockBr(block){{
+  // Only pad an existing empty block — never fill a truly empty #ed (breaks :empty caret).
+  if(!block||block.querySelector('br')) return;
+  if((block.textContent||'').replace(/\u00a0/g,' ').trim()) return;
+  block.appendChild(document.createElement('br'));
 }}
 function placeCaretEnd(){{
-  ensureCaretScaffold();
   var sel=window.getSelection();
   var r=document.createRange();
   r.selectNodeContents(ed);
   r.collapse(false);
   sel.removeAllRanges();
   sel.addRange(r);
+  updateCaret();
+}}
+function hideCaret(){{
+  if(caretEl) caretEl.style.display='none';
+}}
+function updateCaret(){{
+  if(!caretEl) return;
+  if(document.activeElement!==ed||slashOpen){{hideCaret();return;}}
+  var sel=window.getSelection();
+  if(!sel||!sel.rangeCount||!sel.isCollapsed){{hideCaret();return;}}
+  var r=sel.getRangeAt(0);
+  if(!ed.contains(r.commonAncestorContainer)){{hideCaret();return;}}
+  var rect=r.getBoundingClientRect();
+  if(!(rect.height>0)){{
+    // Empty / collapsed-at-block: probe with a ZWSP marker (WebKit often returns 0x0).
+    try{{
+      var probe=document.createElement('span');
+      probe.textContent='\u200b';
+      probe.style.cssText='display:inline;padding:0;margin:0;border:0;line-height:inherit;font:inherit;';
+      r.insertNode(probe);
+      rect=probe.getBoundingClientRect();
+      var p=probe.parentNode;
+      p.removeChild(probe);
+      p.normalize();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }}catch(e){{
+      var er=ed.getBoundingClientRect();
+      rect={{left:er.left+10,top:er.top+8,height:20,width:0,bottom:er.top+28,right:er.left+10}};
+    }}
+  }}
+  if(!(rect.height>0)){{hideCaret();return;}}
+  caretEl.style.left=Math.round(rect.left)+'px';
+  caretEl.style.top=Math.round(rect.top)+'px';
+  caretEl.style.height=Math.max(14,Math.round(rect.height))+'px';
+  caretEl.style.display='block';
+  // Restart blink so it stays solid while typing.
+  caretEl.style.animation='none';
+  void caretEl.offsetWidth;
+  caretEl.style.animation='';
 }}
 function setContent(h){{
-  ed.innerHTML=(h&&h.length)?h:'<br>';
-  syncPh();
+  ed.innerHTML=h||'';
   emit();
+  updateCaret();
 }}
 function report(){{
   var k=['bold','italic','underline','strikeThrough','insertUnorderedList','insertOrderedList'];
   post('fmt:'+k.map(function(c){{return document.queryCommandState(c)?1:0}}).join(''));
 }}
 function editorPlain(){{
-  // Prefer visible text; fall back to walking text nodes (more reliable than innerText alone).
   var t=(ed.innerText||'').replace(/\u00a0/g,' ');
   if(t.replace(/\s/g,'').length) return t;
   var out='';
@@ -664,7 +748,7 @@ function editorPlain(){{
 function snap(){{
   return JSON.stringify({{html:ed.innerHTML,text:editorPlain()}});
 }}
-function emit(){{syncPh();post('content:'+snap());report();}}
+function emit(){{post('content:'+snap());report();}}
 function filteredStyles(){{
   var q=slashQuery.toLowerCase();
   if(!q) return STYLES.slice();
@@ -673,7 +757,6 @@ function filteredStyles(){{
 function renderSlash(){{
   var items=filteredStyles();
   if(!items.length){{hideSlash();return;}}
-  // Default focus = Text (index 0) so "/" then Enter clears bold without typing "t".
   if(slashIdx<0||slashIdx>=items.length) slashIdx=0;
   var html='<div class="sec">Style</div>';
   items.forEach(function(s,i){{
@@ -686,7 +769,13 @@ function renderSlash(){{
     row.onmousedown=function(e){{e.preventDefault();pickSlash(+row.getAttribute('data-i'));}};
   }});
 }}
-function hideSlash(){{slash.style.display='none';slashOpen=false;slashQuery='';slashIdx=0;}}
+function hideSlash(){{
+  slash.style.display='none';
+  slashOpen=false;
+  slashQuery='';
+  slashIdx=0;
+  slashRange=null;
+}}
 function slashTrigger(){{
   var sel=window.getSelection();
   if(!sel||!sel.rangeCount) return null;
@@ -697,7 +786,6 @@ function slashTrigger(){{
   var text=node.textContent||'';
   var off=r.startOffset;
   var before=text.slice(0,off);
-  // Only match "/query" — never include the preceding space in the delete range.
   var m=before.match(/(?:^|[\s\u00a0])\/([^\s]*)$/);
   if(!m) return null;
   var slashPos=before.lastIndexOf('/');
@@ -718,36 +806,149 @@ function placeSlash(){{
   slash.style.top=top+'px';
   slash.style.left=left+'px';
 }}
-function openSlash(info){{
-  slashRange=info;
-  slashQuery=info.query||'';
-  slashIdx=0;
-  placeSlash();
-  renderSlash();
-}}
-function deleteSlashToken(){{
-  if(!slashRange) return;
-  try{{
-    var node=slashRange.node;
-    var start=slashRange.start;
-    var end=slashRange.end;
-    // Guard: never delete a character before '/'.
-    if(node&&node.nodeType===3){{
-      var t=node.textContent||'';
-      if(t.charAt(start)!=='/'){{
-        var i=t.lastIndexOf('/',end);
-        if(i>=0) start=i;
-      }}
+function spaceBeforeSlash(info){{
+  if(!info||!info.node||info.node.nodeType!==3) return false;
+  var t=info.node.textContent||'';
+  var s=info.start;
+  if(s>0) return /[\s\u00a0]/.test(t.charAt(s-1));
+  var prev=info.node.previousSibling;
+  while(prev){{
+    if(prev.nodeType===3){{
+      var pt=prev.textContent||'';
+      if(!pt.length){{prev=prev.previousSibling;continue;}}
+      return /[\s\u00a0]/.test(pt.charAt(pt.length-1));
     }}
-    var r=document.createRange();
-    r.setStart(node,start);
-    r.setEnd(node,end);
-    r.deleteContents();
-    var sel=window.getSelection();
+    if(prev.nodeType===1) return false;
+    prev=prev.previousSibling;
+  }}
+  return false;
+}}
+function caretHasSpaceBefore(){{
+  var sel=window.getSelection();
+  if(!sel||!sel.rangeCount||!sel.isCollapsed) return true;
+  var r=sel.getRangeAt(0);
+  var n=r.startContainer,o=r.startOffset;
+  if(n.nodeType===3){{
+    if(o>0) return /[\s\u00a0]/.test(n.data.charAt(o-1));
+    var prev=n.previousSibling;
+    while(prev){{
+      if(prev.nodeType===3){{
+        var pt=prev.data||'';
+        if(!pt.length){{prev=prev.previousSibling;continue;}}
+        return /[\s\u00a0]/.test(pt.charAt(pt.length-1));
+      }}
+      if(prev.nodeType===1){{
+        // Boundary after an element — only treat as "has space" if that el ends with space.
+        var t=(prev.innerText||prev.textContent||'');
+        return /[\s\u00a0]$/.test(t.replace(/\u200b/g,''));
+      }}
+      prev=prev.previousSibling;
+    }}
+    return false; // start of content — caller may still need a separator after a prior word in another node
+  }}
+  if(n.nodeType===1&&o>0){{
+    var c=n.childNodes[o-1];
+    if(!c) return false;
+    if(c.nodeType===3){{
+      var ct=c.data||'';
+      return ct.length>0&&/[\s\u00a0]/.test(ct.charAt(ct.length-1));
+    }}
+    var it=(c.innerText||c.textContent||'');
+    return /[\s\u00a0]$/.test(it.replace(/\u200b/g,''));
+  }}
+  return false;
+}}
+function protectSpaceBeforeCaret(){{
+  // WebKit formatBlock collapses trailing ASCII spaces — upgrade to NBSP before applying.
+  var sel=window.getSelection();
+  if(!sel||!sel.rangeCount||!sel.isCollapsed) return;
+  var r=sel.getRangeAt(0);
+  var n=r.startContainer,o=r.startOffset;
+  if(n.nodeType===3&&o>0&&n.data.charAt(o-1)===' '){{
+    n.data=n.data.slice(0,o-1)+'\u00a0'+n.data.slice(o);
+    r.setStart(n,o);
+    r.collapse(true);
     sel.removeAllRanges();
     sel.addRange(r);
-  }}catch(e){{}}
+    return;
+  }}
+  if(n.nodeType===3&&o===0){{
+    var prev=n.previousSibling;
+    if(prev&&prev.nodeType===3&&prev.data&&prev.data.charAt(prev.data.length-1)===' '){{
+      prev.data=prev.data.slice(0,-1)+'\u00a0';
+    }}
+  }}
+}}
+function ensureSpaceBeforeCaret(){{
+  if(caretHasSpaceBefore()) return;
+  // NBSP survives formatBlock; a normal space often does not.
+  document.execCommand('insertText',false,'\u00a0');
+}}
+function deleteSlashToken(){{
+  // Rewrite the text node (avoid Range.deleteContents eating neighbors).
+  if(!slashRange) return false;
+  var node=slashRange.node;
+  var start=slashRange.start;
+  var end=slashRange.end;
+  var keepSpace=false;
+  try{{
+    if(!node||node.nodeType!==3||!node.parentNode){{
+      slashRange=null;
+      placeCaretEnd();
+      return false;
+    }}
+    var t=node.textContent||'';
+    if(t.charAt(start)!=='/'){{
+      var i=t.lastIndexOf('/',end);
+      if(i>=0) start=i;
+    }}
+    keepSpace=start>0&&/[\s\u00a0]/.test(t.charAt(start-1));
+    if(!keepSpace&&start===0) keepSpace=spaceBeforeSlash({{node:node,start:0,end:end,query:''}});
+    var newText=t.slice(0,start)+t.slice(end);
+    // ASCII trailing spaces are collapsed by WebKit formatBlock — store NBSP instead.
+    if(keepSpace&&start>0&&newText.charAt(start-1)===' '){{
+      newText=newText.slice(0,start-1)+'\u00a0'+newText.slice(start);
+    }}
+    if(keepSpace&&start===0){{
+      var prevSp=node.previousSibling;
+      while(prevSp){{
+        if(prevSp.nodeType===3){{
+          var pdt=prevSp.data||'';
+          if(!pdt.length){{prevSp=prevSp.previousSibling;continue;}}
+          if(pdt.charAt(pdt.length-1)===' ') prevSp.data=pdt.slice(0,-1)+'\u00a0';
+          break;
+        }}
+        if(prevSp.nodeType===1) break;
+        prevSp=prevSp.previousSibling;
+      }}
+    }}
+    var sel=window.getSelection();
+    var r=document.createRange();
+    if(!newText){{
+      var parent=node.parentNode;
+      var idx=Array.prototype.indexOf.call(parent.childNodes,node);
+      parent.removeChild(node);
+      if(parent.childNodes.length===0&&parent!==ed){{
+        parent.appendChild(document.createElement('br'));
+        r.setStart(parent,0);
+      }} else {{
+        r.setStart(parent,Math.min(idx,parent.childNodes.length));
+      }}
+      r.collapse(true);
+    }} else {{
+      node.textContent=newText;
+      r.setStart(node,Math.min(start,newText.length));
+      r.collapse(true);
+    }}
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }}catch(e){{
+    placeCaretEnd();
+  }}
   slashRange=null;
+  var sel=window.getSelection();
+  if(!sel.rangeCount||!ed.contains(sel.anchorNode)) placeCaretEnd();
+  return keepSpace;
 }}
 function applyPlain(){{
   var sel=window.getSelection();
@@ -761,7 +962,6 @@ function applyPlain(){{
     }});
     return;
   }}
-  // Replace the highlight with a plain text node (keeps spaces; strips b/i/…).
   var text=r.toString();
   r.deleteContents();
   var node=document.createTextNode(text);
@@ -771,17 +971,48 @@ function applyPlain(){{
   sel.removeAllRanges();
   sel.addRange(r);
 }}
+function applyBlock(tag){{
+  // Prefer formatBlock when there is real content; fall back to insertHTML (first-command / empty).
+  var had=!!(ed.innerText||'').replace(/\u00a0/g,' ').trim();
+  if(had){{
+    document.execCommand('formatBlock',false,tag);
+  }}
+  var block=null;
+  try{{
+    var sel=window.getSelection();
+    if(sel&&sel.rangeCount){{
+      var n=sel.getRangeAt(0).commonAncestorContainer;
+      if(n.nodeType===3) n=n.parentNode;
+      while(n&&n!==ed){{
+        if(n.nodeType===1&&n.tagName&&n.tagName.toLowerCase()===tag){{block=n;break;}}
+        n=n.parentNode;
+      }}
+    }}
+  }}catch(e){{}}
+  if(!block) block=ed.querySelector(tag);
+  if(!block){{
+    document.execCommand('insertHTML',false,'<'+tag+'><br></'+tag+'>');
+    block=ed.querySelector(tag);
+  }}
+  if(block) ensureBlockBr(block);
+}}
 function applyStyle(id){{
+  ed.focus();
+  var sel=window.getSelection();
+  if(!sel.rangeCount||!ed.contains(sel.anchorNode)) placeCaretEnd();
   if(id==='ul') document.execCommand('insertUnorderedList');
   else if(id==='bold') document.execCommand('bold');
   else if(id==='italic') document.execCommand('italic');
   else if(id==='p'){{
-    // Text = paragraph + strip bold/italic (former Plain/Tx).
     applyPlain();
-    document.execCommand('formatBlock',false,'p');
+    applyBlock('p');
   }}
-  else if(id==='img'){{post('cmd:insertImage');}}
-  else document.execCommand('formatBlock',false,id);
+  else if(id==='img'){{
+    saveInsertPoint();
+    post('cmd:insertImage');
+    return;
+  }}
+  else applyBlock(id);
   emit();
 }}
 var savedSel=null;
@@ -807,15 +1038,34 @@ function pickSlash(i){{
   var s=items[i];
   if(!s) return;
   var keepSel=!!savedSel;
-  if(slashRange) deleteSlashToken();
+  var keptSpace=false;
+  if(slashRange){{
+    keptSpace=spaceBeforeSlash(slashRange);
+    deleteSlashToken();
+  }}
   hideSlash();
+  ed.focus();
   if(keepSel) restoreSel();
+  else {{
+    var sel=window.getSelection();
+    if(!sel.rangeCount||!ed.contains(sel.anchorNode)) placeCaretEnd();
+  }}
+  // Freeze the word-separating space as NBSP before execCommand can collapse it.
+  if(keptSpace){{
+    protectSpaceBeforeCaret();
+    ensureSpaceBeforeCaret();
+  }}
   applyStyle(s.id);
+  if(keptSpace){{
+    protectSpaceBeforeCaret();
+    ensureSpaceBeforeCaret();
+  }}
   savedSel=null;
   ed.focus();
+  updateCaret();
 }}
 function syncSlashFromInput(){{
-  if(savedSel) return; // selection-driven menu — don't dismiss on typed /
+  if(savedSel) return;
   var info=slashTrigger();
   if(info){{
     var q=info.query||'';
@@ -823,7 +1073,6 @@ function syncSlashFromInput(){{
     var queryChanged=q!==slashQuery;
     slashRange=info;
     slashQuery=q;
-    // Keep Text focused whenever the menu opens or the filter resets.
     if(justOpened||queryChanged||!q) slashIdx=0;
     placeSlash();
     renderSlash();
@@ -832,26 +1081,94 @@ function syncSlashFromInput(){{
   }}
 }}
 ed.addEventListener('input',function(){{
-  ensureCaretScaffold();
   emit();
   syncSlashFromInput();
+  updateCaret();
 }});
-ed.addEventListener('keyup',report);
-ed.addEventListener('mouseup',report);
+ed.addEventListener('keyup',function(){{report();updateCaret();}});
+ed.addEventListener('mouseup',function(){{report();updateCaret();}});
 ed.addEventListener('focus',function(){{
   post('focus');
-  ensureCaretScaffold();
   report();
-  var sel=window.getSelection();
-  if(!sel.rangeCount||!ed.contains(sel.anchorNode)) placeCaretEnd();
+  updateCaret();
 }});
-ed.addEventListener('mousedown',function(){{
-  // Native webview click — tell host to drop egui To/Subject focus.
+ed.addEventListener('blur',hideCaret);
+ed.addEventListener('mousedown',function(e){{
   post('focus');
+  if(e.target&&e.target.tagName==='IMG'&&ed.contains(e.target)){{
+    e.preventDefault();
+    selectComposeImg(e.target);
+    return;
+  }}
+  if(!(e.target&&e.target.id==='imgHandle')) clearComposeImg();
 }});
-document.addEventListener('selectionchange',function(){{if(document.activeElement===ed)report();}});
+var imgHandle=document.getElementById('imgHandle');
+var selectedImg=null,imgDrag=null;
+function clearComposeImg(){{
+  if(selectedImg) selectedImg.classList.remove('sel');
+  selectedImg=null;
+  if(imgHandle) imgHandle.style.display='none';
+}}
+function placeImgHandle(){{
+  if(!imgHandle||!selectedImg) return;
+  var r=selectedImg.getBoundingClientRect();
+  imgHandle.style.left=Math.round(r.right-8)+'px';
+  imgHandle.style.top=Math.round(r.bottom-8)+'px';
+  imgHandle.style.display='block';
+}}
+function selectComposeImg(img){{
+  clearComposeImg();
+  selectedImg=img;
+  img.classList.add('sel');
+  placeImgHandle();
+  hideCaret();
+}}
+if(imgHandle){{
+  imgHandle.addEventListener('mousedown',function(e){{
+    if(!selectedImg) return;
+    e.preventDefault();
+    e.stopPropagation();
+    post('focus');
+    var w=selectedImg.getBoundingClientRect().width;
+    imgDrag={{startX:e.clientX,startW:w}};
+  }});
+}}
+document.addEventListener('mousemove',function(e){{
+  if(!imgDrag||!selectedImg) return;
+  var dx=e.clientX-imgDrag.startX;
+  var edW=ed.getBoundingClientRect().width-20;
+  var nw=Math.round(Math.max(80,Math.min(edW,imgDrag.startW+dx)));
+  selectedImg.style.width=nw+'px';
+  selectedImg.style.height='auto';
+  selectedImg.style.maxWidth='100%';
+  selectedImg.setAttribute('width',String(nw));
+  selectedImg.removeAttribute('height');
+  placeImgHandle();
+}});
+document.addEventListener('mouseup',function(){{
+  if(imgDrag){{
+    imgDrag=null;
+    emit();
+    placeImgHandle();
+  }}
+}});
+document.addEventListener('selectionchange',function(){{
+  if(document.activeElement===ed){{saveInsertPoint();report();updateCaret();}}
+  else hideCaret();
+}});
+window.addEventListener('resize',function(){{updateCaret();placeImgHandle();}});
+window.addEventListener('scroll',function(){{updateCaret();placeImgHandle();}},true);
 ed.addEventListener('keydown',function(e){{
-  // With text selected, "/" opens Style without replacing the highlight.
+  if(selectedImg&&(e.key==='Backspace'||e.key==='Delete')&&!slashOpen){{
+    e.preventDefault();
+    var img=selectedImg;
+    clearComposeImg();
+    if(img&&img.parentNode) img.parentNode.removeChild(img);
+    emit();
+    updateCaret();
+    return;
+  }}
+  if(e.key==='Escape'&&selectedImg){{clearComposeImg();return;}}
   if(e.key==='/'&&!slashOpen&&!e.ctrlKey&&!e.metaKey&&!e.altKey){{
     var sel=window.getSelection();
     if(sel&&!sel.isCollapsed&&ed.contains(sel.anchorNode)){{
@@ -877,7 +1194,6 @@ ed.addEventListener('keydown',function(e){{
     }}
     if(e.key==='Escape'){{e.preventDefault();hideSlash();savedSel=null;return;}}
   }}
-  // Ctrl+Enter or Cmd+Enter sends.
   if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){{
     e.preventDefault();
     e.stopPropagation();
@@ -892,7 +1208,6 @@ ed.addEventListener('keydown',function(e){{
   }}
 }},true);
 ed.addEventListener('paste',function(e){{
-  // Always paste plain — strips bold/italic from rich clipboard content.
   var t=e.clipboardData&&e.clipboardData.getData('text/plain');
   if(t!=null){{
     e.preventDefault();
@@ -900,15 +1215,73 @@ ed.addEventListener('paste',function(e){{
     emit();
   }}
 }});
+function saveInsertPoint(){{
+  var sel=window.getSelection();
+  if(!sel||!sel.rangeCount){{lastInsertSel=null;return;}}
+  var r=sel.getRangeAt(0);
+  if(!ed.contains(r.commonAncestorContainer)){{lastInsertSel=null;return;}}
+  try{{lastInsertSel=r.cloneRange();}}catch(e){{lastInsertSel=null;}}
+}}
+function restoreInsertPoint(){{
+  ed.focus();
+  var sel=window.getSelection();
+  if(lastInsertSel){{
+    try{{
+      sel.removeAllRanges();
+      sel.addRange(lastInsertSel);
+      return true;
+    }}catch(e){{}}
+  }}
+  if(!sel.rangeCount||!ed.contains(sel.anchorNode)) placeCaretEnd();
+  return false;
+}}
+function insertHtmlAtCaret(html){{
+  // File dialog / toolbar click clears the live selection — restore bookmark first.
+  restoreInsertPoint();
+  var sel=window.getSelection();
+  if(!sel.rangeCount||!ed.contains(sel.anchorNode)) placeCaretEnd();
+  var ok=false;
+  try{{ok=document.execCommand('insertHTML',false,html);}}catch(e){{ok=false;}}
+  if(!ok){{
+    try{{
+      sel=window.getSelection();
+      if(!sel.rangeCount) placeCaretEnd();
+      sel=window.getSelection();
+      var r=sel.getRangeAt(0);
+      r.deleteContents();
+      var tmp=document.createElement('div');
+      tmp.innerHTML=html;
+      var frag=document.createDocumentFragment();
+      var node,last=null;
+      while((node=tmp.firstChild)){{last=frag.appendChild(node);}}
+      r.insertNode(frag);
+      if(last){{
+        r.setStartAfter(last);
+        r.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }}
+    }}catch(e2){{
+      ed.insertAdjacentHTML('beforeend',html);
+    }}
+  }}
+  saveInsertPoint();
+  emit();
+  updateCaret();
+}}
 window.applyStyle=applyStyle;
-syncPh();
+window.placeCaretEnd=placeCaretEnd;
+window.updateCaret=updateCaret;
+window.saveInsertPoint=saveInsertPoint;
+window.insertHtmlAtCaret=insertHtmlAtCaret;
 post('ready');
 emit();
+updateCaret();
 </script></body></html>"##,
         bg = bg,
         fg = fg,
         mute = mute,
-        caret = caret,
+        accent = accent,
         ph = ph,
     )
 }

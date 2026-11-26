@@ -240,20 +240,18 @@ impl ComposeDraft {
     }
 
     pub fn pick_attachments(&mut self) {
-        let files = rfd::FileDialog::new()
-            .set_title("Attach files")
-            .pick_files();
-        if let Some(paths) = files {
-            for path in paths {
-                let name = path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "file".into());
-                if self.attachments.iter().any(|a| a.path == path) {
-                    continue;
-                }
-                self.attachments.push(ComposeAttachment { path, name });
+        let Some(paths) = crate::file_pick::pick_files("Attach files", &[]) else {
+            return;
+        };
+        for path in paths {
+            let name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".into());
+            if self.attachments.iter().any(|a| a.path == path) {
+                continue;
             }
+            self.attachments.push(ComposeAttachment { path, name });
         }
     }
 }
@@ -675,7 +673,7 @@ fn recipient_matches(
 }
 
 /// Clean recipient row: one horizontal line — tags + input (+ trailing Cc/Bcc).
-/// Returns whether the recipient text field currently has egui focus.
+/// Returns `(field_focused, tab_wants_next)` — Tab from this field should leave to body/Cc.
 fn paint_clean_recipient_row(
     ui: &mut Ui,
     tags: &mut Vec<String>,
@@ -688,15 +686,16 @@ fn paint_clean_recipient_row(
     autofocus: bool,
     trailing_w: f32,
     trailing: impl FnOnce(&mut Ui),
-) -> bool {
+) -> (bool, bool) {
     // Single row only — never wrap the text field onto a second line.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.set_min_height(28.0);
 
-        let edit_id = ui.id().with(("compose_rcpt_edit", field_key));
-        let popup_id = ui.id().with(("compose_rcpt_popup", field_key));
-        let sel_id = ui.id().with(("compose_rcpt_sel", field_key));
+        // Stable ids so Subject→To Tab can focus the field from outside this row.
+        let edit_id = egui::Id::new(("mailbox_compose_rcpt", field_key));
+        let popup_id = egui::Id::new(("mailbox_compose_rcpt_popup", field_key));
+        let sel_id = egui::Id::new(("mailbox_compose_rcpt_sel", field_key));
 
         if !locked && (input.ends_with(',') || input.ends_with(';')) {
             commit_recipient_input(tags, input);
@@ -720,6 +719,7 @@ fn paint_clean_recipient_row(
         // Consume Enter/Tab *before* TextEdit so suggestions can be confirmed by keyboard.
         let focused = ui.memory(|m| m.has_focus(edit_id));
         let mut picked: Option<String> = None;
+        let mut tab_next = false;
         if !locked && focused && !matches.is_empty() {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)) {
                 sel = (sel + 1) % matches.len();
@@ -731,25 +731,29 @@ fn paint_clean_recipient_row(
                     sel - 1
                 };
             }
-            if ui.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, Key::Enter)
-                    || i.consume_key(egui::Modifiers::NONE, Key::Tab)
-            }) {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
                 picked = Some(matches[sel].1.clone());
+            }
+            // Tab confirms suggestion then advances (To → body), skipping the toolbar.
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
+                picked = Some(matches[sel].1.clone());
+                tab_next = true;
             }
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
                 ui.memory_mut(|m| m.close_popup());
             }
-        } else if !locked
-            && focused
-            && matches.is_empty()
-            && !input.trim().is_empty()
-            && ui.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, Key::Enter)
-                    || i.consume_key(egui::Modifiers::NONE, Key::Tab)
-            })
-        {
-            commit_recipient_input(tags, input);
+        } else if !locked && focused && matches.is_empty() {
+            if !input.trim().is_empty()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+            {
+                commit_recipient_input(tags, input);
+            }
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
+                if !input.trim().is_empty() {
+                    commit_recipient_input(tags, input);
+                }
+                tab_next = true;
+            }
         }
 
         ui.ctx().data_mut(|d| d.insert_temp(sel_id, sel));
@@ -790,7 +794,7 @@ fn paint_clean_recipient_row(
             if let Some(choice) = picked {
                 add_recipient_tag(tags, input, choice);
             }
-            return false;
+            return (false, false);
         };
 
         let input_focused = te.has_focus() || focused;
@@ -839,11 +843,15 @@ fn paint_clean_recipient_row(
         if let Some(choice) = picked {
             add_recipient_tag(tags, input, choice);
             ui.memory_mut(|m| m.close_popup());
-            ui.ctx()
-                .memory_mut(|m| m.request_focus(edit_id));
-            return true;
+            if tab_next {
+                ui.memory_mut(|m| m.surrender_focus(edit_id));
+            } else {
+                ui.ctx()
+                    .memory_mut(|m| m.request_focus(edit_id));
+            }
+            return (true, tab_next);
         }
-        input_focused
+        (input_focused, tab_next)
     })
     .inner
 }
@@ -894,7 +902,9 @@ pub fn show_reader_compose(
     ui.add_space(14.0);
 
     // Subject — large placeholder, no label / fill.
-    let subject_id = ui.id().with("compose_subject_clean");
+    // Stable id for Tab order: Subject → To → body.
+    let subject_id = egui::Id::new("mailbox_compose_subject");
+    let to_edit_id = egui::Id::new(("mailbox_compose_rcpt", "to"));
     let subject_resp = ui.add(
         egui::TextEdit::singleline(&mut draft.subject)
             .id(subject_id)
@@ -929,62 +939,65 @@ pub fn show_reader_compose(
     let mut open_cc = false;
     let mut open_bcc = false;
     // "To" is placeholder-only — hide once there are tags or typing.
-    ui.horizontal(|ui| {
-        let trail_w = if to_locked {
-            0.0
-        } else {
-            let mut w = 0.0;
-            if !draft.show_cc {
-                w += 28.0;
-            }
-            if !draft.show_bcc {
-                w += 36.0;
-            }
-            w
-        };
-        if paint_clean_recipient_row(
-            ui,
-            &mut draft.to,
-            &mut draft.to_input,
-            mute,
-            recipient_hints,
-            "to",
-            to_hint,
-            to_locked,
-            *autofocus_to && !to_locked,
-            trail_w,
-            |ui| {
-                if to_locked {
-                    return;
+    let (to_focused, to_tab) = ui
+        .horizontal(|ui| {
+            let trail_w = if to_locked {
+                0.0
+            } else {
+                let mut w = 0.0;
+                if !draft.show_cc {
+                    w += 28.0;
                 }
-                ui.spacing_mut().item_spacing.x = 10.0;
-                if !draft.show_cc
-                    && ui
-                        .add(
-                            egui::Label::new(RichText::new("Cc").size(13.0).color(mute))
-                                .sense(Sense::click()),
-                        )
-                        .on_hover_text("Add Cc")
-                        .clicked()
-                {
-                    open_cc = true;
+                if !draft.show_bcc {
+                    w += 36.0;
                 }
-                if !draft.show_bcc
-                    && ui
-                        .add(
-                            egui::Label::new(RichText::new("Bcc").size(13.0).color(mute))
-                                .sense(Sense::click()),
-                        )
-                        .on_hover_text("Add Bcc")
-                        .clicked()
-                {
-                    open_bcc = true;
-                }
-            },
-        ) {
-            result.header_focused = true;
-        }
-    });
+                w
+            };
+            paint_clean_recipient_row(
+                ui,
+                &mut draft.to,
+                &mut draft.to_input,
+                mute,
+                recipient_hints,
+                "to",
+                to_hint,
+                to_locked,
+                *autofocus_to && !to_locked,
+                trail_w,
+                |ui| {
+                    if to_locked {
+                        return;
+                    }
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    if !draft.show_cc
+                        && ui
+                            .add(
+                                egui::Label::new(RichText::new("Cc").size(13.0).color(mute))
+                                    .sense(Sense::click()),
+                            )
+                            .on_hover_text("Add Cc")
+                            .clicked()
+                    {
+                        open_cc = true;
+                    }
+                    if !draft.show_bcc
+                        && ui
+                            .add(
+                                egui::Label::new(RichText::new("Bcc").size(13.0).color(mute))
+                                    .sense(Sense::click()),
+                            )
+                            .on_hover_text("Add Bcc")
+                            .clicked()
+                    {
+                        open_bcc = true;
+                    }
+                },
+            )
+        })
+        .inner;
+    if to_focused {
+        result.header_focused = true;
+    }
     *autofocus_to = false;
     if open_cc {
         draft.show_cc = true;
@@ -993,49 +1006,90 @@ pub fn show_reader_compose(
         draft.show_bcc = true;
     }
 
+    // Cc/Bcc stay click-to-open only — Tab never lands here (Subject → To → body).
     if !to_locked && draft.show_cc {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Cc").size(13.0).color(mute));
-            ui.add_space(4.0);
-            if paint_clean_recipient_row(
-                ui,
-                &mut draft.cc,
-                &mut draft.cc_input,
-                mute,
-                recipient_hints,
-                "cc",
-                "Add Cc",
-                false,
-                open_cc,
-                0.0,
-                |_| {},
-            ) {
-                result.header_focused = true;
-            }
-        });
+        let (cc_focused, cc_tab) = ui
+            .horizontal(|ui| {
+                ui.label(RichText::new("Cc").size(13.0).color(mute));
+                ui.add_space(4.0);
+                paint_clean_recipient_row(
+                    ui,
+                    &mut draft.cc,
+                    &mut draft.cc_input,
+                    mute,
+                    recipient_hints,
+                    "cc",
+                    "Add Cc",
+                    false,
+                    open_cc,
+                    0.0,
+                    |_| {},
+                )
+            })
+            .inner;
+        if cc_focused {
+            result.header_focused = true;
+        }
+        // If focus somehow sits on Cc, Tab still advances to body.
+        if cc_tab {
+            result.focus_editor = true;
+            result.header_focused = false;
+        }
     }
     if !to_locked && draft.show_bcc {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Bcc").size(13.0).color(mute));
-            ui.add_space(4.0);
-            if paint_clean_recipient_row(
-                ui,
-                &mut draft.bcc,
-                &mut draft.bcc_input,
-                mute,
-                recipient_hints,
-                "bcc",
-                "Add Bcc",
-                false,
-                open_bcc,
-                0.0,
-                |_| {},
-            ) {
-                result.header_focused = true;
-            }
-        });
+        let (bcc_focused, bcc_tab) = ui
+            .horizontal(|ui| {
+                ui.label(RichText::new("Bcc").size(13.0).color(mute));
+                ui.add_space(4.0);
+                paint_clean_recipient_row(
+                    ui,
+                    &mut draft.bcc,
+                    &mut draft.bcc_input,
+                    mute,
+                    recipient_hints,
+                    "bcc",
+                    "Add Bcc",
+                    false,
+                    open_bcc,
+                    0.0,
+                    |_| {},
+                )
+            })
+            .inner;
+        if bcc_focused {
+            result.header_focused = true;
+        }
+        if bcc_tab {
+            result.focus_editor = true;
+            result.header_focused = false;
+        }
+    }
+
+    // Tab order: (none) → Subject → To → body. Always skip Cc/Bcc and the toolbar.
+    let subject_focused = subject_resp.has_focus();
+    if to_tab {
+        result.focus_editor = true;
+        result.header_focused = false;
+    } else if subject_focused
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab))
+    {
+        if to_locked {
+            result.focus_editor = true;
+            result.header_focused = false;
+        } else {
+            ui.memory_mut(|m| m.request_focus(to_edit_id));
+            result.header_focused = true;
+        }
+    } else if !subject_focused
+        && !to_focused
+        && !result.focus_editor
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab))
+    {
+        // First Tab from nowhere / other chrome → Subject.
+        ui.memory_mut(|m| m.request_focus(subject_id));
+        result.header_focused = true;
     }
 
     ui.add_space(10.0);
@@ -1062,6 +1116,7 @@ pub fn show_reader_compose(
     ui.painter()
         .rect_filled(editor_rect, 0.0, Color32::WHITE);
     if editor_resp.clicked()
+        || editor_resp.gained_focus()
         || (editor_resp.hovered() && ui.input(|i| i.pointer.primary_pressed()))
     {
         result.focus_editor = true;
@@ -1370,10 +1425,7 @@ pub fn show_chat_reply_dock(
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     if attach_button(ui).clicked() {
-                        if let Some(paths) = rfd::FileDialog::new()
-                            .set_title("Attach files")
-                            .pick_files()
-                        {
+                        if let Some(paths) = crate::file_pick::pick_files("Attach files", &[]) {
                             for path in paths {
                                 let name = path
                                     .file_name()

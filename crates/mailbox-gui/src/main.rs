@@ -8,6 +8,7 @@ mod busy;
 mod calendar;
 mod compose;
 mod compose_webview;
+mod file_pick;
 mod icons;
 mod layout;
 mod logo_dev;

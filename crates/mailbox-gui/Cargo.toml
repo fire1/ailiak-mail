@@ -27,6 +27,8 @@ md-5 = "0.10"
 notify-rust = "4"
 reqwest = { workspace = true, features = ["blocking"] }
 resvg = "0.45"
+# Linux picks prefer zenity/kdialog (see file_pick.rs) — in-process GTK dialogs
+# crash WebKitGTK with Gdk frame-clock asserts. rfd remains for win/mac + fallback.
 rfd = "0.15"
 rodio = { version = "0.20", default-features = false }
 sha2 = "0.10"

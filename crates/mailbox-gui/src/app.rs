@@ -1957,7 +1957,9 @@ and paste it here."
                     ctx.memory_mut(|m| m.surrender_focus(id));
                 }
             }
-            if press_in_editor || res.focus_editor || webview_took_focus {
+            // Only steal focus from egui → webview. IPC `focus` means the webview
+            // already has it; calling focus_editor() again freezes WebKitGTK/egui.
+            if press_in_editor || res.focus_editor {
                 self.compose_webview.focus_editor();
             }
             let placeholder = if draft.is_reply() {
@@ -1969,6 +1971,7 @@ and paste it here."
             } else {
                 "Write, type \"/\" for commands…".into()
             };
+            let accent = theme::accent(ctx);
             self.compose_webview_req = Some(crate::compose_webview::ComposeWebViewRequest {
                 bounds,
                 pixels_per_point: ctx.pixels_per_point(),
@@ -1977,34 +1980,40 @@ and paste it here."
                 // Reader card is always light paper.
                 dark: false,
                 placeholder,
+                accent_css: format!("#{:02x}{:02x}{:02x}", accent.r(), accent.g(), accent.b()),
             });
         }
     }
 
     /// Pick an image file and insert it as a data-URL `<img>` in the compose body.
     pub(crate) fn insert_inline_image_from_picker(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Insert image")
-            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
-            .pick_file()
-        else {
+        // Bookmark caret *before* the dialog steals WebKit focus/selection.
+        self.compose_webview.prepare_insert();
+        // Park the child view so a fallback in-process dialog cannot trip GDK asserts.
+        self.compose_webview.hide();
+        crate::mail_webview::MailWebView::pump_platform();
+        let Some(path) = crate::file_pick::pick_file(
+            "Insert image",
+            &[crate::file_pick::Filter {
+                name: "Images",
+                extensions: &["png", "jpg", "jpeg", "gif", "webp"],
+            }],
+        ) else {
+            self.status = "Image insert cancelled".into();
             return;
         };
-        let mime = match path
+        let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("png") => "image/png",
-            Some("jpg") | Some("jpeg") => "image/jpeg",
-            Some("gif") => "image/gif",
-            Some("webp") => "image/webp",
-            _ => {
-                self.status = "Unsupported image type".into();
-                return;
-            }
-        };
+            .unwrap_or_default();
+        if !matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp"
+        ) {
+            self.status = "Unsupported image type".into();
+            return;
+        }
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
@@ -2012,24 +2021,97 @@ and paste it here."
                 return;
             }
         };
-        const MAX: usize = 1_500_000;
-        if bytes.len() > MAX {
-            self.status = "Image too large to inline (max ~1.5 MB)".into();
-            return;
-        }
+        let (mime, encoded, display_w) = match prepare_compose_inline_image(&bytes, &ext) {
+            Ok(v) => v,
+            Err(e) => {
+                self.status = e;
+                return;
+            }
+        };
         use base64::Engine as _;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let alt = path
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&encoded);
+        let alt_raw = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "image".into());
+        let alt = alt_raw
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;");
+        // Explicit width fits common mail clients; max-width keeps fluid layout.
         let html = format!(
-            r#"<img src="data:{mime};base64,{b64}" alt="{alt}" style="max-width:100%;height:auto;">"#
+            r#"<img src="data:{mime};base64,{b64}" alt="{alt}" width="{display_w}" style="width:{display_w}px;max-width:100%;height:auto;">"#
         );
+        self.compose_webview.focus_editor();
         self.compose_webview.insert_html(&html);
-        self.status = format!("Inserted {alt}");
+        self.status = format!("Inserted {alt_raw} ({display_w}px wide — drag corner to resize)");
+    }
+}
+
+/// Downscale + re-encode for inline mail HTML. Returns `(mime, bytes, display_width_px)`.
+fn prepare_compose_inline_image(bytes: &[u8], ext: &str) -> Result<(String, Vec<u8>, u32), String> {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::imageops::FilterType;
+    use image::{DynamicImage, ImageEncoder, ImageFormat};
+    use std::io::Cursor;
+
+    /// Longest pixel edge after decode (keeps detail without huge payloads).
+    const MAX_EDGE: u32 = 960;
+    /// Default CSS/width attribute — fits typical mail reading panes.
+    const MAX_DISPLAY_W: u32 = 560;
+    const MAX_OUT: usize = 1_500_000;
+
+    // Keep animated GIFs as-is (re-encode would flatten to one frame).
+    if ext == "gif" {
+        if bytes.len() > MAX_OUT {
+            return Err("GIF too large to inline (max ~1.5 MB)".into());
+        }
+        let display_w = image::load_from_memory(bytes)
+            .map(|i| i.width().min(MAX_DISPLAY_W))
+            .unwrap_or(MAX_DISPLAY_W);
+        return Ok(("image/gif".into(), bytes.to_vec(), display_w));
     }
 
+    let img = image::load_from_memory(bytes).map_err(|e| format!("Could not decode image: {e}"))?;
+    let img = if img.width() > MAX_EDGE || img.height() > MAX_EDGE {
+        img.resize(MAX_EDGE, MAX_EDGE, FilterType::Triangle)
+    } else {
+        img
+    };
+    let display_w = img.width().min(MAX_DISPLAY_W);
+
+    let rgba = img.to_rgba8();
+    let has_alpha = rgba.pixels().any(|p| p.0[3] < 250);
+
+    let (mime, encoded) = if has_alpha {
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut out, ImageFormat::Png)
+            .map_err(|e| format!("PNG encode failed: {e}"))?;
+        ("image/png".into(), out.into_inner())
+    } else {
+        let rgb = DynamicImage::ImageRgba8(rgba).to_rgb8();
+        let mut out = Vec::new();
+        JpegEncoder::new_with_quality(&mut out, 85)
+            .write_image(
+                rgb.as_raw(),
+                rgb.width(),
+                rgb.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|e| format!("JPEG encode failed: {e}"))?;
+        ("image/jpeg".into(), out)
+    };
+
+    if encoded.len() > MAX_OUT {
+        return Err("Image too large to inline after resize (max ~1.5 MB)".into());
+    }
+    Ok((mime, encoded, display_w))
+}
+
+impl MailboxApp {
     fn sync_compose_from_webview(&mut self) {
         let _ = self.compose_webview.poll();
         for cmd in self.compose_webview.take_host_cmds() {
@@ -2647,10 +2729,13 @@ and paste it here."
             self.status = "Set the account email before choosing a photo".into();
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg"])
-            .pick_file()
-        else {
+        let Some(path) = crate::file_pick::pick_file(
+            "Choose account photo",
+            &[crate::file_pick::Filter {
+                name: "Images",
+                extensions: &["png", "jpg", "jpeg"],
+            }],
+        ) else {
             return;
         };
         match AvatarCache::set_local_override(&self.paths.avatars_dir(), &email, &path) {
