@@ -1,6 +1,6 @@
 //! Shared panel chrome — opaque fills so no clear-color gaps show through.
 
-use egui::{Color32, Frame, Margin, Rounding, Stroke, Ui};
+use egui::{Color32, Frame, Margin, Rounding, Shadow, Stroke, Ui, Vec2};
 
 pub fn panel_frame(margin: Margin, fill: Color32) -> Frame {
     Frame::none()
@@ -37,6 +37,16 @@ pub fn content_card(fill: Color32, gutter: Margin, pad: Margin) -> Frame {
     content_card_stroke(fill, gutter, pad, Stroke::NONE)
 }
 
+/// Soft drop shadow for inset content cards (list / reader body).
+fn content_card_shadow() -> Shadow {
+    Shadow {
+        offset: Vec2::new(0.0, 2.0),
+        blur: 10.0,
+        spread: 0.0,
+        color: Color32::from_black_alpha(22),
+    }
+}
+
 /// Same as [`content_card`] with an optional edge stroke (helps mid-card radius read).
 pub fn content_card_stroke(
     fill: Color32,
@@ -48,6 +58,7 @@ pub fn content_card_stroke(
         .fill(fill)
         .stroke(stroke)
         .rounding(Rounding::same(8.0))
+        .shadow(content_card_shadow())
         .outer_margin(gutter)
         .inner_margin(pad)
 }

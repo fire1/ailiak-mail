@@ -6,7 +6,7 @@ use anyhow::{bail, Result};
 use eframe::App;
 use egui::RichText;
 use mailbox_ailiak::{
-    build_payload, short_task_number, todo_defaults, AiliakClient, DeskTask,
+    build_payload, insert_selection_into_compose, short_task_number, AiliakClient, DeskTask,
 };
 use mailbox_core::config::{AppConfig, MailAccountConfig, MailAuthMethod, MailProtocol};
 use mailbox_core::oauth::{self, open_url, MailCredential, OAuthProvider, OAuthSignInResult};
@@ -30,7 +30,7 @@ use crate::settings::{AccountWizard, AccountWizardStep, SettingsSection};
 use crate::theme;
 use mailbox_core::providers::MailProvider;
 
-/// Full Ailiak Desk in the system browser (escape hatch; Todo uses the API).
+/// Full Ailiak Desk in the system browser (escape hatch; Options Todo uses the API).
 pub(crate) const DESK_URL: &str = "https://ailiak.com";
 /// Feedback nav entry → mail composer (To locked to [`FEEDBACK_TO_ADDR`]).
 pub(crate) const FEEDBACK_UI_ENABLED: bool = true;
@@ -179,7 +179,7 @@ pub struct MailboxApp {
     /// Reader subject shown in full (click a truncated title to expand).
     pub(crate) reader_subject_expanded: bool,
     pub(crate) show_calendar: bool,
-    pub(crate) show_todo: bool,
+    pub(crate) show_options: bool,
     /// Folder rail: icons only when true.
     pub(crate) folders_collapsed: bool,
     /// Nav accordion: Staks (brand/domain stacks) section open.
@@ -206,9 +206,18 @@ pub struct MailboxApp {
     pub(crate) last_shell_width: f32,
     /// Left edge of the list panel (for manual resize math).
     pub(crate) list_panel_left: f32,
-    pub(crate) todo_line: String,
-    pub(crate) todo_detail: String,
+    /// Single Ailiak slash-command compose field (Options → Todo).
+    pub(crate) todo_compose: String,
+    /// Visible row count for the Task textarea (default 5; drag to stretch).
+    pub(crate) todo_compose_rows: f32,
     pub(crate) todo_message_id: String,
+    /// Per-sender note shown in Options (persisted in SQLite).
+    pub(crate) options_note: String,
+    pub(crate) options_note_sender: String,
+    /// Waiting on mail webview `getSelection()` for Todo insert.
+    pub(crate) pending_todo_selection: bool,
+    /// Options → Task: slash-command help expanded under the textarea.
+    pub(crate) options_task_help_open: bool,
     pub(crate) calendar: CalendarState,
     pub(crate) ailiak_token_input: String,
     pub(crate) account_name_input: String,
@@ -334,7 +343,7 @@ impl MailboxApp {
             reader_headers_expanded: false,
             reader_subject_expanded: false,
             show_calendar: false,
-            show_todo: false,
+            show_options: false,
             folders_collapsed: false,
             staks_section_open: false,
             people_section_open: false,
@@ -348,9 +357,13 @@ impl MailboxApp {
             list_width: 340.0,
             last_shell_width: 0.0,
             list_panel_left: 0.0,
-            todo_line: String::new(),
-            todo_detail: String::new(),
+            todo_compose: String::new(),
+            todo_compose_rows: 5.0,
             todo_message_id: String::new(),
+            options_note: String::new(),
+            options_note_sender: String::new(),
+            pending_todo_selection: false,
+            options_task_help_open: false,
             calendar: CalendarState::default(),
             ailiak_token_input: String::new(),
             account_name_input: String::new(),
@@ -877,7 +890,7 @@ impl MailboxApp {
         self.show_settings = true;
         self.show_help = false;
         self.show_feedback = false;
-        self.show_todo = false;
+        self.close_options_panel();
         self.show_calendar = false;
     }
 
@@ -1754,6 +1767,32 @@ and paste it here."
         self.compose = Some(draft);
     }
 
+    /// New message with To prefilled from an Options sender (name + address).
+    pub(crate) fn open_compose_to(&mut self, name: &str, addr: &str) {
+        let addr = addr.trim();
+        if addr.is_empty() {
+            return;
+        }
+        self.selected_person = None;
+        self.compose_sent = None;
+        let mut draft = crate::compose::ComposeDraft::new_blank();
+        draft.from_email = self.account_email();
+        draft.inline = false;
+        let name = name.trim();
+        let to = if name.is_empty() || name.eq_ignore_ascii_case(addr) {
+            addr.to_string()
+        } else {
+            format!("{name} <{addr}>")
+        };
+        draft.to.push(to);
+        self.refresh_compose_hints();
+        self.compose_autofocus_to = false;
+        self.compose_autofocus_subject = true;
+        self.compose_body_focused = false;
+        self.compose = Some(draft);
+        self.status = format!("New message to {addr}");
+    }
+
     /// Feedback: full composer with To locked to [`FEEDBACK_TO_ADDR`].
     pub(crate) fn open_compose_feedback(&mut self) {
         self.selected_person = None;
@@ -2288,7 +2327,7 @@ impl MailboxApp {
                 let hint = if let Some(ref task_id) = linked {
                     Some(format!("On Desk · {task_id}"))
                 } else if self.config.ailiak.enabled {
-                    Some("Press a for Todo".into())
+                    Some("Press a for Options".into())
                 } else {
                     None
                 };
@@ -2469,7 +2508,7 @@ impl MailboxApp {
             match msg {
                 BgMsg::AiliakOk { task_id, for_date } => {
                     self.busy.ailiak = false;
-                    self.show_todo = false;
+                    self.close_options_panel();
                     let day = for_date.unwrap_or_else(|| "today".into());
                     self.refresh_desk_tasks();
                     // One-shot escape hatch to organize on the full Desk UI.
@@ -2793,9 +2832,9 @@ impl MailboxApp {
         }
     }
 
-    /// Todo and Calendar share one right-side panel — opening one closes the other.
+    /// Options and Calendar share one right-side panel — opening one closes the other.
     pub(crate) fn open_calendar_panel(&mut self) {
-        self.show_todo = false;
+        self.close_options_panel();
         self.show_calendar = true;
         self.refresh_desk_tasks();
     }
@@ -2808,26 +2847,125 @@ impl MailboxApp {
         }
     }
 
-    /// Toggle the Todo side panel (replaces Calendar when opening).
-    pub(crate) fn toggle_todo(&mut self) {
-        if self.show_todo {
-            self.show_todo = false;
-            return;
-        }
-        self.open_todo();
+    /// Persist the current Options note (if any) and hide the panel.
+    pub(crate) fn close_options_panel(&mut self) {
+        self.save_options_note();
+        self.show_options = false;
+        self.pending_todo_selection = false;
+        self.options_task_help_open = false;
     }
 
-    pub(crate) fn open_todo(&mut self) {
+    /// Toggle the Options side panel (replaces Calendar when opening).
+    pub(crate) fn toggle_options(&mut self) {
+        if self.show_options {
+            self.close_options_panel();
+            return;
+        }
+        self.open_options();
+    }
+
+    pub(crate) fn open_options(&mut self) {
         let Some(msg) = self.open_message.clone() else {
             self.status = "Open a message first".into();
             return;
         };
+        self.load_options_note_for(&msg.envelope.from_addr);
+        // Empty until the user inserts selected email text (or types slash commands).
+        self.todo_compose.clear();
+        self.todo_message_id = msg.envelope.message_id.clone();
+        self.show_calendar = false;
+        self.show_options = true;
+        self.pending_todo_selection = false;
+        self.options_task_help_open = false;
+
+        if let Ok(Some(existing)) = self.store.ailiak_task_for_message(&msg.envelope.message_id) {
+            self.status = format!("Already on Desk as {existing}");
+        }
+    }
+
+    pub(crate) fn load_options_note_for(&mut self, sender_addr: &str) {
+        self.save_options_note();
+        let key = sender_addr.trim().to_lowercase();
+        self.options_note_sender = key.clone();
+        self.options_note = if key.is_empty() {
+            String::new()
+        } else {
+            self.store
+                .get_sender_note(&key)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        };
+    }
+
+    pub(crate) fn save_options_note(&mut self) {
+        let key = self.options_note_sender.trim().to_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        if let Err(e) = self.store.set_sender_note(&key, &self.options_note) {
+            self.status = format!("Could not save note: {e}");
+        }
+    }
+
+    /// Keep Options sender/note in sync when the open message changes.
+    pub(crate) fn sync_options_with_open_message(&mut self) {
+        if !self.show_options {
+            return;
+        }
+        let Some(msg) = self.open_message.clone() else {
+            return;
+        };
+        let addr = msg.envelope.from_addr.trim().to_lowercase();
+        if addr != self.options_note_sender {
+            self.load_options_note_for(&msg.envelope.from_addr);
+        }
+        if msg.envelope.message_id != self.todo_message_id {
+            self.todo_compose.clear();
+            self.todo_message_id = msg.envelope.message_id.clone();
+        }
+    }
+
+    pub(crate) fn request_todo_selection_insert(&mut self) {
+        if !self.mail_webview.is_alive() {
+            self.status = "Select text in the email first".into();
+            return;
+        }
+        self.mail_webview.request_selection();
+        if self.mail_webview.has_pending_selection() {
+            self.pending_todo_selection = true;
+        } else {
+            self.status = "Select text in the email first".into();
+        }
+    }
+
+    pub(crate) fn poll_todo_selection_insert(&mut self) {
+        if !self.pending_todo_selection {
+            return;
+        }
+        let Some(sel) = self.mail_webview.take_selection() else {
+            return;
+        };
+        self.pending_todo_selection = false;
+        if sel.trim().is_empty() {
+            self.status = "Select text in the email first".into();
+            return;
+        }
+        insert_selection_into_compose(&mut self.todo_compose, &sel);
+        self.status = "Selection added to Task".into();
+    }
+
+    pub(crate) fn submit_todo(&mut self) {
+        if self.todo_message_id.is_empty() {
+            self.status = "No message linked for Todo".into();
+            return;
+        }
         if !self.config.ailiak.enabled {
             self.status = "Enable Ailiak in Settings first".into();
             self.open_settings(SettingsSection::Ailiak);
             return;
         }
-        match self.store.ailiak_task_for_message(&msg.envelope.message_id) {
+        match self.store.ailiak_task_for_message(&self.todo_message_id) {
             Ok(Some(existing)) => {
                 self.status = format!("Already on Desk as {existing}");
                 return;
@@ -2837,19 +2975,6 @@ impl MailboxApp {
                 self.status = format!("Dedup check failed: {e}");
                 return;
             }
-        }
-        let (line, detail) = todo_defaults(&msg, &self.config.ailiak);
-        self.todo_line = line;
-        self.todo_detail = detail;
-        self.todo_message_id = msg.envelope.message_id.clone();
-        self.show_calendar = false;
-        self.show_todo = true;
-    }
-
-    pub(crate) fn submit_todo(&mut self) {
-        if self.todo_message_id.is_empty() {
-            self.status = "No message linked for Todo".into();
-            return;
         }
         let token = match secrets::get_ailiak_token() {
             Ok(Some(t)) => t,
@@ -2867,11 +2992,10 @@ impl MailboxApp {
         let cfg = self.config.ailiak.clone();
         let base = cfg.base_url.clone();
         let message_id = self.todo_message_id.clone();
-        let line = self.todo_line.clone();
-        let detail = self.todo_detail.clone();
-        let ui_day = self.calendar.todo_for_date();
+        let compose = self.todo_compose.clone();
         let task_number = Some(short_task_number(&message_id));
-        let payload = build_payload(&line, &detail, ui_day, task_number, &cfg);
+        // Day comes from slash commands (`/from`, `/date`, `/todo`); no UI day chips.
+        let payload = build_payload(&compose, "", None, task_number, &cfg);
         let for_date_status = payload.for_date.clone();
         let tx = self.bg_tx.clone();
         let db_path = self.paths.db_file();
@@ -3075,7 +3199,7 @@ Try again, or check that a keyring/secret-service is running."
                 ui.monospace("g         sync selected folder");
                 ui.monospace("Shift+G   sync all folders");
                 ui.monospace("d         open Desk in browser (or click logo)");
-                ui.monospace("a         Todo (mail → Ailiak)");
+                ui.monospace("a         Options (note + task)");
                 ui.monospace("c         calendar (Desk days)");
                 ui.monospace("n         new message (compose)");
                 ui.monospace("r         reply (or focus chat reply)");
@@ -3086,9 +3210,9 @@ Try again, or check that a keyring/secret-service is running."
                 ui.monospace("Esc       leave settings / multi-select / compose");
                 ui.monospace("?         this help");
                 ui.add_space(8.0);
-                ui.label(RichText::new("Todo / slash").strong());
+                ui.label(RichText::new("Options / Task slash").strong());
                 ui.label(
-                    "In the Todo panel: /from tomorrow, /todo, /estimate 1h, /spent 30m, /done, #mail",
+                    "In Options → Task: /from tomorrow, /date, /todo, /estimate 1h, /spent 30m, /details, /done, #mail",
                 );
                 ui.add_space(8.0);
                 ui.label(RichText::new("Gmail / POP3").strong());
@@ -3137,8 +3261,8 @@ Try again, or check that a keyring/secret-service is running."
                 self.toggle_list_multi_select();
                 return;
             }
-            if self.show_todo || self.show_calendar {
-                self.show_todo = false;
+            if self.show_options || self.show_calendar {
+                self.close_options_panel();
                 self.show_calendar = false;
                 return;
             }
@@ -3186,7 +3310,7 @@ Try again, or check that a keyring/secret-service is running."
                 self.open_desk();
             }
             if i.key_pressed(egui::Key::A) && !i.modifiers.any() {
-                self.toggle_todo();
+                self.toggle_options();
             }
             if i.key_pressed(egui::Key::C) && !i.modifiers.any() {
                 self.toggle_calendar();
@@ -3298,6 +3422,11 @@ impl App for MailboxApp {
         self.logos.poll(ctx);
         self.mail_images.poll(ctx);
         crate::mail_webview::MailWebView::pump_platform();
+        self.poll_todo_selection_insert();
+        if self.pending_todo_selection {
+            ctx.request_repaint();
+        }
+        self.sync_options_with_open_message();
         self.sync_compose_from_webview();
         if self.pending_compose_send {
             self.pending_compose_send_frames =

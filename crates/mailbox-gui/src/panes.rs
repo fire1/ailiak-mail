@@ -291,7 +291,7 @@ impl MailboxApp {
         let collapsed = self.folders_collapsed;
         let mute = theme::mute(ui.ctx());
         let avatar_size = if collapsed { 28.0 } else { 32.0 };
-        let todo_enabled = self.open_message.is_some();
+        let options_enabled = self.open_message.is_some();
 
         let accounts: Vec<(String, String, String)> = self
             .config
@@ -310,7 +310,7 @@ impl MailboxApp {
         let mut clicked_person: Option<String> = None;
         let mut open_folders_settings = false;
         let mut sync_folders: Option<bool> = None; // Some(true) = all IMAP folders
-        let mut open_todo = false;
+        let mut open_options = false;
         let mut open_calendar = false;
         let mut open_settings = false;
         let mut open_feedback = false;
@@ -323,7 +323,7 @@ impl MailboxApp {
         ui.spacing_mut().item_spacing.y = 2.0;
 
         // Top-down: scrollable accounts/folders, then a fixed tools strip (paper fill).
-        // Rows: Todo, Calendar, Settings, [Feedback], Help.
+        // Rows: Options, Calendar, Settings, [Feedback], Help.
         // Height = rows + item gaps + band pad (8+16) + outer bottom (8).
         let row_h = 28.0;
         let tool_rows = if crate::app::FEEDBACK_UI_ENABLED {
@@ -737,8 +737,8 @@ impl MailboxApp {
             },
         )
         .show(ui, |ui| {
-            if icons::todo_nav_button(ui, todo_enabled, collapsed).clicked() {
-                open_todo = true;
+            if icons::options_nav_button(ui, options_enabled, collapsed).clicked() {
+                open_options = true;
             }
             if icons::calendar_nav_button(ui, collapsed).clicked() {
                 open_calendar = true;
@@ -816,8 +816,8 @@ impl MailboxApp {
             self.selected_stak = None;
             self.open_person_chat(&person);
         }
-        if open_todo {
-            self.toggle_todo();
+        if open_options {
+            self.toggle_options();
         }
         if open_calendar {
             self.toggle_calendar();
@@ -1976,7 +1976,7 @@ impl MailboxApp {
         }
     }
 
-    /// Desk calendar (right side panel — mutually exclusive with Todo).
+    /// Desk calendar (right side panel — mutually exclusive with Options).
     pub(crate) fn calendar_pane(&mut self, ui: &mut Ui) {
         use egui_phosphor::regular as ph;
 
@@ -2026,133 +2026,491 @@ impl MailboxApp {
         let _ = calendar::show_month(ui, &mut self.calendar);
     }
 
-    /// Todo → Desk compose (right side panel — mutually exclusive with Calendar).
-    pub(crate) fn todo_pane(&mut self, ui: &mut Ui) {
+    /// Resolve avatar for a message sender (personal / brand / Logo.dev / initials).
+    fn options_sender_avatar(
+        &mut self,
+        ctx: &egui::Context,
+        from_addr: &str,
+        from_name: &str,
+    ) -> crate::avatars::AvatarView {
+        let host = from_addr
+            .split('@')
+            .nth(1)
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if mailbox_core::is_personal_mailbox_domain(&host) {
+            self.resolve_avatar(ctx, from_addr, from_name)
+        } else if let Some(brand_id) = staks::brand_id_for_addr(from_addr) {
+            self.brand_texture(ctx, brand_id)
+                .map(crate::avatars::AvatarView::Image)
+                .unwrap_or_else(|| self.resolve_avatar(ctx, from_addr, from_name))
+        } else {
+            let domain = mailbox_core::remote_image_domain(from_addr);
+            let logo_key = if !domain.is_empty() { domain } else { host };
+            if !logo_key.is_empty() {
+                if let Some(tex) = self.brand_texture(ctx, &logo_key) {
+                    crate::avatars::AvatarView::Image(tex)
+                } else {
+                    self.resolve_avatar(ctx, from_addr, from_name)
+                }
+            } else {
+                self.resolve_avatar(ctx, from_addr, from_name)
+            }
+        }
+    }
+
+    /// Options panel (right side — mutually exclusive with Calendar).
+    pub(crate) fn options_pane(&mut self, ui: &mut Ui) {
         use egui_phosphor::regular as ph;
         use mailbox_ailiak::{compose_hint, parse_compose_commands};
 
+        let mute = theme::mute(ui.ctx());
+        let panel_bg = theme::panel(ui.ctx());
+        // Unfocused notes blend into the panel; focus lifts to white (light) or chip (dark).
+        let focus_bg = if ui.visuals().dark_mode {
+            theme::chip(ui.ctx())
+        } else {
+            theme::reader_card(ui.ctx())
+        };
+
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("Todo")
+                RichText::new("Options")
                     .strong()
                     .size(15.0)
                     .family(theme::nav_family())
                     .color(theme::accent(ui.ctx())),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let close = ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(ph::X)
-                                .family(theme::icon_family())
-                                .size(14.0)
-                                .color(theme::mute(ui.ctx())),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text("Close (Esc)");
-                if close.clicked() {
-                    self.show_todo = false;
+                if crate::compose::close_icon_btn(ui, "Close (Esc)").clicked() {
+                    self.close_options_panel();
                 }
             });
         });
-        ui.label(
-            RichText::new("Mail → Ailiak Desk")
-                .small()
-                .color(theme::mute(ui.ctx())),
-        );
-        ui.add_space(10.0);
+        ui.add_space(12.0);
 
-        ui.label(RichText::new("Day").small().strong());
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            let today = mailbox_ailiak::today_key();
-            let tomorrow = mailbox_ailiak::shift_day(&today, 1);
-            let sel = self.calendar.selected.clone();
-            if ui
-                .selectable_label(sel.as_deref() == Some(today.as_str()), "Today")
-                .clicked()
-            {
-                self.calendar.select_today();
-            }
-            if ui
-                .selectable_label(sel.as_deref() == Some(tomorrow.as_str()), "Tomorrow")
-                .clicked()
-            {
-                self.calendar.select_tomorrow();
-            }
-            if ui
-                .selectable_label(sel.as_deref() == Some(""), "None")
-                .clicked()
-            {
-                self.calendar.clear_day();
-            }
-            if let Some(d) = self.calendar.selected.as_deref() {
-                if !d.is_empty() {
-                    ui.label(RichText::new(d).small().color(theme::accent(ui.ctx())));
+        // —— Sender ——
+        let (from_name, from_addr) = self
+            .open_message
+            .as_ref()
+            .map(|m| {
+                (
+                    m.envelope.from_name.clone(),
+                    m.envelope.from_addr.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let display_name = if from_name.trim().is_empty() {
+            from_addr.clone()
+        } else {
+            from_name.clone()
+        };
+        let avatar = self.options_sender_avatar(ui.ctx(), &from_addr, &from_name);
+        let ink = theme::ink(ui.ctx());
+        let accent = theme::accent(ui.ctx());
+        let mut compose_to: Option<(String, String)> = None;
+        let mut copy_email: Option<String> = None;
+        let distinct_email = !from_addr.is_empty() && from_addr != display_name;
+
+        ui.vertical_centered(|ui| {
+            // White rounded square plate around the avatar (4px pad + light shadow).
+            let av_size = 56.0;
+            let av_pad = 4.0;
+            let box_side = av_size + av_pad * 2.0;
+            // Extra room so the soft shadow is not clipped.
+            let shadow_pad = 6.0;
+            ui.allocate_ui(
+                egui::vec2(box_side + shadow_pad * 2.0, box_side + shadow_pad * 2.0),
+                |ui| {
+                    ui.add_space(shadow_pad);
+                    ui.horizontal(|ui| {
+                        ui.add_space(shadow_pad);
+                        egui::Frame::none()
+                            .fill(Color32::WHITE)
+                            .rounding(10.0)
+                            .shadow(egui::Shadow {
+                                offset: egui::vec2(0.0, 1.0),
+                                blur: 6.0,
+                                spread: 0.0,
+                                color: Color32::from_black_alpha(28),
+                            })
+                            .inner_margin(egui::Margin::same(av_pad))
+                            .show(ui, |ui| {
+                                ui.set_min_size(egui::vec2(av_size, av_size));
+                                ui.set_max_size(egui::vec2(av_size, av_size));
+                                avatars::avatar_widget(ui, &avatar, av_size);
+                            });
+                    });
+                },
+            );
+            ui.add_space(8.0);
+
+            let text_row_w = (ui.available_width() - 8.0).max(48.0);
+
+            // Name — hover shows send-mail (and copy when name is the only line).
+            if !display_name.is_empty() {
+                let name_hot_id = ui.id().with("options_sender_name_hot");
+                let was_hot = ui.ctx().data(|d| d.get_temp::<bool>(name_hot_id).unwrap_or(false));
+                let name_row = ui.allocate_ui_with_layout(
+                    egui::vec2(text_row_w, 22.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let actions_w = if was_hot {
+                            if distinct_email {
+                                22.0
+                            } else {
+                                40.0
+                            }
+                        } else {
+                            0.0
+                        };
+                        let name_r = ui.add_sized(
+                            egui::vec2((ui.available_width() - actions_w).max(24.0), 20.0),
+                            egui::Label::new(
+                                RichText::new(&display_name)
+                                    .strong()
+                                    .size(14.0)
+                                    .color(ink),
+                            )
+                            .truncate()
+                            .sense(Sense::click()),
+                        );
+                        let mut send_clicked = false;
+                        let mut copy_clicked = false;
+                        let mut action_hovered = false;
+                        if (was_hot || name_r.hovered()) && !from_addr.is_empty() {
+                            let (send_rect, send_r) =
+                                ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::click());
+                            ui.painter().text(
+                                send_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                ph::PAPER_PLANE_TILT,
+                                egui::FontId::new(13.0, theme::icon_family()),
+                                accent,
+                            );
+                            send_clicked = send_r.clicked();
+                            action_hovered |= send_r.hovered();
+                            if !distinct_email {
+                                let (copy_rect, copy_r) =
+                                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
+                                ui.painter().text(
+                                    copy_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    ph::COPY,
+                                    egui::FontId::new(12.0, theme::icon_family()),
+                                    accent,
+                                );
+                                copy_clicked = copy_r.clicked();
+                                action_hovered |= copy_r.hovered();
+                            }
+                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                        }
+                        let hot = name_r.hovered() || action_hovered;
+                        let send = (name_r.clicked() || send_clicked) && !from_addr.is_empty();
+                        (send, copy_clicked, hot)
+                    },
+                );
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(name_hot_id, name_row.inner.2));
+                if name_row.inner.0 {
+                    compose_to = Some((from_name.clone(), from_addr.clone()));
                 }
+                if name_row.inner.1 {
+                    copy_email = Some(from_addr.clone());
+                }
+                name_row.response.on_hover_text(if display_name.len() > 24 {
+                    format!("{display_name}\nSend email")
+                } else {
+                    "Send email".into()
+                });
             }
-            if ui.small_button("Calendar").clicked() {
-                self.open_calendar_panel();
+
+            // Email — hover shows copy-to-clipboard.
+            if distinct_email {
+                let email_hot_id = ui.id().with("options_sender_email_hot");
+                let was_hot = ui
+                    .ctx()
+                    .data(|d| d.get_temp::<bool>(email_hot_id).unwrap_or(false));
+                let email_row = ui.allocate_ui_with_layout(
+                    egui::vec2(text_row_w, 18.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let actions_w = if was_hot { 20.0 } else { 0.0 };
+                        let email_r = ui.add_sized(
+                            egui::vec2((ui.available_width() - actions_w).max(24.0), 16.0),
+                            egui::Label::new(RichText::new(&from_addr).small().color(mute))
+                                .truncate()
+                                .sense(Sense::click()),
+                        );
+                        let mut copy_clicked = false;
+                        let mut icon_hovered = false;
+                        if was_hot || email_r.hovered() {
+                            let (icon_rect, icon_r) =
+                                ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
+                            ui.painter().text(
+                                icon_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                ph::COPY,
+                                egui::FontId::new(12.0, theme::icon_family()),
+                                accent,
+                            );
+                            copy_clicked = icon_r.clicked();
+                            icon_hovered = icon_r.hovered();
+                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                        }
+                        (
+                            email_r.clicked() || copy_clicked,
+                            email_r.hovered() || icon_hovered,
+                        )
+                    },
+                );
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(email_hot_id, email_row.inner.1));
+                if email_row.inner.0 {
+                    copy_email = Some(from_addr.clone());
+                }
+                email_row.response.on_hover_text(format!("{from_addr}\nCopy email"));
             }
         });
 
-        ui.add_space(12.0);
-        ui.label(RichText::new("Line").small().strong());
-        ui.label(
-            RichText::new("Slash commands ok — same as Ailiak compose")
-                .small()
-                .color(theme::mute(ui.ctx())),
-        );
-        ui.add_space(4.0);
-        ui.add(
-            egui::TextEdit::multiline(&mut self.todo_line)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .hint_text("Reply: …  #mail   /from tomorrow /estimate 1h"),
-        );
-        let hint = compose_hint(&parse_compose_commands(&self.todo_line));
-        ui.label(RichText::new(hint).small().color(theme::mute(ui.ctx())));
+        if let Some((name, addr)) = compose_to {
+            self.open_compose_to(&name, &addr);
+        }
+        if let Some(addr) = copy_email {
+            ui.ctx().copy_text(addr.clone());
+            self.status = format!("Copied {addr}");
+        }
 
-        ui.add_space(12.0);
-        ui.label(RichText::new("Detail").small().strong());
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .max_height(220.0)
-            .auto_shrink([false, false])
+        ui.add_space(18.0);
+        ui.label(
+            RichText::new("NOTE")
+                .small()
+                .color(mute)
+                .family(theme::nav_family()),
+        );
+        ui.add_space(6.0);
+        let note_id = ui.make_persistent_id("options_note_edit");
+        let note_focused = ui.memory(|m| m.has_focus(note_id));
+        let note_fill = if note_focused { focus_bg } else { panel_bg };
+        let note_stroke = if note_focused {
+            egui::Stroke::new(1.0, theme::palette(ui.ctx()).faint)
+        } else {
+            egui::Stroke::NONE
+        };
+        let note_resp = egui::Frame::none()
+            .fill(note_fill)
+            .stroke(note_stroke)
+            .rounding(4.0)
+            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
             .show(ui, |ui| {
                 ui.add(
-                    egui::TextEdit::multiline(&mut self.todo_detail)
-                        .desired_rows(10)
+                    egui::TextEdit::multiline(&mut self.options_note)
+                        .id(note_id)
+                        .desired_rows(3)
                         .desired_width(f32::INFINITY)
-                        .font(egui::TextStyle::Monospace),
+                        .frame(false)
+                        .hint_text("Note about this sender…"),
+                )
+            })
+            .inner;
+        if note_resp.changed() {
+            self.save_options_note();
+        }
+
+        ui.add_space(18.0);
+        ui.label(
+            RichText::new("TASK")
+                .small()
+                .color(mute)
+                .family(theme::nav_family()),
+        );
+        ui.add_space(6.0);
+        let rows = self.todo_compose_rows.round().clamp(5.0, 24.0) as usize;
+        let task_id = ui.make_persistent_id("options_task_edit");
+        let task_focused = ui.memory(|m| m.has_focus(task_id));
+        let task_fill = if task_focused { focus_bg } else { panel_bg };
+        let task_stroke = if task_focused {
+            egui::Stroke::new(1.0, theme::palette(ui.ctx()).faint)
+        } else {
+            egui::Stroke::NONE
+        };
+        egui::Frame::none()
+            .fill(task_fill)
+            .stroke(task_stroke)
+            .rounding(4.0)
+            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.todo_compose)
+                        .id(task_id)
+                        .desired_rows(rows)
+                        .desired_width(f32::INFINITY)
+                        .frame(false)
+                        .hint_text(
+                            "Mark text in the email, then Select — or type /from /details #mail …",
+                        ),
                 );
             });
+        // Drag handle to stretch the Task textarea.
+        let grip_h = 8.0;
+        let grip_w = ui.available_width();
+        let (grip_rect, grip) = ui.allocate_exact_size(
+            egui::vec2(grip_w, grip_h),
+            Sense::click_and_drag(),
+        );
+        let grip_color = if grip.hovered() || grip.dragged() {
+            theme::accent(ui.ctx())
+        } else {
+            mute.gamma_multiply(0.55)
+        };
+        let mid_y = grip_rect.center().y;
+        let bar_w = (grip_w * 0.28).clamp(28.0, 64.0);
+        ui.painter().hline(
+            grip_rect.center().x - bar_w * 0.5..=grip_rect.center().x + bar_w * 0.5,
+            mid_y,
+            egui::Stroke::new(2.0, grip_color),
+        );
+        if grip.dragged() {
+            let row_px = ui.text_style_height(&egui::TextStyle::Body).max(14.0);
+            self.todo_compose_rows =
+                (self.todo_compose_rows + grip.drag_delta().y / row_px).clamp(5.0, 24.0);
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+            ui.ctx().request_repaint();
+        } else if grip.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+        }
 
-        ui.add_space(14.0);
+        if self.options_task_help_open {
+            ui.add_space(6.0);
+            let parsed = parse_compose_commands(&self.todo_compose);
+            let live = compose_hint(&parsed);
+            // When empty, compose_hint is the short Try line — expand with more examples.
+            if self.todo_compose.trim().is_empty() {
+                ui.label(
+                    RichText::new("Try /from tomorrow · /estimate 1h · #mail")
+                        .small()
+                        .color(mute),
+                );
+                ui.label(
+                    RichText::new("/date next friday · /todo · /spent 30m · /done")
+                        .small()
+                        .color(mute),
+                );
+                ui.label(
+                    RichText::new("/title Short title · /details longer body…")
+                        .small()
+                        .color(mute),
+                );
+            } else {
+                ui.label(RichText::new(live).small().color(theme::accent(ui.ctx())));
+            }
+        }
+
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if self.busy.ailiak {
-                ui.add_enabled_ui(false, |ui| {
+            let ink = theme::ink(ui.ctx());
+            let chip = theme::chip(ui.ctx());
+            let btn_margin = egui::Margin::symmetric(10.0, 5.0);
+            // Shared content height so ? matches Select (icon + label line).
+            let btn_content_h = ui.text_style_height(&egui::TextStyle::Body).max(13.0);
+            let help_icon_color = if self.options_task_help_open {
+                theme::accent(ui.ctx())
+            } else {
+                ink
+            };
+            let help = egui::Frame::none()
+                .fill(chip)
+                .rounding(4.0)
+                .inner_margin(btn_margin)
+                .show(ui, |ui| {
+                    // Fixed square content — avoid centered_and_justified (it expands to full width).
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(btn_content_h, btn_content_h),
+                        Layout::centered_and_justified(egui::Direction::TopDown),
+                        |ui| {
+                            ui.label(
+                                RichText::new(ph::QUESTION)
+                                    .family(theme::icon_family())
+                                    .size(13.0)
+                                    .color(help_icon_color),
+                            );
+                        },
+                    );
+                })
+                .response
+                .interact(Sense::click())
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("Slash command help");
+            if help.clicked() {
+                self.options_task_help_open = !self.options_task_help_open;
+            }
+
+            let select = egui::Frame::none()
+                .fill(chip)
+                .rounding(4.0)
+                .inner_margin(btn_margin)
+                .show(ui, |ui| {
+                    ui.set_min_height(btn_content_h);
                     ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(12.0));
-                        ui.label(
-                            RichText::new("Create on Desk").color(theme::mute(ui.ctx())),
-                        );
+                        ui.set_min_height(btn_content_h);
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(ph::SELECTION)
+                                    .family(theme::icon_family())
+                                    .size(13.0)
+                                    .color(ink),
+                            );
+                            ui.label(RichText::new("Select").color(ink));
+                        });
                     });
-                });
-            } else if ui
-                .add(
-                    egui::Button::new(RichText::new("Create on Desk").color(Color32::WHITE))
-                        .fill(theme::accent(ui.ctx())),
-                )
-                .clicked()
-            {
-                self.submit_todo();
+                })
+                .response
+                .interact(Sense::click())
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("Select text from Email");
+            if select.clicked() {
+                self.request_todo_selection_insert();
             }
-            if ui.button("Cancel").clicked() {
-                self.show_todo = false;
+            if self.pending_todo_selection {
+                ui.add(egui::Spinner::new().size(12.0));
             }
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if self.busy.ailiak {
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(12.0));
+                            ui.label(RichText::new("Submit").color(mute));
+                        });
+                    });
+                } else {
+                    let submit = ui
+                        .add(
+                            egui::Button::new(RichText::new("Submit").color(Color32::WHITE))
+                                .fill(theme::accent(ui.ctx())),
+                        )
+                        .on_hover_text("Submit to Ailiak.com");
+                    if submit.clicked() {
+                        self.submit_todo();
+                    }
+                }
+            });
         });
+
+        // MORE — hidden until we have actions to put here.
+        // ui.add_space(18.0);
+        // ui.label(
+        //     RichText::new("MORE")
+        //         .small()
+        //         .color(mute)
+        //         .family(theme::nav_family()),
+        // );
+        // ui.add_space(4.0);
+        // ui.label(RichText::new("Nothing here yet").small().color(mute));
     }
 
     pub(crate) fn status_bar(&mut self, ui: &mut Ui) {
@@ -2245,7 +2603,7 @@ impl MailboxApp {
 
         {
             let collapsed = self.folders_collapsed;
-            // Bottom margin is 0 so the tools strip (Desk/Todo/…) can paint paper to the edge.
+            // Bottom margin is 0 so the tools strip (Options/Calendar/…) can paint paper to the edge.
             // Right margin 0 so the ScrollArea scrollbar sits on the panel edge
             // (content keeps its own side_inset padding inside the scroll).
             let mut side = egui::SidePanel::left("nav_v4")
@@ -2285,18 +2643,25 @@ impl MailboxApp {
 
         // Mid column ~30% of window; reader (central) keeps ≥50%. Nav is smallest.
         // exact_width is owned by us — egui's SidePanel resize snaps content-driven widths.
+        // Options mirrors mid-list width (equal columns); Calendar keeps a fixed desk width.
         let win_w = ctx.screen_rect().width();
         let nav_w = if self.folders_collapsed { 72.0 } else { 176.0 };
-        let desk_w = if self.show_todo {
-            380.0
+        let reader_floor = (win_w * 0.50).max(320.0);
+        // When Options is open, list + Options share remaining space equally (same width).
+        let desk_w = if self.show_options {
+            // Provisional: previous list_width; refined after clamp below.
+            self.list_width
         } else if self.show_calendar {
             280.0
         } else {
             0.0
         };
-        let reader_floor = (win_w * 0.50).max(320.0);
-        let list_max = (win_w - nav_w - desk_w - reader_floor)
-            .clamp(240.0, 520.0);
+        let list_max = if self.show_options {
+            // Room for two equal columns (list + Options) beside nav + reader floor.
+            ((win_w - nav_w - reader_floor) * 0.5).clamp(240.0, 520.0)
+        } else {
+            (win_w - nav_w - desk_w - reader_floor).clamp(240.0, 520.0)
+        };
         let list_min = 240.0_f32.min(list_max);
         let list_range = list_min..=list_max;
         let target_list = (win_w * 0.30).clamp(*list_range.start(), *list_range.end());
@@ -2310,6 +2675,7 @@ impl MailboxApp {
             self.last_shell_width = win_w;
         }
         self.list_width = self.list_width.clamp(*list_range.start(), *list_range.end());
+        let options_w = self.list_width;
 
         // Tight gap between mid ↔ reader; keep outer chrome gutters.
         // Extra bottom when the inline reply dock is open so Send stays above the status bar.
@@ -2408,31 +2774,30 @@ impl MailboxApp {
             ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
 
-        // One right side panel: Todo and Calendar replace each other.
-        if self.show_todo || self.show_calendar {
-            let (default_w, min_w, max_w) = if self.show_todo {
-                (380.0, 320.0, 520.0)
+        // One right side panel: Options and Calendar replace each other.
+        // Options matches mid-list width; Calendar stays independently sized.
+        if self.show_options || self.show_calendar {
+            let mut side = egui::SidePanel::right("desk_side_v1").show_separator_line(false);
+            side = if self.show_options {
+                side.resizable(false).exact_width(options_w)
             } else {
-                (280.0, 220.0, 400.0)
+                side.resizable(true)
+                    .default_width(280.0)
+                    .width_range(220.0..=400.0)
             };
-            egui::SidePanel::right("desk_side_v1")
-                .resizable(true)
-                .default_width(default_w)
-                .width_range(min_w..=max_w)
-                .show_separator_line(false)
-                .frame(layout::panel_frame(
-                    egui::Margin::symmetric(if self.show_todo { 14.0 } else { 12.0 }, 12.0),
-                    panel,
-                ))
-                .show(ctx, |ui| {
-                    layout::begin_panel(ui, panel);
-                    if self.show_todo {
-                        self.todo_pane(ui);
-                    } else {
-                        self.calendar_pane(ui);
-                    }
-                    layout::end_panel(ui);
-                });
+            side.frame(layout::panel_frame(
+                egui::Margin::symmetric(if self.show_options { 14.0 } else { 12.0 }, 12.0),
+                panel,
+            ))
+            .show(ctx, |ui| {
+                layout::begin_panel(ui, panel);
+                if self.show_options {
+                    self.options_pane(ui);
+                } else {
+                    self.calendar_pane(ui);
+                }
+                layout::end_panel(ui);
+            });
         }
 
         egui::CentralPanel::default()

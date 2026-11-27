@@ -44,7 +44,8 @@ impl CalendarState {
         self.selected = Some(String::new());
     }
 
-    /// Value passed into Todo payload builder.
+    /// Selected calendar day (`None` = today semantics; `Some("")` = unscheduled).
+    #[allow(dead_code)] // Kept for Calendar ↔ Desk day wiring; Options uses slash `/from`/`/date`.
     pub fn todo_for_date(&self) -> Option<String> {
         self.selected.clone()
     }

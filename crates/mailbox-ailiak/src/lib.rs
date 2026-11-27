@@ -12,5 +12,6 @@ pub use compose::{
     ParsedCompose,
 };
 pub use map::{
-    build_payload, map_message_to_task, short_task_number, todo_defaults, CreateTaskPayload,
+    build_payload, clean_selection_text, insert_selection_into_compose, map_message_to_task,
+    short_task_number, todo_defaults, CreateTaskPayload, TEXT_MAX,
 };

@@ -62,6 +62,8 @@ pub struct MailWebView {
     link_tx: Sender<ExtLink>,
     link_rx: Receiver<ExtLink>,
     pending: Option<PendingLoad>,
+    /// Pending `getSelection()` result from [`request_selection`].
+    selection_rx: Option<Receiver<String>>,
     /// Last create error (e.g. Wayland without child webview support).
     pub last_error: Option<String>,
 }
@@ -79,6 +81,7 @@ impl Default for MailWebView {
             link_tx,
             link_rx,
             pending: None,
+            selection_rx: None,
             last_error: None,
         }
     }
@@ -154,6 +157,7 @@ impl MailWebView {
         self.last_ppp = 0.0;
         self.visible = false;
         self.pending = None;
+        self.selection_rx = None;
         drop(wv);
         Self::pump_platform();
     }
@@ -166,6 +170,49 @@ impl MailWebView {
                 }
             }
         }
+    }
+
+    /// Ask the mail body webview for the current text selection (async).
+    /// Poll with [`take_selection`] on later frames.
+    pub fn request_selection(&mut self) {
+        let Some(wv) = &self.webview else {
+            self.selection_rx = None;
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.selection_rx = Some(rx);
+        let ok = wv.evaluate_script_with_callback(
+            r#"(function(){
+                try { return window.getSelection().toString(); }
+                catch (e) { return ''; }
+            })()"#,
+            move |s| {
+                let _ = tx.send(s);
+            },
+        );
+        if ok.is_err() {
+            self.selection_rx = None;
+        }
+    }
+
+    /// Take a completed selection string, if any.
+    pub fn take_selection(&mut self) -> Option<String> {
+        let rx = self.selection_rx.as_ref()?;
+        match rx.try_recv() {
+            Ok(s) => {
+                self.selection_rx = None;
+                Some(s)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.selection_rx = None;
+                Some(String::new())
+            }
+        }
+    }
+
+    pub fn has_pending_selection(&self) -> bool {
+        self.selection_rx.is_some()
     }
 
     /// Show HTML for `msg_id` in `bounds` (egui screen rect), creating the webview if needed.

@@ -138,6 +138,11 @@ impl Store {
                 ailiak_task_id TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sender_notes (
+                sender_addr TEXT PRIMARY KEY,
+                note TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             "#,
         )?;
         // Older DBs created before `hidden` / `body_html` / `snoozed` existed.
@@ -847,6 +852,45 @@ impl Store {
             ON CONFLICT(message_id) DO UPDATE SET ailiak_task_id = excluded.ailiak_task_id
             "#,
             params![message_id, task_id, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Load a note keyed by sender email (case-insensitive).
+    pub fn get_sender_note(&self, sender_addr: &str) -> Result<Option<String>> {
+        let key = sender_addr.trim().to_lowercase();
+        if key.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT note FROM sender_notes WHERE sender_addr = ?1")?;
+        let note = stmt
+            .query_row(params![key], |row| row.get(0))
+            .optional()?;
+        Ok(note)
+    }
+
+    /// Upsert a per-sender note. Empty note deletes the row.
+    pub fn set_sender_note(&self, sender_addr: &str, note: &str) -> Result<()> {
+        let key = sender_addr.trim().to_lowercase();
+        if key.is_empty() {
+            return Ok(());
+        }
+        if note.is_empty() {
+            self.conn
+                .execute("DELETE FROM sender_notes WHERE sender_addr = ?1", params![key])?;
+            return Ok(());
+        }
+        self.conn.execute(
+            r#"
+            INSERT INTO sender_notes (sender_addr, note, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(sender_addr) DO UPDATE SET
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            "#,
+            params![key, note, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }

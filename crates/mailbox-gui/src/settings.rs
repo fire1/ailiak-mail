@@ -397,7 +397,7 @@ impl MailboxApp {
                 crate::notifications::notify_opened_mail(
                     "Ada Lovelace",
                     "Notes on the Analytical Engine",
-                    Some("Press a for Todo"),
+                    Some("Press a for Options"),
                 );
             }
         });
@@ -1322,7 +1322,7 @@ impl MailboxApp {
                 .family(theme::nav_family()),
         );
         ui.label(
-            RichText::new("Connect AiliakMail to your Desk for Todo.")
+            RichText::new("Connect AiliakMail to your Desk for Options → Todo.")
                 .small()
                 .color(theme::mute(ui.ctx())),
         );

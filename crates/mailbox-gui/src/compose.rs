@@ -479,8 +479,8 @@ fn attach_button(ui: &mut Ui) -> egui::Response {
     hover_text_below(resp, "Attach files")
 }
 
-/// Compose discard (X) — single accent-tinted plate (no gray+stroke double layer).
-fn close_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
+/// Discard / panel close (X) — single accent-tinted plate (no gray+stroke double layer).
+pub(crate) fn close_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
     let accent = theme::accent(ui.ctx());
     let size = Vec2::splat(28.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
@@ -1107,7 +1107,8 @@ pub fn show_reader_compose(
                 .color(mute),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if !draft.from_email.is_empty() {
+            // Feedback: hide account email (To is also hidden below).
+            if !draft.to_locked() && !draft.from_email.is_empty() {
                 ui.add(
                     egui::Label::new(
                         RichText::new(&draft.from_email).small().color(mute),
@@ -1146,6 +1147,7 @@ pub fn show_reader_compose(
     ui.add_space(6.0);
 
     // To — tags + input; Cc/Bcc toggles stay at the end of this row.
+    // Feedback keeps To locked + hidden (recipient is fixed to FEEDBACK_TO_ADDR).
     let to_locked = draft.to_locked();
     let to_hint = if to_locked {
         ""
@@ -1156,21 +1158,18 @@ pub fn show_reader_compose(
     };
     let mut open_cc = false;
     let mut open_bcc = false;
-    // "To" is placeholder-only — hide once there are tags or typing.
-    let (to_focused, to_tab, to_overlay) = ui
-        .horizontal(|ui| {
-            let trail_w = if to_locked {
-                0.0
-            } else {
-                let mut w = 0.0;
-                if !draft.show_cc {
-                    w += 28.0;
-                }
-                if !draft.show_bcc {
-                    w += 36.0;
-                }
-                w
-            };
+    let (to_focused, to_tab, to_overlay) = if to_locked {
+        (false, false, None)
+    } else {
+        // "To" is placeholder-only — hide once there are tags or typing.
+        ui.horizontal(|ui| {
+            let mut w = 0.0;
+            if !draft.show_cc {
+                w += 28.0;
+            }
+            if !draft.show_bcc {
+                w += 36.0;
+            }
             paint_clean_recipient_row(
                 ui,
                 &mut draft.to,
@@ -1179,13 +1178,10 @@ pub fn show_reader_compose(
                 recipient_hints,
                 "to",
                 to_hint,
-                to_locked,
-                *autofocus_to && !to_locked,
-                trail_w,
+                false,
+                *autofocus_to,
+                w,
                 |ui| {
-                    if to_locked {
-                        return;
-                    }
                     ui.spacing_mut().item_spacing.x = 10.0;
                     if !draft.show_cc
                         && ui
@@ -1212,7 +1208,8 @@ pub fn show_reader_compose(
                 },
             )
         })
-        .inner;
+        .inner
+    };
     if to_focused {
         result.header_focused = true;
     }
@@ -1445,8 +1442,26 @@ pub fn show_inline_compose(
                     );
                 });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // RTL: close is rightmost; Full size sits just before it.
                 if close_icon_btn(ui, "Discard reply").clicked() {
                     result.close = true;
+                }
+                if hover_text_below(icon_btn(ui, ph::ARROWS_OUT), "Full size").clicked() {
+                    draft.inline = false;
+                    if !draft.quote_on_send.is_empty()
+                        && !draft.body.contains('>')
+                        && !draft.body_html.contains("blockquote")
+                    {
+                        let q = std::mem::take(&mut draft.quote_on_send);
+                        draft.body.push_str(&q);
+                        if !draft.body_html.is_empty() {
+                            draft.body_html.push_str(&quote_plain_to_html(&q));
+                        } else {
+                            draft.body_html = plain_to_editor_html(&draft.body);
+                        }
+                        draft.editor_rev = draft.editor_rev.saturating_add(1).max(1);
+                    }
+                    result.open_full = true;
                 }
                 if !draft.from_email.is_empty() {
                     ui.label(
@@ -1496,30 +1511,13 @@ pub fn show_inline_compose(
                     if attach_button(ui).clicked() {
                         draft.pick_attachments();
                     }
+                    // Only when the dock is expanded/focused — already-shrunk dock hides this.
                     if draft.dock_focused {
                         if hover_text_below(icon_btn(ui, ph::ARROWS_IN), "Shrink reply")
                             .clicked()
                         {
                             draft.dock_focused = false;
                         }
-                    }
-                    if hover_text_below(icon_btn(ui, ph::ARROWS_OUT), "Full size").clicked()
-                    {
-                        draft.inline = false;
-                        if !draft.quote_on_send.is_empty()
-                            && !draft.body.contains('>')
-                            && !draft.body_html.contains("blockquote")
-                        {
-                            let q = std::mem::take(&mut draft.quote_on_send);
-                            draft.body.push_str(&q);
-                            if !draft.body_html.is_empty() {
-                                draft.body_html.push_str(&quote_plain_to_html(&q));
-                            } else {
-                                draft.body_html = plain_to_editor_html(&draft.body);
-                            }
-                            draft.editor_rev = draft.editor_rev.saturating_add(1).max(1);
-                        }
-                        result.open_full = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let can_send = !sending

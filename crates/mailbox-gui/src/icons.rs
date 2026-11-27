@@ -613,15 +613,15 @@ pub fn desk_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
     )
 }
 
-pub fn todo_nav_button(ui: &mut Ui, enabled: bool, collapsed: bool) -> Response {
+pub fn options_nav_button(ui: &mut Ui, enabled: bool, collapsed: bool) -> Response {
     nav_action_row(
         ui,
         collapsed,
         enabled,
         false,
-        "Todo",
-        "Todo — mail → Ailiak Desk (a)",
-        ph::CHECK_SQUARE,
+        "Options",
+        "Options — sender, note, task (a)",
+        ph::PLUS,
     )
 }
 

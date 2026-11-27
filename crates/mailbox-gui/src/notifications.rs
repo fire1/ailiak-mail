@@ -15,7 +15,7 @@ enum NotifyEvent {
     OpenedMail {
         from: String,
         subject: String,
-        /// Optional Desk / Todo line (e.g. "On Desk · …" or "Press a for Todo").
+        /// Optional Desk / Options line (e.g. "On Desk · …" or "Press a for Options").
         hint: Option<String>,
     },
 }
