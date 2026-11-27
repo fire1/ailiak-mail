@@ -7,7 +7,7 @@
 name = "ailiakmail"
 product-name = "AiliakMail"
 identifier = "com.ailiak.AiliakMail"
-version = "0.1.0"
+version = "0.1.2"
 description = "Calm email client — mail stays local, work goes to Ailiak"
 publisher = "Ailiak"
 homepage = "https://ailiak.com"
@@ -17,11 +17,17 @@ out-dir = "dist"
 
 before-packaging-command = "cargo build -p mailbox-gui --release"
 
+# Square PNGs only for AppImage (ICO alone is not treated as a square source).
 icons = [
+  "crates/mailbox-gui/assets/img/ailiak-icon-16.png",
+  "crates/mailbox-gui/assets/img/ailiak-icon-24.png",
   "crates/mailbox-gui/assets/img/ailiak-icon-32.png",
+  "crates/mailbox-gui/assets/img/ailiak-icon-48.png",
+  "crates/mailbox-gui/assets/img/ailiak-icon-64.png",
   "crates/mailbox-gui/assets/img/ailiak-icon-128.png",
   "crates/mailbox-gui/assets/img/ailiak-icon-256.png",
   "crates/mailbox-gui/assets/img/ailiak-icon-512.png",
+  "crates/mailbox-gui/assets/img/ailiak-mark.png",
   "crates/mailbox-gui/assets/img/mailbox.ico",
 ]
 

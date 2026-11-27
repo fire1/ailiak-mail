@@ -52,7 +52,17 @@ jobs:
 
       - name: Package (Linux / Windows)
         if: runner.os != 'macOS'
-        run: cargo packager --release --formats ${{ matrix.formats }}
+        run: |
+          set -euo pipefail
+          if ! cargo packager --release --formats ${{ matrix.formats }}; then
+            # AppImage needs a detected square PNG; fall back to .deb on Linux.
+            if [[ "${{ runner.os }}" == "Linux" ]]; then
+              echo "::warning::Full formats failed — retrying Linux as deb only"
+              cargo packager --release --formats deb
+            else
+              exit 1
+            fi
+          fi
 
       # Apple Silicon runner: native arm64 + cross-compile Intel (x86_64).
       # Set CARGO_BUILD_TARGET so before-packaging-command builds the same triple.
