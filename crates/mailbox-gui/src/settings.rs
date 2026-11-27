@@ -59,7 +59,7 @@ impl SettingsSection {
     pub fn blurb(self) -> &'static str {
         match self {
             Self::Appearance => "Theme and accent",
-            Self::Sounds => "New mail sound, clicks, and desktop notifications",
+            Self::Sounds => "Sound, clicks, and more",
             Self::Accounts => "Mail accounts and avatars",
             Self::Folders => "Show, hide, and auto sync",
             Self::Ailiak => "Desk token and hashtag",
@@ -118,11 +118,10 @@ impl MailboxApp {
                     } else {
                         Color32::TRANSPARENT
                     };
-                    let (rect, resp) =
-                        ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::click());
+                    let (rect, resp) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::click());
                     if resp.hovered() && !selected {
-                        ui.painter()
-                            .rect_filled(rect, 8.0, theme::chip(ui.ctx()));
+                        ui.painter().rect_filled(rect, 8.0, theme::chip(ui.ctx()));
                     } else {
                         ui.painter().rect_filled(rect, 8.0, fill);
                     }
@@ -248,15 +247,11 @@ impl MailboxApp {
                             picked = Some(opt.id);
                         }
                         ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(opt.label)
-                                .size(11.0)
-                                .color(if selected {
-                                    theme::accent(ui.ctx())
-                                } else {
-                                    theme::mute(ui.ctx())
-                                }),
-                        );
+                        ui.label(RichText::new(opt.label).size(11.0).color(if selected {
+                            theme::accent(ui.ctx())
+                        } else {
+                            theme::mute(ui.ctx())
+                        }));
                     });
                 });
             }
@@ -603,11 +598,7 @@ impl MailboxApp {
                                     .strong()
                                     .color(theme::accent(ui.ctx())),
                             );
-                            ui.label(
-                                RichText::new(p.blurb)
-                                    .small()
-                                    .color(theme::mute(ui.ctx())),
-                            );
+                            ui.label(RichText::new(p.blurb).small().color(theme::mute(ui.ctx())));
                         });
                     });
                     ui.add_space(8.0);
@@ -666,8 +657,7 @@ impl MailboxApp {
                                 ui.horizontal(|ui| {
                                     ui.add(egui::Spinner::new().size(12.0));
                                     ui.label(
-                                        RichText::new(p.oauth_button)
-                                            .color(theme::mute(ui.ctx())),
+                                        RichText::new(p.oauth_button).color(theme::mute(ui.ctx())),
                                     );
                                 });
                             });
@@ -783,8 +773,7 @@ impl MailboxApp {
                             Err(e) => self.status = e.to_string(),
                         }
                     }
-                    if icons::busy_text_button(ui, "Test connection", self.busy.mail_test)
-                        .clicked()
+                    if icons::busy_text_button(ui, "Test connection", self.busy.mail_test).clicked()
                     {
                         if self.imap_user_input.trim().is_empty() {
                             self.imap_user_input = self.account_email_input.trim().to_string();
@@ -941,10 +930,8 @@ impl MailboxApp {
 
         let editing = self.config.account_by_id(&self.editing_account_id);
         let edit_oauth = editing.and_then(|a| OAuthProvider::from_auth_method(a.auth));
-        let inferred_mail = MailProvider::infer_from_host_email(
-            &self.imap_host_input,
-            &self.account_email_input,
-        );
+        let inferred_mail =
+            MailProvider::infer_from_host_email(&self.imap_host_input, &self.account_email_input);
         let sign_in_mail = edit_oauth
             .and_then(|o| match o {
                 OAuthProvider::Google => Some(MailProvider::Gmail),
@@ -1062,9 +1049,7 @@ impl MailboxApp {
             .selected_account()
             .map(|a| a.is_pop3())
             .unwrap_or(self.mail_protocol == MailProtocol::Pop3);
-        let is_abv = self
-            .selected_account()
-            .is_some_and(|a| a.looks_like_abv())
+        let is_abv = self.selected_account().is_some_and(|a| a.looks_like_abv())
             || mailbox_core::looks_like_abv(&self.imap_host_input, &self.account_email_input);
 
         ui.label(
@@ -1137,9 +1122,11 @@ impl MailboxApp {
                 .family(theme::nav_family()),
         );
         ui.label(
-            RichText::new("System folders and user labels appear as separate sections in the left rail.")
-                .small()
-                .color(theme::mute(ui.ctx())),
+            RichText::new(
+                "System folders and user labels appear as separate sections in the left rail.",
+            )
+            .small()
+            .color(theme::mute(ui.ctx())),
         );
         ui.add_space(6.0);
 
@@ -1191,11 +1178,7 @@ impl MailboxApp {
                     );
                 }
                 if folder.hidden {
-                    ui.label(
-                        RichText::new("hidden")
-                            .small()
-                            .color(theme::mute(ui.ctx())),
-                    );
+                    ui.label(RichText::new("hidden").small().color(theme::mute(ui.ctx())));
                 }
             });
         };
@@ -1396,9 +1379,7 @@ fn wizard_password_fields(
                 app.imap_user_input = email;
             }
             ui.label("Password");
-            let hint = preset
-                .map(|p| p.password_hint)
-                .unwrap_or("Mail password");
+            let hint = preset.map(|p| p.password_hint).unwrap_or("Mail password");
             password_edit(
                 ui,
                 &mut app.imap_password_input,
@@ -1418,7 +1399,11 @@ fn wizard_password_fields(
     }
 }
 
-fn oauth_client_fields(ui: &mut Ui, oauth: &mut mailbox_core::OAuthConfig, provider: OAuthProvider) {
+fn oauth_client_fields(
+    ui: &mut Ui,
+    oauth: &mut mailbox_core::OAuthConfig,
+    provider: OAuthProvider,
+) {
     match provider {
         OAuthProvider::Google => {
             ui.label(
@@ -1524,9 +1509,7 @@ fn mail_test_feedback_row(ui: &mut Ui, feedback: &str) {
         } else {
             theme::accent(ui.ctx())
         };
-        ui.add(
-            egui::Label::new(RichText::new(feedback).small().color(color)).wrap(),
-        );
+        ui.add(egui::Label::new(RichText::new(feedback).small().color(color)).wrap());
         if ui
             .add(
                 egui::Button::new(
@@ -1545,13 +1528,7 @@ fn mail_test_feedback_row(ui: &mut Ui, feedback: &str) {
     });
 }
 
-fn password_edit(
-    ui: &mut Ui,
-    password: &mut String,
-    show: &mut bool,
-    hint: &str,
-    width: f32,
-) {
+fn password_edit(ui: &mut Ui, password: &mut String, show: &mut bool, hint: &str, width: f32) {
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(password)
@@ -1560,7 +1537,11 @@ fn password_edit(
                 .hint_text(hint),
         );
         let glyph = if *show { ph::EYE_SLASH } else { ph::EYE };
-        let tip = if *show { "Hide password" } else { "Show password" };
+        let tip = if *show {
+            "Hide password"
+        } else {
+            "Show password"
+        };
         if ui
             .add(
                 egui::Button::new(

@@ -294,6 +294,7 @@ impl MailboxApp {
             == egui::Theme::Dark;
         let ailiak_logo = AiliakLogo::load(&cc.egui_ctx, accent, dark);
         let editing_account_id = account_id.clone();
+        let options_open = config.ui.options_open;
 
         let mut app = Self {
             paths,
@@ -343,7 +344,7 @@ impl MailboxApp {
             reader_headers_expanded: false,
             reader_subject_expanded: false,
             show_calendar: false,
-            show_options: false,
+            show_options: options_open,
             folders_collapsed: false,
             staks_section_open: false,
             people_section_open: false,
@@ -2847,12 +2848,23 @@ impl MailboxApp {
         }
     }
 
+    fn persist_options_open(&mut self, open: bool) {
+        if self.config.ui.options_open == open {
+            return;
+        }
+        self.config.ui.options_open = open;
+        if let Err(e) = self.config.save(&self.paths.config_file()) {
+            self.status = format!("Could not save Options panel state: {e}");
+        }
+    }
+
     /// Persist the current Options note (if any) and hide the panel.
     pub(crate) fn close_options_panel(&mut self) {
         self.save_options_note();
         self.show_options = false;
         self.pending_todo_selection = false;
         self.options_task_help_open = false;
+        self.persist_options_open(false);
     }
 
     /// Toggle the Options side panel (replaces Calendar when opening).
@@ -2877,6 +2889,7 @@ impl MailboxApp {
         self.show_options = true;
         self.pending_todo_selection = false;
         self.options_task_help_open = false;
+        self.persist_options_open(true);
 
         if let Ok(Some(existing)) = self.store.ailiak_task_for_message(&msg.envelope.message_id) {
             self.status = format!("Already on Desk as {existing}");

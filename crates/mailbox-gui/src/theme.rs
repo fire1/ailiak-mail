@@ -241,18 +241,26 @@ fn install_fonts(ctx: &egui::Context) {
     );
 
     // Prepend custom faces; keep egui defaults as fallbacks (they own ◻ / ? replacement glyphs).
-    fonts.families.entry(FontFamily::Proportional).or_default().splice(
-        0..0,
-        [
-            "Lato".to_owned(),
-            "LatoMedium".to_owned(),
-            "LatoSemibold".to_owned(),
-        ],
-    );
-    fonts.families.entry(FontFamily::Monospace).or_default().splice(
-        0..0,
-        ["RobotoMono".to_owned(), "RobotoMonoMedium".to_owned()],
-    );
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .splice(
+            0..0,
+            [
+                "Lato".to_owned(),
+                "LatoMedium".to_owned(),
+                "LatoSemibold".to_owned(),
+            ],
+        );
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .splice(
+            0..0,
+            ["RobotoMono".to_owned(), "RobotoMonoMedium".to_owned()],
+        );
     {
         let mut mono = vec![
             "RobotoMonoMedium".to_owned(),
@@ -302,15 +310,13 @@ fn base_style() -> Style {
     style.spacing.button_padding = egui::vec2(10.0, 6.0);
     // Default: solid gutters for nav. Mid list overrides with [`list_scroll_style`].
     style.spacing.scroll = egui::style::ScrollStyle {
-        bar_width: 8.0,
-        bar_inner_margin: 2.0,
+        bar_width: 4.0,
+        bar_inner_margin: 1.0,
         bar_outer_margin: 0.0,
         ..egui::style::ScrollStyle::solid()
     };
     // Titles keep Roboto Mono; body/content use Lato (integer px sizes stay sharp).
-    style
-        .text_styles
-        .insert(TextStyle::Heading, nav_font(16.0));
+    style.text_styles.insert(TextStyle::Heading, nav_font(16.0));
     style
         .text_styles
         .insert(TextStyle::Body, FontId::new(15.0, FontFamily::Proportional));
@@ -322,9 +328,10 @@ fn base_style() -> Style {
         TextStyle::Small,
         FontId::new(12.0, FontFamily::Proportional),
     );
-    style
-        .text_styles
-        .insert(TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace));
+    style.text_styles.insert(
+        TextStyle::Monospace,
+        FontId::new(12.0, FontFamily::Monospace),
+    );
     style
 }
 
@@ -611,7 +618,7 @@ pub fn list_scroll_style() -> egui::style::ScrollStyle {
         floating_width: 3.0,
         floating_allocated_width: 0.0,
         bar_inner_margin: 0.0,
-        bar_outer_margin: 2.0,
+        bar_outer_margin: 0.0,
         handle_min_length: 24.0,
         foreground_color: true,
         // Always show a faint handle so scroll position is visible.

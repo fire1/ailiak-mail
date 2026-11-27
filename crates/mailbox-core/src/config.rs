@@ -354,6 +354,9 @@ pub struct UiConfig {
     /// Default: off — opening mail from the list must not spam the desktop.
     #[serde(default = "default_notify_opened_mail")]
     pub notify_opened_mail: bool,
+    /// Remember whether the Options side panel was open last session.
+    #[serde(default)]
+    pub options_open: bool,
 }
 
 /// Preset tone packs for UI / new-mail sounds.
@@ -553,6 +556,7 @@ impl Default for UiConfig {
             sound_theme: SoundTheme::default(),
             notify_new_mail: default_notify_new_mail(),
             notify_opened_mail: default_notify_opened_mail(),
+            options_open: false,
         }
     }
 }
