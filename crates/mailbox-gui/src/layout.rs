@@ -41,9 +41,9 @@ pub fn content_card(fill: Color32, gutter: Margin, pad: Margin) -> Frame {
 fn content_card_shadow() -> Shadow {
     Shadow {
         offset: Vec2::new(0.0, 2.0),
-        blur: 10.0,
+        blur: 6.0,
         spread: 0.0,
-        color: Color32::from_black_alpha(22),
+        color: Color32::from_black_alpha(32),
     }
 }
 

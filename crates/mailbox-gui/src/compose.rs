@@ -1006,14 +1006,15 @@ fn paint_clean_recipient_row(
         let mut overlay: Option<Rect> = None;
         if show_popup && !matches.is_empty() {
             let anchor = te.rect.left_bottom();
-            let frame = egui::Frame::popup(ui.style());
             let area = egui::Area::new(popup_id)
                 .order(egui::Order::Foreground)
                 .fixed_pos(anchor)
                 .pivot(Align2::LEFT_TOP)
                 .default_width(SUGGEST_W)
                 .show(ui.ctx(), |ui| {
-                    frame
+                    // Use the Area's own style (tracks shell light/dark) instead of the
+                    // reader card's light-forced style so dark mode keeps a dark popup.
+                    egui::Frame::popup(ui.style())
                         .show(ui, |ui| {
                             ui.set_min_width(220.0);
                             ui.set_max_width(SUGGEST_W);

@@ -9,7 +9,7 @@ const WORDMARK_LIGHT_PNG: &[u8] = include_bytes!("../assets/img/ailiak-wordmark-
 const WORDMARK_DARK_PNG: &[u8] = include_bytes!("../assets/img/ailiak-wordmark-dark.png");
 
 /// On-screen logo height in the top bar (mark side).
-pub const DISPLAY_HEIGHT: f32 = 28.0;
+pub const DISPLAY_HEIGHT: f32 = 29.0;
 
 /// Live textures for the top-bar logo; recolor mark when accent / theme changes.
 pub struct AiliakLogo {

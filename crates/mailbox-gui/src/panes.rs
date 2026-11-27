@@ -47,194 +47,233 @@ impl MailboxApp {
             bar.left_top(),
             egui::vec2((bar.width() * 0.28).max(160.0), row_h),
         );
-        ui.allocate_new_ui(UiBuilder::new().max_rect(left), |ui| {
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                // Accent mark (SVG) + crisp PNG wordmark — sharper than full-SVG text.
-                let accent = theme::resolve_accent(&self.config.ui.accent).color;
-                let dark = ui.visuals().dark_mode;
-                self.ailiak_logo.sync(accent, dark);
-                let h = brand::DISPLAY_HEIGHT.min((row_h - 4.0).max(22.0));
-                let mark = h;
-                let wm_h = h * 0.78;
-                let wm_w = wm_h * self.ailiak_logo.wordmark_aspect();
-                ui.spacing_mut().item_spacing.x = 7.0;
-                let mark_resp = ui
-                    .add(
-                        egui::Image::new((self.ailiak_logo.mark().id(), egui::vec2(mark, mark)))
+        let logo_right = ui
+            .allocate_new_ui(UiBuilder::new().max_rect(left), |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    // Accent mark (SVG) + crisp PNG wordmark — sharper than full-SVG text.
+                    let accent = theme::resolve_accent(&self.config.ui.accent).color;
+                    let dark = ui.visuals().dark_mode;
+                    self.ailiak_logo.sync(accent, dark);
+                    let h = brand::DISPLAY_HEIGHT.min((row_h - 4.0).max(22.0));
+                    let mark = h;
+                    let wm_h = h * 0.78;
+                    let wm_w = wm_h * self.ailiak_logo.wordmark_aspect();
+                    ui.spacing_mut().item_spacing.x = 7.0;
+                    let mark_resp = ui
+                        .add(
+                            egui::Image::new((
+                                self.ailiak_logo.mark().id(),
+                                egui::vec2(mark, mark),
+                            ))
                             .sense(Sense::click()),
-                    )
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .on_hover_text("Open Ailiak Desk");
-                let wm_resp = ui
-                    .add(
-                        egui::Image::new((
-                            self.ailiak_logo.wordmark().id(),
-                            egui::vec2(wm_w, wm_h),
-                        ))
-                        .sense(Sense::click()),
-                    )
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .on_hover_text("Open Ailiak Desk");
-                if mark_resp.clicked() || wm_resp.clicked() {
-                    self.open_desk();
-                }
-            });
-        });
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Open Ailiak Desk");
+                    let wm_resp = ui
+                        .add(
+                            egui::Image::new((
+                                self.ailiak_logo.wordmark().id(),
+                                egui::vec2(wm_w, wm_h),
+                            ))
+                            .sense(Sense::click()),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Open Ailiak Desk");
+                    if mark_resp.clicked() || wm_resp.clicked() {
+                        self.open_desk();
+                    }
+                })
+                .response
+                .rect
+                .right()
+            })
+            .inner;
 
-        // Right (L→R): Done, Trash, Reply, Reply all, Load, Sync
-        // Painted right-to-left so Sync stays on the far right.
+        // Right (L→R): Done, Trash, Reply, Reply all, Load
+        // Painted right-to-left so Done stays on the far right.
         // Archive icon omitted — Done (✓) archives (same action).
         let right = Rect::from_min_max(
             egui::pos2(bar.right() - (bar.width() * 0.34).max(320.0), bar.top()),
             bar.right_bottom(),
         );
-        ui.allocate_new_ui(UiBuilder::new().max_rect(right), |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icons::toolbar_button(
-                    ui,
-                    icons::ToolbarIcon::Sync,
-                    "Sync",
-                    "List folders + download the selected folder (g)",
-                    self.busy.sync,
-                )
-                .clicked()
-                {
-                    self.start_sync(false);
-                }
-                let has_msg = self.open_message.is_some();
-                let images_on = self.load_remote_images;
-                let has_remote = self
-                    .cached_mail_body()
-                    .is_some_and(|b| b.has_remote_images);
-                // One-shot Load: only while blocked remote images exist; gone once loaded.
-                if has_msg && !images_on && has_remote {
-                    let from = self
-                        .open_message
-                        .as_ref()
-                        .map(|m| m.envelope.from_addr.clone())
-                        .unwrap_or_default();
-                    let domain = mailbox_core::remote_image_domain(&from);
-                    let scope = if domain.is_empty() {
-                        from.clone()
-                    } else {
-                        format!("*.{domain}")
-                    };
-                    let threat_n = self
+        let actions_left = ui
+            .allocate_new_ui(UiBuilder::new().max_rect(right), |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let has_msg = self.open_message.is_some();
+                    let images_on = self.load_remote_images;
+                    let has_remote = self
                         .cached_mail_body()
-                        .map(|b| b.image_threats.len())
-                        .unwrap_or(0);
-                    let threat_note = if threat_n > 0 {
-                        format!(
-                            "\n{threat_n} tracking-like image(s) stay blocked for privacy"
-                        )
+                        .is_some_and(|b| b.has_remote_images);
+                    // One-shot Load: only while blocked remote images exist; gone once loaded.
+                    if has_msg && !images_on && has_remote {
+                        let from = self
+                            .open_message
+                            .as_ref()
+                            .map(|m| m.envelope.from_addr.clone())
+                            .unwrap_or_default();
+                        let domain = mailbox_core::remote_image_domain(&from);
+                        let scope = if domain.is_empty() {
+                            from.clone()
+                        } else {
+                            format!("*.{domain}")
+                        };
+                        let threat_n = self
+                            .cached_mail_body()
+                            .map(|b| b.image_threats.len())
+                            .unwrap_or(0);
+                        let threat_note = if threat_n > 0 {
+                            format!(
+                                "\n{threat_n} tracking-like image(s) stay blocked for privacy"
+                            )
+                        } else {
+                            String::new()
+                        };
+                        let images_tip = format!(
+                            "Load remote images for {scope}\nAllowed for this Stak domain; tracking-like stay blocked{threat_note}"
+                        );
+                        if icons::toolbar_load_images_button(ui, true, &images_tip).clicked() {
+                            self.allow_remote_images_for_sender();
+                        }
+                    }
+                    if icons::toolbar_icon_button(
+                        ui,
+                        icons::ToolbarIcon::ReplyAll,
+                        "Reply all (Shift+R)",
+                        has_msg && !self.busy.send,
+                        self.busy.send,
+                    )
+                    .clicked()
+                    {
+                        self.open_reply(true);
+                    }
+                    if icons::toolbar_icon_button(
+                        ui,
+                        icons::ToolbarIcon::Reply,
+                        "Reply (r)",
+                        has_msg && !self.busy.send,
+                        self.busy.send,
+                    )
+                    .clicked()
+                    {
+                        if self.selected_person.is_some() {
+                            self.chat_reply_focused = true;
+                        } else {
+                            self.open_reply(false);
+                        }
+                    }
+                    // Snooze / Archive toolbar icons hidden — Done (✓) archives.
+                    let trash_tip = if self.selected_person.is_some() {
+                        "Trash this People conversation (#)"
                     } else {
-                        String::new()
+                        "Trash current message (#)"
                     };
-                    let images_tip = format!(
-                        "Load remote images for {scope}\nAllowed for this Stak domain; tracking-like stay blocked{threat_note}"
-                    );
-                    if icons::toolbar_load_images_button(ui, true, &images_tip).clicked() {
-                        self.allow_remote_images_for_sender();
+                    if icons::toolbar_icon_button(
+                        ui,
+                        icons::ToolbarIcon::Trash,
+                        trash_tip,
+                        has_msg && !self.busy.moving(),
+                        self.busy.trash,
+                    )
+                    .clicked()
+                    {
+                        self.move_current_message(mailbox_core::SpecialFolderKind::Trash);
                     }
-                }
-                if icons::toolbar_icon_button(
-                    ui,
-                    icons::ToolbarIcon::ReplyAll,
-                    "Reply all (Shift+R)",
-                    has_msg && !self.busy.send,
-                    self.busy.send,
-                )
-                .clicked()
-                {
-                    self.open_reply(true);
-                }
-                if icons::toolbar_icon_button(
-                    ui,
-                    icons::ToolbarIcon::Reply,
-                    "Reply (r)",
-                    has_msg && !self.busy.send,
-                    self.busy.send,
-                )
-                .clicked()
-                {
-                    if self.selected_person.is_some() {
-                        self.chat_reply_focused = true;
+                    let done_tip = if self.selected_person.is_some() {
+                        "Done — archive this People conversation (e)"
                     } else {
-                        self.open_reply(false);
+                        "Done — archive current message (e)"
+                    };
+                    if icons::toolbar_icon_button(
+                        ui,
+                        icons::ToolbarIcon::Done,
+                        done_tip,
+                        has_msg && !self.busy.moving(),
+                        self.busy.archive,
+                    )
+                    .clicked()
+                    {
+                        // Same as rusty-inbox Done: leave the inbox via Archive.
+                        self.move_current_message(mailbox_core::SpecialFolderKind::Archive);
                     }
-                }
-                // Snooze / Archive toolbar icons hidden — Done (✓) archives.
-                let trash_tip = if self.selected_person.is_some() {
-                    "Trash this People conversation (#)"
-                } else {
-                    "Trash current message (#)"
-                };
-                if icons::toolbar_icon_button(
-                    ui,
-                    icons::ToolbarIcon::Trash,
-                    trash_tip,
-                    has_msg && !self.busy.moving(),
-                    self.busy.trash,
-                )
-                .clicked()
-                {
-                    self.move_current_message(mailbox_core::SpecialFolderKind::Trash);
-                }
-                let done_tip = if self.selected_person.is_some() {
-                    "Done — archive this People conversation (e)"
-                } else {
-                    "Done — archive current message (e)"
-                };
-                if icons::toolbar_icon_button(
-                    ui,
-                    icons::ToolbarIcon::Done,
-                    done_tip,
-                    has_msg && !self.busy.moving(),
-                    self.busy.archive,
-                )
-                .clicked()
-                {
-                    // Same as rusty-inbox Done: leave the inbox via Archive.
-                    self.move_current_message(mailbox_core::SpecialFolderKind::Archive);
-                }
-            });
-        });
+                })
+                .response
+                .rect
+                .left()
+            })
+            .inner;
 
-        // Center: compose + search (same row height).
-        let compose_gap = 8.0;
+        // Mid panel (mail list) left edge & mail body panel left edge from show_shell.
+        let list_left = if self.list_panel_left > 0.0 {
+            self.list_panel_left
+        } else if self.folders_collapsed {
+            72.0
+        } else {
+            176.0
+        };
+        let list_w = if self.list_width > 0.0 {
+            self.list_width
+        } else {
+            (bar.width() * 0.30).clamp(240.0, 520.0)
+        };
+        let body_left = list_left + list_w;
+
         let row_h = 28.0;
-        // Wider pad on Compose ≈ 110px; keep room next to search.
-        let compose_w = 112.0;
-        let search_w = (bar.width() * 0.36).clamp(200.0, 360.0);
-        let center_w = compose_w + compose_gap + search_w;
-        let center_rect = Rect::from_center_size(
-            egui::pos2(bar.center().x, bar.center().y),
-            egui::vec2(center_w, row_h),
+        // Align Compose + Sync with the left side of the mid panel (list_card_gutter.left = 10.0),
+        // without overlapping the logo when the folder rail is collapsed.
+        let compose_x = (list_left + 10.0).max(logo_right + 12.0);
+        let compose_rect = Rect::from_min_max(
+            egui::pos2(compose_x, bar.center().y - row_h * 0.5),
+            egui::pos2(actions_left.max(compose_x + 1.0), bar.center().y + row_h * 0.5),
         );
-        ui.allocate_new_ui(UiBuilder::new().max_rect(center_rect), |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = compose_gap;
+        let compose_sync_right = ui
+            .allocate_new_ui(UiBuilder::new().max_rect(compose_rect), |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.set_min_height(row_h);
+                    if icons::toolbar_button_emphasized(
+                        ui,
+                        icons::ToolbarIcon::Compose,
+                        "Compose",
+                        "Compose new message",
+                        self.busy.send,
+                        row_h,
+                    )
+                    .clicked()
+                    {
+                        self.open_compose_new();
+                    }
+                    if icons::toolbar_button_emphasized(
+                        ui,
+                        icons::ToolbarIcon::Sync,
+                        "Sync",
+                        "Sync selected folders (g)",
+                        self.busy.sync,
+                        row_h,
+                    )
+                    .clicked()
+                    {
+                        self.start_sync(false);
+                    }
+                })
+                .response
+                .rect
+                .right()
+            })
+            .inner;
+
+        // Align Search with the beginning of the mail body panel (card_gutter.left = 4.0).
+        let search_x = (body_left + 4.0).max(compose_sync_right + 12.0);
+        let max_search_w = (actions_left - search_x - 12.0).max(120.0);
+        let search_w = (bar.width() * 0.36).clamp(160.0, 360.0).min(max_search_w);
+        let search_rect = Rect::from_min_size(
+            egui::pos2(search_x, bar.center().y - row_h * 0.56 /* * 0.5*/),
+            egui::vec2(search_w, row_h),
+        );
+        ui.allocate_new_ui(UiBuilder::new().max_rect(search_rect), |ui| {
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 ui.set_min_height(row_h);
-                if icons::toolbar_button_emphasized(
-                    ui,
-                    icons::ToolbarIcon::Compose,
-                    "Compose",
-                    "Compose new message",
-                    self.busy.send,
-                    row_h,
-                )
-                .clicked()
-                {
-                    self.open_compose_new();
-                }
-                ui.allocate_ui_with_layout(
-                    egui::vec2(search_w, row_h),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.set_min_width(search_w);
-                        self.search_field(ui);
-                    },
-                );
+                ui.set_min_width(search_w);
+                self.search_field(ui);
             });
         });
     }
@@ -242,7 +281,6 @@ impl MailboxApp {
     /// Search input with leading icon (focused by `/`).
     pub(crate) fn search_field(&mut self, ui: &mut Ui) {
         let mute = theme::mute(ui.ctx());
-        let stroke = ui.visuals().widgets.inactive.bg_stroke;
         let fill = if ui.visuals().dark_mode {
             theme::paper(ui.ctx())
         } else {
@@ -251,14 +289,14 @@ impl MailboxApp {
 
         egui::Frame::none()
             .fill(fill)
-            .stroke(stroke)
-            .rounding(6.0)
+            .rounding(8.0)
             .inner_margin(egui::Margin::symmetric(8.0, 4.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.set_min_height(18.0);
+                    ui.set_min_height(16.0);
+                    ui.set_height(16.0);
                     // Match Body text size used by the search field.
-                    let icon_size = 15.0;
+                    let icon_size = 20.0;
                     let (icon_rect, _) =
                         ui.allocate_exact_size(egui::vec2(icon_size, icon_size), Sense::hover());
                     icons::paint_search(ui, icon_rect, mute);
@@ -269,7 +307,7 @@ impl MailboxApp {
                         egui::TextEdit::singleline(&mut self.search)
                             .id(Id::new("mail_search"))
                             .frame(false)
-                            .hint_text("Search mail…  (/)")
+                            .hint_text("Search  (/)")
                             .desired_width(width)
                             .clip_text(true),
                     );
