@@ -2,6 +2,10 @@
 
 use egui::{Color32, Frame, Margin, Rounding, Shadow, Stroke, Ui, Vec2};
 
+/// Corner radius for mail body / list cards and nav Accounts + tools paper bands.
+/// Keep nav right-edge rounding and content cards on this same value.
+pub const PANEL_CARD_RADIUS: f32 = 12.0;
+
 pub fn panel_frame(margin: Margin, fill: Color32) -> Frame {
     Frame::none()
         .fill(fill)
@@ -19,17 +23,17 @@ pub fn rounding_right(radius: f32) -> Rounding {
     }
 }
 
-/// Paper band for nav Accounts / tools — right corners rounded into chrome.
+/// Paper band for nav Accounts / tools — right corners match [`PANEL_CARD_RADIUS`].
 pub fn nav_paper_band(fill: Color32, pad: Margin, outer: Margin) -> Frame {
     Frame::none()
         .fill(fill)
         .stroke(Stroke::NONE)
-        .rounding(rounding_right(8.0))
+        .rounding(rounding_right(PANEL_CARD_RADIUS))
         .outer_margin(outer)
         .inner_margin(pad)
 }
 
-/// Inset rounded content card (mid list / mail reader).
+/// Inset rounded content card (mail list panel / mail body).
 ///
 /// `gutter` is outer margin so chrome shows around the radius.
 /// `pad` is inner content padding.
@@ -47,7 +51,7 @@ fn content_card_shadow() -> Shadow {
     }
 }
 
-/// Same as [`content_card`] with an optional edge stroke (helps mid-card radius read).
+/// Same as [`content_card`] with an optional edge stroke.
 pub fn content_card_stroke(
     fill: Color32,
     gutter: Margin,
@@ -57,7 +61,7 @@ pub fn content_card_stroke(
     Frame::none()
         .fill(fill)
         .stroke(stroke)
-        .rounding(Rounding::same(8.0))
+        .rounding(Rounding::same(PANEL_CARD_RADIUS))
         .shadow(content_card_shadow())
         .outer_margin(gutter)
         .inner_margin(pad)

@@ -1,0 +1,12 @@
+---
+description: Do not use borders/strokes on interactive UI controls
+alwaysApply: true
+---
+
+# No borders / strokes on controls
+
+Do **not** add borders or outline strokes on interactive elements (text fields, textareas, buttons, chips, inputs, edit frames). Prefer fill, spacing, typography, and focus background only.
+
+- Options NOTE / TASK and similar edits: fill + focus plate, no `Frame`/`TextEdit` stroke.
+- Structural dividers / panel card edges are OK when the existing layout already uses them — not control chrome.
+- See root `AGENTS.md` (“No borders / strokes on controls”).

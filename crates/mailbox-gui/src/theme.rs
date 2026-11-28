@@ -308,7 +308,7 @@ fn base_style() -> Style {
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.window_margin = egui::Margin::same(12.0);
     style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    // Default: solid gutters for nav. Mid list overrides with [`list_scroll_style`].
+    // Default: solid gutters for nav. Mail list panel overrides with [`mail_list_scroll_style`].
     style.spacing.scroll = egui::style::ScrollStyle {
         bar_width: 4.0,
         bar_inner_margin: 1.0,
@@ -610,12 +610,12 @@ pub fn list_card(ctx: &egui::Context) -> Color32 {
     palette(ctx).list_card
 }
 
-/// Thin floating scrollbar for the mid message list: slim thumb, widens on hover.
-pub fn list_scroll_style() -> egui::style::ScrollStyle {
+/// Floating scrollbar for the mail list panel: hairline thumb, slightly wider on hover.
+pub fn mail_list_scroll_style() -> egui::style::ScrollStyle {
     egui::style::ScrollStyle {
         floating: true,
-        bar_width: 8.0,
-        floating_width: 3.0,
+        bar_width: 4.0,
+        floating_width: 1.5,
         floating_allocated_width: 0.0,
         bar_inner_margin: 0.0,
         bar_outer_margin: 0.0,
@@ -624,9 +624,9 @@ pub fn list_scroll_style() -> egui::style::ScrollStyle {
         // Always show a faint handle so scroll position is visible.
         dormant_background_opacity: 0.0,
         dormant_handle_opacity: 0.45,
-        active_background_opacity: 0.2,
-        active_handle_opacity: 0.75,
-        interact_background_opacity: 0.35,
+        active_background_opacity: 0.15,
+        active_handle_opacity: 0.7,
+        interact_background_opacity: 0.28,
         interact_handle_opacity: 1.0,
     }
 }

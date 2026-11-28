@@ -180,8 +180,12 @@ pub struct MailboxApp {
     pub(crate) reader_subject_expanded: bool,
     pub(crate) show_calendar: bool,
     pub(crate) show_options: bool,
+    /// Last right desk panel was Options (vs Calendar) — used while close-animating.
+    pub(crate) desk_was_options: bool,
     /// Folder rail: icons only when true.
     pub(crate) folders_collapsed: bool,
+    /// Expanded left-nav width (owned like `list_width`; collapsed uses a fixed rail).
+    pub(crate) nav_width: f32,
     /// Nav accordion: Staks (brand/domain stacks) section open.
     pub(crate) staks_section_open: bool,
     /// Nav accordion: People section open.
@@ -202,7 +206,7 @@ pub struct MailboxApp {
     list_select_anchor: Option<usize>,
     /// Mid-column width — owned by us (not egui PanelState).
     pub(crate) list_width: f32,
-    /// Last shell width used to proportion `list_width` (~30% mid / ≥50% reader).
+    /// Last shell width used to proportion `list_width` (~30% mail list / ≥50% mail body).
     pub(crate) last_shell_width: f32,
     /// Left edge of the list panel (for manual resize math).
     pub(crate) list_panel_left: f32,
@@ -295,6 +299,7 @@ impl MailboxApp {
         let ailiak_logo = AiliakLogo::load(&cc.egui_ctx, accent, dark);
         let editing_account_id = account_id.clone();
         let options_open = config.ui.options_open;
+        let nav_width = config.ui.nav_width.clamp(140.0, 200.0);
 
         let mut app = Self {
             paths,
@@ -345,7 +350,9 @@ impl MailboxApp {
             reader_subject_expanded: false,
             show_calendar: false,
             show_options: options_open,
+            desk_was_options: options_open,
             folders_collapsed: false,
+            nav_width,
             staks_section_open: false,
             people_section_open: false,
             folders_section_open: true,
@@ -2837,6 +2844,7 @@ impl MailboxApp {
     pub(crate) fn open_calendar_panel(&mut self) {
         self.close_options_panel();
         self.show_calendar = true;
+        self.desk_was_options = false;
         self.refresh_desk_tasks();
     }
 
@@ -2855,6 +2863,19 @@ impl MailboxApp {
         self.config.ui.options_open = open;
         if let Err(e) = self.config.save(&self.paths.config_file()) {
             self.status = format!("Could not save Options panel state: {e}");
+        }
+    }
+
+    /// Persist expanded nav width after the user finishes dragging the rail.
+    pub(crate) fn persist_nav_width(&mut self) {
+        let w = self.nav_width.clamp(140.0, 200.0);
+        self.nav_width = w;
+        if (self.config.ui.nav_width - w).abs() < 0.5 {
+            return;
+        }
+        self.config.ui.nav_width = w;
+        if let Err(e) = self.config.save(&self.paths.config_file()) {
+            self.status = format!("Could not save nav width: {e}");
         }
     }
 
@@ -2887,6 +2908,7 @@ impl MailboxApp {
         self.todo_message_id = msg.envelope.message_id.clone();
         self.show_calendar = false;
         self.show_options = true;
+        self.desk_was_options = true;
         self.pending_todo_selection = false;
         self.options_task_help_open = false;
         self.persist_options_open(true);

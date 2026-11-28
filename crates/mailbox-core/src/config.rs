@@ -240,17 +240,6 @@ pub fn folders_panel_help(is_pop3: bool, is_abv: bool) -> &'static str {
     }
 }
 
-/// Tooltip for the nav-rail sync button.
-pub fn nav_sync_tip(is_pop3: bool, is_abv: bool) -> &'static str {
-    if is_pop3 && is_abv {
-        "Sync Inbox — POP3 cannot list server folders (ABV webmail folders stay online)"
-    } else if is_pop3 {
-        "Sync Inbox — POP3 cannot list server folders"
-    } else {
-        "Sync all folders — list and download every IMAP folder (Shift+G)"
-    }
-}
-
 fn default_imap_port() -> u16 {
     993
 }
@@ -357,6 +346,12 @@ pub struct UiConfig {
     /// Remember whether the Options side panel was open last session.
     #[serde(default)]
     pub options_open: bool,
+    /// Expanded left-nav width in px (collapsed rail is fixed ~72). Default: 168.
+    #[serde(default = "default_nav_width")]
+    pub nav_width: f32,
+    /// Animate nav collapse, settings fade, Options/Calendar open, hover chrome. Default: on.
+    #[serde(default = "default_animations")]
+    pub animations: bool,
 }
 
 /// Preset tone packs for UI / new-mail sounds.
@@ -541,6 +536,14 @@ fn default_notify_opened_mail() -> bool {
     false
 }
 
+fn default_animations() -> bool {
+    true
+}
+
+fn default_nav_width() -> f32 {
+    168.0
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -557,6 +560,8 @@ impl Default for UiConfig {
             notify_new_mail: default_notify_new_mail(),
             notify_opened_mail: default_notify_opened_mail(),
             options_open: false,
+            nav_width: default_nav_width(),
+            animations: default_animations(),
         }
     }
 }

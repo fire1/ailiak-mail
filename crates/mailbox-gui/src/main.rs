@@ -1,5 +1,6 @@
 //! AiliakMail — calm desktop email client (native GUI).
 
+mod anim;
 mod app;
 mod avatars;
 mod brand;

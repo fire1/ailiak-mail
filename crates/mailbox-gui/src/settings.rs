@@ -209,6 +209,26 @@ impl MailboxApp {
         }
 
         ui.add_space(20.0);
+        ui.label(RichText::new("Motion").strong());
+        ui.label(
+            RichText::new(
+                "Nav collapse, Settings fade, and Options / Calendar panel open.",
+            )
+            .small()
+            .color(theme::mute(ui.ctx())),
+        );
+        ui.add_space(6.0);
+        let mut animations = self.config.ui.animations;
+        if ui
+            .checkbox(&mut animations, "Animations")
+            .on_hover_text("Smooth width and fade transitions")
+            .changed()
+        {
+            self.config.ui.animations = animations;
+            self.persist_ui_prefs(ui.ctx());
+        }
+
+        ui.add_space(20.0);
         ui.label(RichText::new("Accent").strong());
         ui.label(
             RichText::new("Highlights, selection, and links.")
@@ -268,6 +288,7 @@ impl MailboxApp {
         if ui.button("Reset appearance defaults").clicked() {
             self.config.ui.theme = ThemeMode::System;
             self.config.ui.accent = theme::DEFAULT_ACCENT_ID.into();
+            self.config.ui.animations = true;
             theme::apply_appearance(ui.ctx(), self.config.ui.theme, &self.config.ui.accent);
             self.persist_ui_prefs(ui.ctx());
         }

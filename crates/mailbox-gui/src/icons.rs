@@ -501,13 +501,19 @@ pub fn folder_nav_button_indent(
 }
 
 pub fn collapse_button(ui: &mut Ui, collapsed: bool, color: Color32) -> Response {
-    let size = Vec2::splat(28.0);
+    // Expand (uncollapse): large hit target. Collapse: ~Accounts `.small()` text size.
+    let (side, glyph_pad, rounding) = if collapsed {
+        (28.0, 4.0, 4.0)
+    } else {
+        (16.0, 2.0, 3.0)
+    };
+    let size = Vec2::splat(side);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     if response.hovered() {
         ui.painter()
-            .rect_filled(rect, 4.0, color.linear_multiply(0.2));
+            .rect_filled(rect, rounding, color.linear_multiply(0.2));
     }
-    paint_panel_toggle(ui, rect.shrink(4.0), collapsed, color);
+    paint_panel_toggle(ui, rect.shrink(glyph_pad), collapsed, color);
     response.on_hover_text(if collapsed {
         "Expand folders"
     } else {
@@ -515,13 +521,21 @@ pub fn collapse_button(ui: &mut Ui, collapsed: bool, color: Color32) -> Response
     })
 }
 
-/// Circular “+” control for adding an account.
+/// Clean “+” control for adding an account (`ph::PLUS` / U+E3D4).
+/// Same hover plate as [`collapse_button`].
 pub fn plus_account_button(ui: &mut Ui, size: f32) -> Response {
     let mute = theme::mute(ui.ctx());
-    let accent = theme::accent(ui.ctx());
+    let (glyph_pad, rounding) = if size >= 24.0 {
+        (4.0, 4.0)
+    } else {
+        (2.0, 3.0)
+    };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-    let color = if response.hovered() { accent } else { mute };
-    paint_glyph(ui, rect.shrink(size * 0.12), ph::PLUS_CIRCLE, color);
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, rounding, mute.linear_multiply(0.2));
+    }
+    paint_glyph(ui, rect.shrink(glyph_pad), ph::PLUS, mute);
     response.on_hover_text("Add account")
 }
 
@@ -649,7 +663,7 @@ pub fn settings_nav_button(ui: &mut Ui, collapsed: bool) -> Response {
         false,
         "Settings",
         "Settings (,)",
-        ph::GEAR,
+        ph::GEAR_SIX,
     )
 }
 
