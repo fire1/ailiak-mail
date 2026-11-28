@@ -1,8 +1,7 @@
 //! Main chrome panes: top bar, folders, list, reader, status, shell layout.
 
 use egui::{
-    Align, Color32, CursorIcon, Id, Layout, Order, Rect, RichText, ScrollArea, Sense, Ui,
-    UiBuilder,
+    Align, Color32, CursorIcon, Id, Layout, Order, Rect, RichText, ScrollArea, Sense, Ui, UiBuilder,
 };
 
 use crate::app::MailboxApp;
@@ -223,7 +222,10 @@ impl MailboxApp {
         let compose_x = (list_left + 10.0).max(logo_right + 12.0);
         let compose_rect = Rect::from_min_max(
             egui::pos2(compose_x, bar.center().y - row_h * 0.5),
-            egui::pos2(actions_left.max(compose_x + 1.0), bar.center().y + row_h * 0.5),
+            egui::pos2(
+                actions_left.max(compose_x + 1.0),
+                bar.center().y + row_h * 0.5,
+            ),
         );
         let compose_sync_right = ui
             .allocate_new_ui(UiBuilder::new().max_rect(compose_rect), |ui| {
@@ -408,38 +410,75 @@ impl MailboxApp {
                     },
                 )
                 .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        if collapsed {
-                            // Same centered column as folder / footer icons.
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    if collapsed {
+                        // Same centered column as folder / footer icons.
+                        ui.horizontal(|ui| {
+                            let btn = 28.0;
+                            ui.add_space((ui.available_width() - btn).max(0.0) * 0.5);
+                            if icons::collapse_button(ui, true, mute).clicked() {
+                                toggle_collapse = true;
+                            }
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Accounts")
+                                    .small()
+                                    .family(theme::nav_family())
+                                    .color(mute),
+                            );
+                            // Leave 8px so the collapse control isn't flush to the edge.
+                            ui.add_space((ui.available_width() - 28.0 - 8.0).max(0.0));
+                            if icons::collapse_button(ui, false, mute).clicked() {
+                                toggle_collapse = true;
+                            }
+                        });
+                    }
+                    ui.add_space(4.0);
+
+                    let gap = 6.0;
+                    let show_plus = accounts_hovered;
+                    if collapsed {
+                        // Narrow rail: stack avatars in a centered column.
+                        for (id, name, email) in &accounts {
+                            let selected = id == &selected_id;
+                            let tip = if name.is_empty() {
+                                email.clone()
+                            } else {
+                                format!("{name}\n{email}")
+                            };
+                            let view = self.resolve_avatar(ui.ctx(), email, name);
                             ui.horizontal(|ui| {
-                                let btn = 28.0;
-                                ui.add_space((ui.available_width() - btn).max(0.0) * 0.5);
-                                if icons::collapse_button(ui, true, mute).clicked() {
-                                    toggle_collapse = true;
+                                ui.add_space((ui.available_width() - avatar_size).max(0.0) * 0.5);
+                                if avatars::avatar_button(ui, &view, avatar_size, selected, &tip)
+                                    .clicked()
+                                {
+                                    switch_to = Some(id.clone());
                                 }
                             });
-                        } else {
+                            ui.add_space(4.0);
+                        }
+                        if show_plus {
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("Accounts")
-                                        .small()
-                                        .family(theme::nav_family())
-                                        .color(mute),
-                                );
-                                // Leave 8px so the collapse control isn't flush to the edge.
-                                ui.add_space((ui.available_width() - 28.0 - 8.0).max(0.0));
-                                if icons::collapse_button(ui, false, mute).clicked() {
-                                    toggle_collapse = true;
+                                ui.add_space((ui.available_width() - avatar_size).max(0.0) * 0.5);
+                                if icons::plus_account_button(ui, avatar_size).clicked() {
+                                    add_account = true;
                                 }
                             });
                         }
-                        ui.add_space(4.0);
-
-                        let gap = 6.0;
-                        let show_plus = accounts_hovered;
-                        if collapsed {
-                            // Narrow rail: stack avatars in a centered column.
+                    } else {
+                        // Wide panel: centered avatar row; “+” only while hovered.
+                        let n = accounts.len() + usize::from(show_plus);
+                        let row_w = if n == 0 {
+                            0.0
+                        } else {
+                            n as f32 * avatar_size + (n.saturating_sub(1) as f32) * gap
+                        };
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            ui.add_space((ui.available_width() - row_w).max(0.0) * 0.5);
                             for (id, name, email) in &accounts {
                                 let selected = id == &selected_id;
                                 let tip = if name.is_empty() {
@@ -448,74 +487,18 @@ impl MailboxApp {
                                     format!("{name}\n{email}")
                                 };
                                 let view = self.resolve_avatar(ui.ctx(), email, name);
-                                ui.horizontal(|ui| {
-                                    ui.add_space(
-                                        (ui.available_width() - avatar_size).max(0.0) * 0.5,
-                                    );
-                                    if avatars::avatar_button(
-                                        ui,
-                                        &view,
-                                        avatar_size,
-                                        selected,
-                                        &tip,
-                                    )
+                                if avatars::avatar_button(ui, &view, avatar_size, selected, &tip)
                                     .clicked()
-                                    {
-                                        switch_to = Some(id.clone());
-                                    }
-                                });
-                                ui.add_space(4.0);
-                            }
-                            if show_plus {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(
-                                        (ui.available_width() - avatar_size).max(0.0) * 0.5,
-                                    );
-                                    if icons::plus_account_button(ui, avatar_size).clicked() {
-                                        add_account = true;
-                                    }
-                                });
-                            }
-                        } else {
-                            // Wide panel: centered avatar row; “+” only while hovered.
-                            let n = accounts.len() + usize::from(show_plus);
-                            let row_w = if n == 0 {
-                                0.0
-                            } else {
-                                n as f32 * avatar_size
-                                    + (n.saturating_sub(1) as f32) * gap
-                            };
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = gap;
-                                ui.add_space((ui.available_width() - row_w).max(0.0) * 0.5);
-                                for (id, name, email) in &accounts {
-                                    let selected = id == &selected_id;
-                                    let tip = if name.is_empty() {
-                                        email.clone()
-                                    } else {
-                                        format!("{name}\n{email}")
-                                    };
-                                    let view = self.resolve_avatar(ui.ctx(), email, name);
-                                    if avatars::avatar_button(
-                                        ui,
-                                        &view,
-                                        avatar_size,
-                                        selected,
-                                        &tip,
-                                    )
-                                    .clicked()
-                                    {
-                                        switch_to = Some(id.clone());
-                                    }
-                                }
-                                if show_plus
-                                    && icons::plus_account_button(ui, avatar_size).clicked()
                                 {
-                                    add_account = true;
+                                    switch_to = Some(id.clone());
                                 }
-                            });
-                        }
-                    });
+                            }
+                            if show_plus && icons::plus_account_button(ui, avatar_size).clicked() {
+                                add_account = true;
+                            }
+                        });
+                    }
+                });
                 ui.ctx().data_mut(|d| {
                     d.insert_temp(accounts_hover_id, accounts_band.response.hovered());
                 });
@@ -531,8 +514,7 @@ impl MailboxApp {
                     .filter(|f| {
                         let role = mailbox_core::classify_mailbox(&f.path, &f.name);
                         role.is_system()
-                            && (show_all_mail
-                                || !mailbox_core::is_all_mail(&f.path, &f.name))
+                            && (show_all_mail || !mailbox_core::is_all_mail(&f.path, &f.name))
                     })
                     .cloned()
                     .collect();
@@ -684,8 +666,7 @@ impl MailboxApp {
                     ui.add_space(2.0);
                     if self.people_section_open {
                         for person in &self.people_cache {
-                            let selected =
-                                selected_person.as_deref() == Some(person.addr.as_str());
+                            let selected = selected_person.as_deref() == Some(person.addr.as_str());
                             let label = crate::people::display_name(person).to_string();
                             if icons::stak_nav_button(
                                 ui,
@@ -910,11 +891,7 @@ impl MailboxApp {
             self.envelopes.len()
         };
         let multi = self.list_multi_select;
-        let selected_n = if multi {
-            self.list_selected.len()
-        } else {
-            0
-        };
+        let selected_n = if multi { self.list_selected.len() } else { 0 };
         let title = if multi {
             if selected_n == 0 {
                 format!("{list_title} · select")
@@ -1419,11 +1396,7 @@ impl MailboxApp {
     }
 
     /// Classic-mail reply: original message on top, Talanoa dock below — hard clipped.
-    fn paint_inline_reply_reader(
-        &mut self,
-        ui: &mut Ui,
-        msg: &mailbox_core::types::Message,
-    ) {
+    fn paint_inline_reply_reader(&mut self, ui: &mut Ui, msg: &mailbox_core::types::Message) {
         let load_images = self.load_remote_images;
         let body = self.cached_mail_body().cloned();
         let window_h = ui.ctx().screen_rect().height();
@@ -1450,8 +1423,7 @@ impl MailboxApp {
         let width = ui.available_width();
 
         // Top: original mail (clipped).
-        let (top_rect, _) =
-            ui.allocate_exact_size(egui::vec2(width, top_h), Sense::hover());
+        let (top_rect, _) = ui.allocate_exact_size(egui::vec2(width, top_h), Sense::hover());
         ui.allocate_new_ui(UiBuilder::new().max_rect(top_rect), |ui| {
             ui.set_clip_rect(top_rect);
             ui.painter().rect_filled(top_rect, 0.0, paper);
@@ -1469,12 +1441,7 @@ impl MailboxApp {
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
                     if let Some(body) = body.as_ref() {
-                        crate::mail_reader::show_body(
-                            ui,
-                            body,
-                            load_images,
-                            &mut self.mail_images,
-                        );
+                        crate::mail_reader::show_body(ui, body, load_images, &mut self.mail_images);
                     } else {
                         ui.label(readable_message_plain(msg));
                     }
@@ -1484,18 +1451,13 @@ impl MailboxApp {
         ui.add_space(gap);
 
         // Bottom: opaque dock (covers any bleed from above).
-        let (bot_rect, _) =
-            ui.allocate_exact_size(egui::vec2(width, compose_h), Sense::hover());
+        let (bot_rect, _) = ui.allocate_exact_size(egui::vec2(width, compose_h), Sense::hover());
         ui.allocate_new_ui(UiBuilder::new().max_rect(bot_rect), |ui| {
             ui.set_clip_rect(bot_rect);
             ui.painter().rect_filled(bot_rect, 0.0, paper);
             if let Some(mut draft) = self.compose.take() {
-                let res = crate::compose::show_inline_compose(
-                    ui,
-                    &mut draft,
-                    self.busy.send,
-                    window_h,
-                );
+                let res =
+                    crate::compose::show_inline_compose(ui, &mut draft, self.busy.send, window_h);
                 self.apply_compose_webview_result(&draft, &res, ui.ctx());
                 let hotkey_send = self.compose_webview.take_send_hotkey();
                 if res.send || hotkey_send {
@@ -1552,8 +1514,7 @@ impl MailboxApp {
         let scroll_h = (budget - dock_h - gap).max(40.0);
         let width = ui.available_width();
 
-        let (scroll_rect, _) =
-            ui.allocate_exact_size(egui::vec2(width, scroll_h), Sense::hover());
+        let (scroll_rect, _) = ui.allocate_exact_size(egui::vec2(width, scroll_h), Sense::hover());
         ui.allocate_new_ui(UiBuilder::new().max_rect(scroll_rect), |ui| {
             ui.set_clip_rect(scroll_rect);
             egui::ScrollArea::vertical()
@@ -1564,10 +1525,8 @@ impl MailboxApp {
                     ui.set_width(ui.available_width());
                     if self.chat_messages.is_empty() {
                         ui.label(
-                            RichText::new(
-                                "No messages with this person in the local cache yet.",
-                            )
-                            .color(theme::reader_mute()),
+                            RichText::new("No messages with this person in the local cache yet.")
+                                .color(theme::reader_mute()),
                         );
                         return;
                     }
@@ -1609,9 +1568,7 @@ impl MailboxApp {
                                     );
                                     if !msg.envelope.subject.is_empty() {
                                         ui.label(
-                                            RichText::new(&msg.envelope.subject)
-                                                .small()
-                                                .strong(),
+                                            RichText::new(&msg.envelope.subject).small().strong(),
                                         );
                                     }
                                     ui.label(
@@ -1626,8 +1583,7 @@ impl MailboxApp {
         });
 
         ui.add_space(gap);
-        let (dock_rect, _) =
-            ui.allocate_exact_size(egui::vec2(width, dock_h), Sense::hover());
+        let (dock_rect, _) = ui.allocate_exact_size(egui::vec2(width, dock_h), Sense::hover());
         let mut body = std::mem::take(&mut self.chat_reply);
         let mut focused = self.chat_reply_focused;
         let mut attachments = std::mem::take(&mut self.chat_attachments);
@@ -1723,11 +1679,7 @@ impl MailboxApp {
         let resp = if expanded {
             ui.add(egui::Label::new(label).wrap().sense(Sense::click()))
         } else {
-            ui.add(
-                egui::Label::new(label)
-                    .truncate()
-                    .sense(Sense::click()),
-            )
+            ui.add(egui::Label::new(label).truncate().sense(Sense::click()))
         };
         let resp = if tip.is_empty() {
             resp
@@ -1742,11 +1694,7 @@ impl MailboxApp {
 
     /// Compact From line; expand for To / Cc / Date.
     /// Privacy / tracking note sits on the right of the collapsed From row.
-    fn paint_reader_from_header(
-        &mut self,
-        ui: &mut Ui,
-        msg: &mailbox_core::types::Message,
-    ) {
+    fn paint_reader_from_header(&mut self, ui: &mut Ui, msg: &mailbox_core::types::Message) {
         use egui_phosphor::regular as ph;
 
         let mute = theme::reader_mute();
@@ -1788,12 +1736,8 @@ impl MailboxApp {
                 .on_hover_text(tip);
             let from_resp = ui
                 .add(
-                    egui::Button::new(
-                        RichText::new(msg.display_from())
-                            .size(13.0)
-                            .color(mute),
-                    )
-                    .frame(false),
+                    egui::Button::new(RichText::new(msg.display_from()).size(13.0).color(mute))
+                        .frame(false),
                 )
                 .on_hover_text(tip);
             if caret_resp.clicked() || from_resp.clicked() {
@@ -1902,9 +1846,7 @@ impl MailboxApp {
         // so mail body can never paint through the composer. Only for the
         // message that opened the reply — switching mails clears compose.
         let inline_reply = self.compose.as_ref().is_some_and(|c| {
-            c.inline
-                && c.is_reply()
-                && c.reply_source_id.as_ref() == Some(&msg.envelope.id)
+            c.inline && c.is_reply() && c.reply_source_id.as_ref() == Some(&msg.envelope.id)
         });
         if inline_reply {
             self.paint_inline_reply_reader(ui, &msg);
@@ -1923,9 +1865,7 @@ impl MailboxApp {
         let load_images = self.load_remote_images;
         // Tracking note lives on the From row; only show the remote-images hint here.
         if use_webview && !load_images {
-            let has_remote = self
-                .cached_mail_body()
-                .is_some_and(|b| b.has_remote_images);
+            let has_remote = self.cached_mail_body().is_some_and(|b| b.has_remote_images);
             let has_threats = self
                 .cached_mail_body()
                 .is_some_and(|b| b.has_image_threats());
@@ -2003,12 +1943,7 @@ impl MailboxApp {
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
                     if let Some(body) = body.as_ref() {
-                        crate::mail_reader::show_body(
-                            ui,
-                            body,
-                            load_images,
-                            &mut self.mail_images,
-                        );
+                        crate::mail_reader::show_body(ui, body, load_images, &mut self.mail_images);
                     }
                 });
         }
@@ -2046,11 +1981,7 @@ impl MailboxApp {
                     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
                     ui.put(rect, egui::Spinner::new().size(12.0));
                     let _ = resp.on_hover_text("Refreshing Desk…");
-                } else if ui
-                    .small_button("↻")
-                    .on_hover_text("Refresh Desk")
-                    .clicked()
-                {
+                } else if ui.small_button("↻").on_hover_text("Refresh Desk").clicked() {
                     self.refresh_desk_tasks();
                 }
             });
@@ -2132,12 +2063,7 @@ impl MailboxApp {
         let (from_name, from_addr) = self
             .open_message
             .as_ref()
-            .map(|m| {
-                (
-                    m.envelope.from_name.clone(),
-                    m.envelope.from_addr.clone(),
-                )
-            })
+            .map(|m| (m.envelope.from_name.clone(), m.envelope.from_addr.clone()))
             .unwrap_or_default();
         let display_name = if from_name.trim().is_empty() {
             from_addr.clone()
@@ -2189,7 +2115,9 @@ impl MailboxApp {
             // Name — hover shows send-mail (and copy when name is the only line).
             if !display_name.is_empty() {
                 let name_hot_id = ui.id().with("options_sender_name_hot");
-                let was_hot = ui.ctx().data(|d| d.get_temp::<bool>(name_hot_id).unwrap_or(false));
+                let was_hot = ui
+                    .ctx()
+                    .data(|d| d.get_temp::<bool>(name_hot_id).unwrap_or(false));
                 let name_row = ui.allocate_ui_with_layout(
                     egui::vec2(text_row_w, 22.0),
                     Layout::left_to_right(Align::Center),
@@ -2207,10 +2135,7 @@ impl MailboxApp {
                         let name_r = ui.add_sized(
                             egui::vec2((ui.available_width() - actions_w).max(24.0), 20.0),
                             egui::Label::new(
-                                RichText::new(&display_name)
-                                    .strong()
-                                    .size(14.0)
-                                    .color(ink),
+                                RichText::new(&display_name).strong().size(14.0).color(ink),
                             )
                             .truncate()
                             .sense(Sense::click()),
@@ -2218,33 +2143,23 @@ impl MailboxApp {
                         let mut send_clicked = false;
                         let mut copy_clicked = false;
                         let mut action_hovered = false;
+
                         if (was_hot || name_r.hovered()) && !from_addr.is_empty() {
-                            let (send_rect, send_r) =
-                                ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::click());
-                            ui.painter().text(
-                                send_rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                ph::PAPER_PLANE_TILT,
-                                egui::FontId::new(13.0, theme::icon_family()),
-                                accent,
-                            );
+                            let send_r = submit_icon_btn(ui, "Send", None);
                             send_clicked = send_r.clicked();
                             action_hovered |= send_r.hovered();
+
                             if !distinct_email {
-                                let (copy_rect, copy_r) =
-                                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
-                                ui.painter().text(
-                                    copy_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    ph::COPY,
-                                    egui::FontId::new(12.0, theme::icon_family()),
-                                    accent,
-                                );
+                                let copy_r = submit_icon_btn(ui, "Copy", Some(ph::COPY));
                                 copy_clicked = copy_r.clicked();
                                 action_hovered |= copy_r.hovered();
                             }
-                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+
+                            if action_hovered {
+                                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                            }
                         }
+
                         let hot = name_r.hovered() || action_hovered;
                         let send = (name_r.clicked() || send_clicked) && !from_addr.is_empty();
                         (send, copy_clicked, hot)
@@ -2310,7 +2225,9 @@ impl MailboxApp {
                 if email_row.inner.0 {
                     copy_email = Some(from_addr.clone());
                 }
-                email_row.response.on_hover_text(format!("{from_addr}\nCopy email"));
+                email_row
+                    .response
+                    .on_hover_text(format!("{from_addr}\nCopy email"));
             }
         });
 
@@ -2395,10 +2312,8 @@ impl MailboxApp {
         // Drag handle to stretch the Task textarea.
         let grip_h = 8.0;
         let grip_w = ui.available_width();
-        let (grip_rect, grip) = ui.allocate_exact_size(
-            egui::vec2(grip_w, grip_h),
-            Sense::click_and_drag(),
-        );
+        let (grip_rect, grip) =
+            ui.allocate_exact_size(egui::vec2(grip_w, grip_h), Sense::click_and_drag());
         let grip_color = if grip.hovered() || grip.dragged() {
             theme::accent(ui.ctx())
         } else {
@@ -2470,7 +2385,7 @@ impl MailboxApp {
                         Layout::centered_and_justified(egui::Direction::TopDown),
                         |ui| {
                             ui.label(
-                                RichText::new(ph::QUESTION)
+                                RichText::new(ph::QUESTION_MARK)
                                     .family(theme::icon_family())
                                     .size(13.0)
                                     .color(help_icon_color),
@@ -2497,12 +2412,13 @@ impl MailboxApp {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                             ui.label(
-                                RichText::new(ph::SELECTION)
+                                RichText::new(ph::HIGHLIGHTER)
                                     .family(theme::icon_family())
                                     .size(13.0)
-                                    .color(ink),
+                                    // .color(ink),
+                                    .color(theme::accent(ui.ctx())),
                             );
-                            ui.label(RichText::new("Select").color(ink));
+                            /* ui.label(RichText::new("Select").color(ink)); */
                         });
                     });
                 })
@@ -2522,14 +2438,20 @@ impl MailboxApp {
                     ui.add_enabled_ui(false, |ui| {
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(12.0));
-                            ui.label(RichText::new("Submit").color(mute));
+                            // ui.label(RichText::new("Submit").color(mute));
                         });
                     });
                 } else {
                     let submit = ui
                         .add(
-                            egui::Button::new(RichText::new("Submit").color(Color32::WHITE))
-                                .fill(theme::accent(ui.ctx())),
+                            egui::Button::new(
+                                //    RichText::new("Submit").color(Color32::WHITE)
+                                RichText::new(ph::PAPER_PLANE_TILT)
+                                    .family(theme::icon_family())
+                                    .size(13.0)
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(theme::accent(ui.ctx())),
                         )
                         .on_hover_text("Submit to Ailiak.com");
                     if submit.clicked() {
@@ -2624,7 +2546,10 @@ impl MailboxApp {
 
         egui::TopBottomPanel::top("top")
             .exact_height(44.0)
-            .frame(layout::panel_frame(egui::Margin::symmetric(10.0, 0.0), panel))
+            .frame(layout::panel_frame(
+                egui::Margin::symmetric(10.0, 0.0),
+                panel,
+            ))
             .show_separator_line(false)
             .show(ctx, |ui| {
                 ui.add_space(7.0);
@@ -2633,7 +2558,10 @@ impl MailboxApp {
 
         egui::TopBottomPanel::bottom("status")
             .exact_height(28.0)
-            .frame(layout::panel_frame(egui::Margin::symmetric(10.0, 0.0), panel))
+            .frame(layout::panel_frame(
+                egui::Margin::symmetric(10.0, 0.0),
+                panel,
+            ))
             .show_separator_line(false)
             .show(ctx, |ui| {
                 self.status_bar(ui);
@@ -2709,10 +2637,13 @@ impl MailboxApp {
         } else if (win_w - self.last_shell_width).abs() > 12.0 {
             // Keep the user's relative split when the window is resized.
             let scale = win_w / self.last_shell_width.max(1.0);
-            self.list_width = (self.list_width * scale).clamp(*list_range.start(), *list_range.end());
+            self.list_width =
+                (self.list_width * scale).clamp(*list_range.start(), *list_range.end());
             self.last_shell_width = win_w;
         }
-        self.list_width = self.list_width.clamp(*list_range.start(), *list_range.end());
+        self.list_width = self
+            .list_width
+            .clamp(*list_range.start(), *list_range.end());
         let options_w = self.list_width;
 
         // Tight gap between mid ↔ reader; keep outer chrome gutters.
@@ -2742,41 +2673,39 @@ impl MailboxApp {
         };
         let list_card = theme::list_card(ctx);
         let reader_card = theme::reader_card(ctx);
-        let card_edge = egui::Stroke::new(
-            1.0_f32,
-            theme::mute(ctx).linear_multiply(0.28),
-        );
+        let card_edge = egui::Stroke::new(1.0_f32, theme::mute(ctx).linear_multiply(0.28));
 
-        let list_response = egui::SidePanel::left(Id::new("list_v4"))
-            .resizable(false)
-            .exact_width(self.list_width)
-            .show_separator_line(false)
-            .frame(layout::panel_frame(egui::Margin::ZERO, panel))
-            .show(ctx, |ui| {
-                layout::begin_panel(ui, panel);
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(list_card_gutter.left);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(
-                            (ui.available_width() - list_card_gutter.right).max(0.0),
-                            28.0,
-                        ),
-                        Layout::left_to_right(Align::Center),
-                        |ui| {
-                            self.list_pane_header(ui);
-                        },
-                    );
-                });
-                ui.add_space(4.0);
-                // Accent-tinted rounded card (title stays above on chrome).
-                layout::content_card_stroke(list_card, list_card_gutter, list_pad, card_edge)
-                    .show(ui, |ui| {
-                        ui.set_min_height(ui.available_height());
-                        self.list_pane(ui);
+        let list_response =
+            egui::SidePanel::left(Id::new("list_v4"))
+                .resizable(false)
+                .exact_width(self.list_width)
+                .show_separator_line(false)
+                .frame(layout::panel_frame(egui::Margin::ZERO, panel))
+                .show(ctx, |ui| {
+                    layout::begin_panel(ui, panel);
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(list_card_gutter.left);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(
+                                (ui.available_width() - list_card_gutter.right).max(0.0),
+                                28.0,
+                            ),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                self.list_pane_header(ui);
+                            },
+                        );
                     });
-                layout::end_panel(ui);
-            });
+                    ui.add_space(4.0);
+                    // Accent-tinted rounded card (title stays above on chrome).
+                    layout::content_card_stroke(list_card, list_card_gutter, list_pad, card_edge)
+                        .show(ui, |ui| {
+                            ui.set_min_height(ui.available_height());
+                            self.list_pane(ui);
+                        });
+                    layout::end_panel(ui);
+                });
 
         self.list_panel_left = list_response.response.rect.left();
         let list_rect = list_response.response.rect;
@@ -2784,10 +2713,8 @@ impl MailboxApp {
         // content overflows and would leave a fake gap past the scrollbar.
         let seam_x = self.list_panel_left + self.list_width;
         let grab = ctx.style().interaction.resize_grab_radius_side.max(6.0);
-        let resize_rect = Rect::from_x_y_ranges(
-            (seam_x - grab)..=(seam_x + grab),
-            list_rect.y_range(),
-        );
+        let resize_rect =
+            Rect::from_x_y_ranges((seam_x - grab)..=(seam_x + grab), list_rect.y_range());
 
         // Drag hit-target only — card gutters replace the old hairline seam.
         let resize = egui::Area::new(Id::new("list_v4_resize"))
@@ -2941,8 +2868,7 @@ fn nav_accordion_header(
     // Peek hover on the upcoming header row so gear/sync stay hidden until needed.
     let row_h = 28.0;
     let peek = ui.available_rect_before_wrap();
-    let header_rect =
-        egui::Rect::from_min_size(peek.min, egui::vec2(peek.width(), row_h));
+    let header_rect = egui::Rect::from_min_size(peek.min, egui::vec2(peek.width(), row_h));
     let row_hovered = ui.rect_contains_pointer(header_rect);
     let leading = if row_hovered { caret } else { group_icon };
 

@@ -207,7 +207,7 @@ pub fn paint_search(ui: &Ui, rect: egui::Rect, color: Color32) {
 pub fn paint_star(ui: &Ui, rect: egui::Rect, color: Color32) {
     paint_glyph(ui, rect, ph::STAR, color);
 }
-
+/*
 /// Top-bar Sync: glyph + label (or spinner while busy).
 pub fn toolbar_button(
     ui: &mut Ui,
@@ -218,7 +218,7 @@ pub fn toolbar_button(
 ) -> Response {
     toolbar_button_inner(ui, kind, label, tip, busy, false, 0.0)
 }
-
+*/
 /// Glyph + label that always uses the hover chip fill so it stays noticeable
 /// (Compose in the top bar). `min_height` matches the search field chrome.
 pub fn toolbar_button_emphasized(
@@ -275,10 +275,8 @@ fn toolbar_button_inner(
         ui.painter().rect_filled(rect, 6.0, fill);
     }
     let icon_rect = egui::Rect::from_center_size(
-        ui.painter().round_pos_to_pixels(Pos2::new(
-            rect.left() + pad.x + icon * 0.5,
-            rect.center().y,
-        )),
+        ui.painter()
+            .round_pos_to_pixels(Pos2::new(rect.left() + pad.x + icon * 0.5, rect.center().y)),
         Vec2::splat(icon),
     );
     if busy {
@@ -344,8 +342,11 @@ pub fn paint_count_badge_at(ui: &Ui, badge_rect: egui::Rect, count: u32) {
     let fg = theme::accent(ui.ctx());
     let font = FontId::proportional(10.0);
     let galley = ui.fonts(|f| f.layout_no_wrap(label, font, fg));
-    ui.painter()
-        .rect_filled(badge_rect, badge_rect.height() * 0.5, theme::select(ui.ctx()));
+    ui.painter().rect_filled(
+        badge_rect,
+        badge_rect.height() * 0.5,
+        theme::select(ui.ctx()),
+    );
     let text_pos = ui
         .painter()
         .round_pos_to_pixels(badge_rect.center() - galley.size() * 0.5);
@@ -478,10 +479,9 @@ pub fn folder_nav_button_indent(
     let badge_reserve = paint_count_badge(ui, rect, badge, collapsed);
 
     if !collapsed {
-        let text_pos = ui.painter().round_pos_to_pixels(Pos2::new(
-            rect.left() + 30.0 + indent,
-            rect.center().y,
-        ));
+        let text_pos = ui
+            .painter()
+            .round_pos_to_pixels(Pos2::new(rect.left() + 30.0 + indent, rect.center().y));
         let font = theme::nav_font(12.0);
         let color = if selected { accent } else { mute };
         let text_max_w = (rect.right() - badge_reserve - 4.0 - text_pos.x).max(0.0);
@@ -592,7 +592,11 @@ fn nav_action_row(
             .text(text_pos, Align2::LEFT_CENTER, label, font, text_color);
     }
 
-    let tip = if enabled { hover } else { "Open a message first" };
+    let tip = if enabled {
+        hover
+    } else {
+        "Open a message first"
+    };
     if collapsed || !enabled {
         response.on_hover_text(tip)
     } else {

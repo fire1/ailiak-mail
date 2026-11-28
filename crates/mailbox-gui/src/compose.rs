@@ -258,10 +258,7 @@ impl ComposeDraft {
 
 fn strip_recipient_newlines(input: &mut String) {
     if input.contains('\n') || input.contains('\r') {
-        *input = input
-            .chars()
-            .filter(|c| *c != '\n' && *c != '\r')
-            .collect();
+        *input = input.chars().filter(|c| *c != '\n' && *c != '\r').collect();
     }
 }
 
@@ -374,7 +371,12 @@ fn fmt_btn(ui: &mut Ui, glyph: &str, tip: &str, active: bool) -> egui::Response 
         ui.painter()
             .rect_filled(rect, 6.0, ui.visuals().widgets.hovered.bg_fill);
     }
-    paint_glyph(ui, rect.shrink(6.0), glyph, if active { accent } else { mute });
+    paint_glyph(
+        ui,
+        rect.shrink(6.0),
+        glyph,
+        if active { accent } else { mute },
+    );
     // Above — default tips drop into the native body webview.
     hover_text_above(resp, tip)
 }
@@ -388,11 +390,24 @@ fn paint_format_toolbar(ui: &mut Ui, draft: &ComposeDraft, result: &mut ComposeU
         if fmt_btn(ui, ph::TEXT_ITALIC, "Italic (Ctrl+I)", draft.fmt.italic).clicked() {
             result.exec = Some("italic");
         }
-        if fmt_btn(ui, ph::TEXT_UNDERLINE, "Underline (Ctrl+U)", draft.fmt.underline).clicked()
+        if fmt_btn(
+            ui,
+            ph::TEXT_UNDERLINE,
+            "Underline (Ctrl+U)",
+            draft.fmt.underline,
+        )
+        .clicked()
         {
             result.exec = Some("underline");
         }
-        if fmt_btn(ui, ph::TEXT_STRIKETHROUGH, "Strikethrough", draft.fmt.strike).clicked() {
+        if fmt_btn(
+            ui,
+            ph::TEXT_STRIKETHROUGH,
+            "Strikethrough",
+            draft.fmt.strike,
+        )
+        .clicked()
+        {
             result.exec = Some("strikeThrough");
         }
         ui.add_space(4.0);
@@ -502,6 +517,38 @@ pub(crate) fn close_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
     resp.on_hover_text(tip)
 }
 
+/// Small send/submit button using `ph::PAPER_PLANE_TILT` by default.
+pub(crate) fn submit_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
+    submit_icon_btn_with_icon(ui, tip, ph::PAPER_PLANE_TILT)
+}
+
+/// Small send/submit button with a custom icon glyph.
+pub(crate) fn submit_icon_btn_with_icon(
+    ui: &mut Ui,
+    tip: &str,
+    icon: &'static str, // or match the exact type `paint_glyph` expects
+) -> egui::Response {
+    let accent = theme::accent(ui.ctx());
+    let size = Vec2::splat(28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    // Reader card is always light paper — mix white ← accent for one clear plate.
+    let t = if resp.is_pointer_button_down_on() {
+        0.32
+    } else if resp.hovered() {
+        0.22
+    } else {
+        0.14
+    };
+    let fill = Color32::from_rgb(
+        ((255.0 * (1.0 - t)) + (f32::from(accent.r()) * t)) as u8,
+        ((255.0 * (1.0 - t)) + (f32::from(accent.g()) * t)) as u8,
+        ((255.0 * (1.0 - t)) + (f32::from(accent.b()) * t)) as u8,
+    );
+    ui.painter().rect_filled(rect, 6.0, fill);
+    paint_glyph(ui, rect.shrink(6.0), icon, accent);
+    resp.on_hover_text(tip)
+}
+
 /// Accent Send control — plane glyph via Phosphor font (not Button label).
 fn send_button(ui: &mut Ui, enabled: bool, sending: bool) -> egui::Response {
     let accent = theme::accent(ui.ctx());
@@ -534,10 +581,8 @@ fn send_button(ui: &mut Ui, enabled: bool, sending: bool) -> egui::Response {
     };
     ui.painter().rect_filled(rect, 8.0, fill);
     let icon_c = rect.left_center() + egui::vec2(pad.x + icon * 0.5, 0.0);
-    let icon_rect = egui::Rect::from_center_size(
-        ui.painter().round_pos_to_pixels(icon_c),
-        Vec2::splat(icon),
-    );
+    let icon_rect =
+        egui::Rect::from_center_size(ui.painter().round_pos_to_pixels(icon_c), Vec2::splat(icon));
     paint_glyph(ui, icon_rect, ph::PAPER_PLANE_TILT, Color32::WHITE);
     ui.painter().galley(
         egui::pos2(
@@ -576,7 +621,11 @@ impl ComposeSentNotice {
         let to_line = match to.len() {
             0 => "your recipients".into(),
             1 => short_recipient(&to[0]),
-            2 => format!("{} and {}", short_recipient(&to[0]), short_recipient(&to[1])),
+            2 => format!(
+                "{} and {}",
+                short_recipient(&to[0]),
+                short_recipient(&to[1])
+            ),
             n => format!("{} and {} others", short_recipient(&to[0]), n - 1),
         };
         let subject = {
@@ -617,16 +666,12 @@ pub fn show_compose_sent(ui: &mut Ui, notice: &ComposeSentNotice) -> ComposeSent
         // Soft check plate
         let mark = ui.available_width().min(56.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(mark), Sense::hover());
-        ui.painter().circle_filled(rect.center(), mark * 0.42, accent.linear_multiply(0.18));
+        ui.painter()
+            .circle_filled(rect.center(), mark * 0.42, accent.linear_multiply(0.18));
         paint_glyph(ui, rect.shrink(mark * 0.22), ph::CHECK, accent);
 
         ui.add_space(18.0);
-        ui.label(
-            RichText::new("Message sent")
-                .size(26.0)
-                .strong()
-                .color(ink),
-        );
+        ui.label(RichText::new("Message sent").size(26.0).strong().color(ink));
         ui.add_space(8.0);
         ui.label(
             RichText::new(format!("On its way to {}.", notice.to_line))
@@ -818,11 +863,7 @@ fn paint_recipient_tag(ui: &mut Ui, tag: &str, mute: Color32, locked: bool) -> b
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(
-                    RichText::new(label)
-                        .size(13.0)
-                        .color(theme::reader_ink()),
-                );
+                ui.label(RichText::new(label).size(13.0).color(theme::reader_ink()));
                 if !locked {
                     let (x_rect, x_resp) =
                         ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
@@ -901,9 +942,7 @@ fn paint_clean_recipient_row(
             recipient_matches(input, tags, hints)
         };
 
-        let mut sel = ui
-            .ctx()
-            .data(|d| d.get_temp::<usize>(sel_id).unwrap_or(0));
+        let mut sel = ui.ctx().data(|d| d.get_temp::<usize>(sel_id).unwrap_or(0));
         if !matches.is_empty() {
             sel = sel.min(matches.len() - 1);
         } else {
@@ -919,11 +958,7 @@ fn paint_clean_recipient_row(
                 sel = (sel + 1) % matches.len();
             }
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)) {
-                sel = if sel == 0 {
-                    matches.len() - 1
-                } else {
-                    sel - 1
-                };
+                sel = if sel == 0 { matches.len() - 1 } else { sel - 1 };
             }
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
                 picked = Some(matches[sel].1.clone());
@@ -1041,8 +1076,7 @@ fn paint_clean_recipient_row(
                         .inner
                 });
             overlay = Some(area.response.rect);
-            let close_outside =
-                te.clicked_elsewhere() && area.response.clicked_elsewhere();
+            let close_outside = te.clicked_elsewhere() && area.response.clicked_elsewhere();
             if ui.input(|i| i.key_pressed(Key::Escape)) || close_outside {
                 ui.memory_mut(|m| m.close_popup());
                 overlay = None;
@@ -1057,8 +1091,7 @@ fn paint_clean_recipient_row(
             if tab_next {
                 ui.memory_mut(|m| m.surrender_focus(edit_id));
             } else {
-                ui.ctx()
-                    .memory_mut(|m| m.request_focus(edit_id));
+                ui.ctx().memory_mut(|m| m.request_focus(edit_id));
             }
             return (true, tab_next, None);
         }
@@ -1102,19 +1135,13 @@ pub fn show_reader_compose(
             }
         }
         ui.add_space(6.0);
-        ui.label(
-            RichText::new(compose_title(draft))
-                .size(13.0)
-                .color(mute),
-        );
+        ui.label(RichText::new(compose_title(draft)).size(13.0).color(mute));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Feedback: hide account email (To is also hidden below).
             if !draft.to_locked() && !draft.from_email.is_empty() {
                 ui.add(
-                    egui::Label::new(
-                        RichText::new(&draft.from_email).small().color(mute),
-                    )
-                    .truncate(),
+                    egui::Label::new(RichText::new(&draft.from_email).small().color(mute))
+                        .truncate(),
                 );
             }
         });
@@ -1297,9 +1324,7 @@ pub fn show_reader_compose(
     if to_tab {
         result.focus_editor = true;
         result.header_focused = false;
-    } else if subject_focused
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab))
-    {
+    } else if subject_focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
         if to_locked {
             result.focus_editor = true;
             result.header_focused = false;
@@ -1338,8 +1363,7 @@ pub fn show_reader_compose(
     let (editor_rect, editor_resp) =
         ui.allocate_exact_size(Vec2::new(body_w, body_h), Sense::click());
     // White underlay so it matches the clean card (webview paints on top).
-    ui.painter()
-        .rect_filled(editor_rect, 0.0, Color32::WHITE);
+    ui.painter().rect_filled(editor_rect, 0.0, Color32::WHITE);
     if editor_resp.clicked()
         || editor_resp.gained_focus()
         || (editor_resp.hovered() && ui.input(|i| i.pointer.primary_pressed()))
@@ -1360,8 +1384,7 @@ pub fn show_reader_compose(
                 draft.pick_attachments();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can = !sending
-                    && (!draft.to.is_empty() || !draft.to_input.trim().is_empty());
+                let can = !sending && (!draft.to.is_empty() || !draft.to_input.trim().is_empty());
                 if send_button(ui, can, sending).clicked() {
                     result.send = true;
                 }
@@ -1372,12 +1395,9 @@ pub fn show_reader_compose(
         },
     );
     // Ctrl+Enter (Linux/Windows/macOS) or Cmd+Enter (macOS) to send.
-    let can_send =
-        !sending && (!draft.to.is_empty() || !draft.to_input.trim().is_empty());
+    let can_send = !sending && (!draft.to.is_empty() || !draft.to_input.trim().is_empty());
     if can_send
-        && ui.input(|i| {
-            (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(Key::Enter)
-        })
+        && ui.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(Key::Enter))
     {
         result.send = true;
     }
@@ -1414,8 +1434,10 @@ pub fn show_inline_compose(
         78.0
     };
     let width = dock.width();
-    let (header_rect, _) =
-        ui.allocate_exact_size(Vec2::new(width, header_h.min(dock.height() * 0.4)), Sense::hover());
+    let (header_rect, _) = ui.allocate_exact_size(
+        Vec2::new(width, header_h.min(dock.height() * 0.4)),
+        Sense::hover(),
+    );
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(header_rect), |ui| {
         ui.set_clip_rect(header_rect);
         ui.add_space(4.0);
@@ -1514,9 +1536,7 @@ pub fn show_inline_compose(
                     }
                     // Only when the dock is expanded/focused — already-shrunk dock hides this.
                     if draft.dock_focused {
-                        if hover_text_below(icon_btn(ui, ph::ARROWS_IN), "Shrink reply")
-                            .clicked()
-                        {
+                        if hover_text_below(icon_btn(ui, ph::ARROWS_IN), "Shrink reply").clicked() {
                             draft.dock_focused = false;
                         }
                     }
@@ -1582,8 +1602,10 @@ pub fn show_chat_reply_dock(
 
     let header_h: f32 = if attachments.is_empty() { 28.0 } else { 56.0 };
     let width = dock.width();
-    let (header_rect, _) =
-        ui.allocate_exact_size(Vec2::new(width, header_h.min(dock.height() * 0.35)), Sense::hover());
+    let (header_rect, _) = ui.allocate_exact_size(
+        Vec2::new(width, header_h.min(dock.height() * 0.35)),
+        Sense::hover(),
+    );
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(header_rect), |ui| {
         ui.set_clip_rect(header_rect);
         ui.horizontal(|ui| {
@@ -1676,8 +1698,7 @@ pub fn show_chat_reply_dock(
                         out.open_full = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let can =
-                            !sending && (!body.trim().is_empty() || !attachments.is_empty());
+                        let can = !sending && (!body.trim().is_empty() || !attachments.is_empty());
                         if send_button(ui, can, sending).clicked() {
                             out.send = true;
                         }
