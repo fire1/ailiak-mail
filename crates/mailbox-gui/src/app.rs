@@ -226,6 +226,8 @@ pub struct MailboxApp {
     pub(crate) ailiak_token_input: String,
     pub(crate) account_name_input: String,
     pub(crate) account_email_input: String,
+    /// Account sign-off (empty = default Ailiak line; `-` = none).
+    pub(crate) account_signature_input: String,
     pub(crate) mail_protocol: MailProtocol,
     pub(crate) imap_host_input: String,
     pub(crate) mail_port_input: String,
@@ -237,7 +239,7 @@ pub struct MailboxApp {
     /// Cached "password on file" for the editing account (never query keyring while painting).
     pub(crate) mail_password_saved: bool,
     pub(crate) smtp_host_input: String,
-    pub(crate) smtp_port: u16,
+    pub(crate) smtp_port_input: String,
     /// Account id currently edited in Settings (may be a new draft).
     pub(crate) editing_account_id: String,
     /// Multi-step add-account flow (`None` = manage existing).
@@ -376,6 +378,7 @@ impl MailboxApp {
             ailiak_token_input: String::new(),
             account_name_input: String::new(),
             account_email_input: String::new(),
+            account_signature_input: String::new(),
             mail_protocol: MailProtocol::Imap,
             imap_host_input: String::new(),
             mail_port_input: "993".into(),
@@ -385,7 +388,7 @@ impl MailboxApp {
             show_mail_password: false,
             mail_password_saved: false,
             smtp_host_input: String::new(),
-            smtp_port: 587,
+            smtp_port_input: "587".into(),
             editing_account_id,
             account_wizard: None,
             ailiak_logo,
@@ -451,7 +454,7 @@ impl MailboxApp {
         self.mail_port_input = draft.imap_port.to_string();
         self.mail_tls = draft.imap_tls;
         self.smtp_host_input = draft.smtp_host;
-        self.smtp_port = draft.smtp_port;
+        self.smtp_port_input = draft.smtp_port.to_string();
         if self.account_name_input.trim().is_empty() {
             self.account_name_input = preset.label.to_string();
         }
@@ -554,7 +557,14 @@ impl MailboxApp {
             } else {
                 self.smtp_host_input.trim().to_string()
             },
-            smtp_port: if self.smtp_port == 0 { 587 } else { self.smtp_port },
+            smtp_port: {
+                let p = self.smtp_port_input.trim().parse::<u16>().unwrap_or(587);
+                if p == 0 {
+                    587
+                } else {
+                    p
+                }
+            },
             smtp_tls: true,
             username: if self.imap_user_input.trim().is_empty() {
                 email.to_string()
@@ -562,7 +572,20 @@ impl MailboxApp {
                 self.imap_user_input.trim().to_string()
             },
             auth,
+            signature: self.account_signature_input.clone(),
         })
+    }
+
+    /// Apply the selected account's sign-off to a draft (skip Feedback).
+    fn apply_compose_signature(&self, draft: &mut crate::compose::ComposeDraft) {
+        if draft.to_locked() {
+            draft.signature_on_send.clear();
+            return;
+        }
+        draft.signature_on_send = self
+            .selected_account()
+            .and_then(|a| a.effective_signature())
+            .unwrap_or_default();
     }
 
     pub(crate) fn oauth_ready(&self, provider: OAuthProvider) -> bool {
@@ -662,9 +685,9 @@ impl MailboxApp {
                 self.avatar_tx.clone(),
             );
         }
-        let existing_name = self
-            .config
-            .account_by_id(&id)
+        let existing = self.config.account_by_id(&id).cloned();
+        let existing_name = existing
+            .as_ref()
             .map(|a| a.name.clone())
             .unwrap_or_default();
         let mut account = MailAccountConfig::from_provider(result.mail_provider, email.clone());
@@ -677,11 +700,16 @@ impl MailboxApp {
             result.name.clone()
         };
         account.auth = result.oauth.auth_method();
+        account.signature = existing
+            .map(|a| a.signature)
+            .unwrap_or_else(|| self.account_signature_input.clone());
         self.account_name_input = account.name.clone();
         self.account_email_input = email;
+        self.account_signature_input = account.signature.clone();
         self.imap_user_input = account.username.clone();
         self.imap_host_input = account.imap_host.clone();
         self.smtp_host_input = account.smtp_host.clone();
+        self.smtp_port_input = account.smtp_port.to_string();
         self.mail_port_input = account.imap_port.to_string();
         self.mail_tls = account.imap_tls;
         self.mail_protocol = account.protocol;
@@ -1016,6 +1044,8 @@ impl MailboxApp {
         self.show_mail_password = false;
         self.mail_test_feedback.clear();
         self.smtp_host_input.clear();
+        self.smtp_port_input = "587".into();
+        self.account_signature_input.clear();
         self.account_wizard = Some(AccountWizard::default());
         self.open_settings(SettingsSection::Accounts);
         self.status = "Add account — choose a provider".into();
@@ -1614,13 +1644,14 @@ and paste it here."
             self.editing_account_id = a.id;
             self.account_name_input = a.name;
             self.account_email_input = a.email;
+            self.account_signature_input = a.signature;
             self.mail_protocol = a.protocol;
             self.imap_host_input = a.imap_host;
             self.mail_port_input = a.imap_port.to_string();
             self.mail_tls = a.imap_tls;
             self.imap_user_input = a.username;
             self.smtp_host_input = a.smtp_host;
-            self.smtp_port = a.smtp_port;
+            self.smtp_port_input = a.smtp_port.to_string();
         } else {
             self.mail_password_saved = false;
         }
@@ -1767,6 +1798,7 @@ and paste it here."
         draft.from_email = self.account_email();
         // `inline: false` → full reader-card composer (not the reply dock).
         draft.inline = false;
+        self.apply_compose_signature(&mut draft);
         self.refresh_compose_hints();
         // No field focused on open — user clicks To / Subject / body intentionally.
         self.compose_autofocus_to = false;
@@ -1793,6 +1825,7 @@ and paste it here."
             format!("{name} <{addr}>")
         };
         draft.to.push(to);
+        self.apply_compose_signature(&mut draft);
         self.refresh_compose_hints();
         self.compose_autofocus_to = false;
         self.compose_autofocus_subject = true;
@@ -1846,7 +1879,9 @@ and paste it here."
         };
         self.compose_sent = None;
         let email = self.account_email();
-        self.compose = Some(crate::compose::ComposeDraft::from_reply(&msg, all, &email));
+        let mut draft = crate::compose::ComposeDraft::from_reply(&msg, all, &email);
+        self.apply_compose_signature(&mut draft);
+        self.compose = Some(draft);
     }
 
     pub(crate) fn open_person_chat(&mut self, addr: &str) {
@@ -2236,12 +2271,19 @@ impl MailboxApp {
                 return;
             }
         };
+        let mut body_text = body;
+        if let Some(sig) = account.effective_signature() {
+            if !body_text.trim().is_empty() {
+                body_text.push_str("\n\n");
+            }
+            body_text.push_str(&sig);
+        }
         let mail = mailbox_core::OutgoingMail {
             to: vec![peer],
             cc: vec![],
             bcc: vec![],
             subject,
-            body_text: body,
+            body_text,
             body_html: None,
             in_reply_to,
             references,

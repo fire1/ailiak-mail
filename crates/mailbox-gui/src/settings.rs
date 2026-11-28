@@ -746,6 +746,7 @@ impl MailboxApp {
                                         smtp_tls: true,
                                         username: String::new(),
                                         auth: MailAuthMethod::Password,
+                                        signature: String::new(),
                                     };
                                     tmp.apply_protocol_defaults();
                                     self.mail_port_input = tmp.imap_port.to_string();
@@ -757,6 +758,13 @@ impl MailboxApp {
                                 egui::TextEdit::singleline(&mut self.smtp_host_input)
                                     .desired_width(280.0)
                                     .hint_text("smtp.example.com"),
+                            );
+                            ui.end_row();
+                            ui.label("SMTP port");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.smtp_port_input)
+                                    .desired_width(72.0)
+                                    .hint_text("587"),
                             );
                             ui.end_row();
                         });
@@ -878,6 +886,7 @@ impl MailboxApp {
                             smtp_tls: true,
                             username: String::new(),
                             auth: MailAuthMethod::Password,
+                            signature: String::new(),
                         };
                         tmp.apply_protocol_defaults();
                         self.mail_port_input = tmp.imap_port.to_string();
@@ -906,6 +915,7 @@ impl MailboxApp {
                             smtp_tls: true,
                             username: String::new(),
                             auth: MailAuthMethod::Password,
+                            signature: String::new(),
                         };
                         tmp.apply_protocol_defaults();
                         self.mail_port_input = tmp.imap_port.to_string();
@@ -934,7 +944,37 @@ impl MailboxApp {
                 ui.label("SMTP host");
                 ui.text_edit_singleline(&mut self.smtp_host_input);
                 ui.end_row();
+                ui.label("SMTP port");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.smtp_port_input).desired_width(72.0),
+                );
+                ui.end_row();
             });
+
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new("Signature")
+                .small()
+                .color(theme::mute(ui.ctx())),
+        );
+        let sig_hint = mailbox_core::default_account_signature(
+            if self.account_email_input.trim().is_empty() {
+                "you@example.com"
+            } else {
+                self.account_email_input.trim()
+            },
+        );
+        ui.add(
+            egui::TextEdit::multiline(&mut self.account_signature_input)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .hint_text(sig_hint),
+        );
+        ui.label(
+            RichText::new("Leave blank for the default. Use a single dash (-) for no signature.")
+                .small()
+                .color(theme::mute(ui.ctx())),
+        );
 
         if self.mail_protocol == MailProtocol::Pop3 {
             ui.add_space(4.0);

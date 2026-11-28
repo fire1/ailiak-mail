@@ -31,7 +31,7 @@ pub mod types;
 pub mod folder_role;
 
 pub use config::{
-    folders_panel_help, looks_like_abv, mail_host, normalize_mail_addr,
+    default_account_signature, folders_panel_help, looks_like_abv, mail_host, normalize_mail_addr,
     pop3_account_form_help, pop3_sync_limitation_note, remote_image_domain, AiliakConfig,
     AppConfig, MailAccountConfig, MailAuthMethod, MailProtocol, OAuthConfig, SoundTheme,
     ThemeMode, UiConfig,

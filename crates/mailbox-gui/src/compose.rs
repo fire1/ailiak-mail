@@ -52,6 +52,8 @@ pub struct ComposeDraft {
     pub fmt: ComposeFmtState,
     /// Appended after `body` on send (classic mail quote).
     pub quote_on_send: String,
+    /// Account sign-off appended after the body (before the reply quote) on send.
+    pub signature_on_send: String,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
     pub show_cc: bool,
@@ -84,6 +86,7 @@ impl ComposeDraft {
             editor_rev: 1,
             fmt: ComposeFmtState::default(),
             quote_on_send: String::new(),
+            signature_on_send: String::new(),
             in_reply_to: None,
             references: None,
             show_cc: false,
@@ -142,6 +145,13 @@ impl ComposeDraft {
         if out.trim().is_empty() && !html_body_is_empty(&self.body_html) {
             out = mailbox_core::html_to_plain(&self.body_html);
         }
+        let sig = self.signature_on_send.trim();
+        if !sig.is_empty() {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(sig);
+        }
         if !self.quote_on_send.is_empty() {
             if !out.is_empty() {
                 out.push('\n');
@@ -162,6 +172,11 @@ impl ComposeDraft {
             } else {
                 html.clear();
             }
+        }
+        let sig = self.signature_on_send.trim();
+        if !sig.is_empty() {
+            html.push_str("<br><br>");
+            html.push_str(&plain_to_editor_html(sig));
         }
         if !self.quote_on_send.is_empty() {
             html.push_str(&quote_plain_to_html(&self.quote_on_send));
@@ -224,6 +239,7 @@ impl ComposeDraft {
             editor_rev: 1,
             fmt: ComposeFmtState::default(),
             quote_on_send: quote_body(msg),
+            signature_on_send: String::new(),
             in_reply_to: Some(msg.envelope.message_id.clone()),
             references: Some(reply_references(
                 &msg.envelope.references,

@@ -114,6 +114,19 @@ pub struct MailAccountConfig {
     pub username: String,
     #[serde(default)]
     pub auth: MailAuthMethod,
+    /// Outbound sign-off. Empty → default Ailiak line; `-` → none.
+    #[serde(default)]
+    pub signature: String,
+}
+
+/// Default chill sign-off when the account signature field is left blank.
+pub fn default_account_signature(email: &str) -> String {
+    let email = email.trim();
+    if email.is_empty() {
+        "Sent from Ailiak — keep it chill.".into()
+    } else {
+        format!("Sent from {email}'s Ailiak — keep it chill.")
+    }
 }
 
 impl MailAccountConfig {
@@ -142,6 +155,7 @@ impl MailAccountConfig {
             smtp_tls: p.smtp_tls,
             username: email,
             auth: MailAuthMethod::Password,
+            signature: String::new(),
         }
     }
 
@@ -161,6 +175,19 @@ impl MailAccountConfig {
             smtp_tls: true,
             username: email,
             auth: MailAuthMethod::Password,
+            signature: String::new(),
+        }
+    }
+
+    /// Resolved sign-off for outbound mail (`None` = omit).
+    pub fn effective_signature(&self) -> Option<String> {
+        let t = self.signature.trim();
+        if t == "-" || t == "—" {
+            None
+        } else if t.is_empty() {
+            Some(default_account_signature(&self.email))
+        } else {
+            Some(t.to_string())
         }
     }
 
@@ -647,6 +674,7 @@ mod tests {
             smtp_tls: true,
             username: email.into(),
             auth: MailAuthMethod::Password,
+            signature: String::new(),
         }
     }
 

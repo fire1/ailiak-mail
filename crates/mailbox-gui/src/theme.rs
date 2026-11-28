@@ -177,6 +177,11 @@ pub fn nav_font(size: f32) -> FontId {
     FontId::new(size, nav_family())
 }
 
+/// Lato Semibold — real weight for titles (egui `.strong()` only tints color).
+pub fn semibold_family() -> FontFamily {
+    FontFamily::Name("LatoSemibold".into())
+}
+
 /// Paint a single line of text, ellipsizing when it exceeds `max_width`.
 /// `pos` is the left-center anchor (same as `Align2::LEFT_CENTER` for `painter.text`).
 pub fn paint_truncated_line(
@@ -261,6 +266,20 @@ fn install_fonts(ctx: &egui::Context) {
             0..0,
             ["RobotoMono".to_owned(), "RobotoMonoMedium".to_owned()],
         );
+    {
+        // Named family so RichText can pick real weight (egui `.strong()` is color-only).
+        let mut semibold = vec!["LatoSemibold".to_owned(), "LatoMedium".to_owned(), "Lato".to_owned()];
+        if let Some(prop) = fonts.families.get(&FontFamily::Proportional) {
+            for name in prop {
+                if !semibold.iter().any(|s| s == name) {
+                    semibold.push(name.clone());
+                }
+            }
+        }
+        fonts
+            .families
+            .insert(FontFamily::Name("LatoSemibold".into()), semibold);
+    }
     {
         let mut mono = vec![
             "RobotoMonoMedium".to_owned(),

@@ -370,7 +370,7 @@ impl MailboxApp {
         // Tighter vertical rhythm than the global style (folders felt too airy).
         ui.spacing_mut().item_spacing.y = 2.0;
 
-        // Top-down: scrollable accounts/folders, then a fixed tools strip (paper fill).
+        // Top-down: fixed Accounts, scrollable Folders/…, fixed tools strip.
         // Rows: Options, Calendar, Settings, [Feedback], Help.
         // Height = rows + item gaps + band pad (8+16) + outer bottom (8).
         let row_h = 28.0;
@@ -388,15 +388,14 @@ impl MailboxApp {
         // Must match list_card_gutter.left (NAV_LIST_SEAM_GUTTER) — see constant docs.
         let paper_right_gutter = Self::NAV_LIST_SEAM_GUTTER;
 
-        ScrollArea::vertical()
-            .id_salt("nav_scroll_v5")
-            .max_height(body_h)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), body_h),
+            Layout::top_down(Align::Min),
+            |ui| {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing.y = 2.0;
 
-                // Accounts paper band — flush left, rounded on the right.
+                // Accounts paper band — pinned (not scrolled).
                 // “+” only while this band is hovered (one-frame lag via temp memory).
                 let accounts_hover_id = egui::Id::new("nav_accounts_band_hover");
                 let accounts_hovered = ui
@@ -580,223 +579,234 @@ impl MailboxApp {
 
                 ui.add_space(8.0);
 
-                // Folders → Staks → People → Labels.
-                // Staks + People can both stay open; opening either closes
-                // Folders/Labels (and vice versa).
-                let show_all_mail = self.config.ui.show_all_mail;
-                let system_folders: Vec<_> = folders
-                    .iter()
-                    .filter(|f| {
-                        let role = mailbox_core::classify_mailbox(&f.path, &f.name);
-                        role.is_system()
-                            && (show_all_mail || !mailbox_core::is_all_mail(&f.path, &f.name))
-                    })
-                    .cloned()
-                    .collect();
-                let user_folders: Vec<_> = folders
-                    .iter()
-                    .filter(|f| {
-                        mailbox_core::classify_mailbox(&f.path, &f.name)
-                            == mailbox_core::MailboxRole::User
-                    })
-                    .cloned()
-                    .collect();
-                let label_tree = mailbox_core::build_label_tree(&user_folders);
-                let has_staks = !self.staks_cache.is_empty();
-                let has_people = !self.people_cache.is_empty();
-                let has_labels = !label_tree.is_empty();
-                let selected_stak = self.selected_stak.clone();
-                let selected_person = self.selected_person.clone();
+                // Folders → Staks → People → Labels (scroll; Accounts stay pinned above).
+                ScrollArea::vertical()
+                    .id_salt("nav_scroll_v6")
+                    .max_height(ui.available_height())
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 2.0;
 
-                {
-                    let open = self.folders_section_open;
-                    let header = nav_accordion_header(
-                        ui,
-                        "Folders",
-                        egui_phosphor::regular::FOLDER,
-                        open,
-                        mute,
-                        collapsed,
-                        if collapsed {
-                            None
-                        } else {
-                            Some(FolderHeaderActions {
-                                manage_tip: "Manage folders & labels",
+                        let show_all_mail = self.config.ui.show_all_mail;
+                        let system_folders: Vec<_> = folders
+                            .iter()
+                            .filter(|f| {
+                                let role = mailbox_core::classify_mailbox(&f.path, &f.name);
+                                role.is_system()
+                                    && (show_all_mail
+                                        || !mailbox_core::is_all_mail(&f.path, &f.name))
                             })
-                        },
-                    );
-                    if header.toggle {
-                        if open {
-                            self.folders_section_open = false;
-                        } else {
-                            self.folders_section_open = true;
-                            self.staks_section_open = false;
-                            self.people_section_open = false;
-                        }
-                    }
-                    if header.manage {
-                        open_folders_settings = true;
-                    }
-                    ui.add_space(2.0);
-                }
+                            .cloned()
+                            .collect();
+                        let user_folders: Vec<_> = folders
+                            .iter()
+                            .filter(|f| {
+                                mailbox_core::classify_mailbox(&f.path, &f.name)
+                                    == mailbox_core::MailboxRole::User
+                            })
+                            .cloned()
+                            .collect();
+                        let label_tree = mailbox_core::build_label_tree(&user_folders);
+                        let has_staks = !self.staks_cache.is_empty();
+                        let has_people = !self.people_cache.is_empty();
+                        let has_labels = !label_tree.is_empty();
+                        let selected_stak = self.selected_stak.clone();
+                        let selected_person = self.selected_person.clone();
 
-                if self.folders_section_open {
-                    for folder in &system_folders {
-                        let selected = folder.path == selected_folder;
-                        let kind = FolderIcon::from_folder(&folder.path, &folder.name);
-                        if icons::folder_nav_button(
-                            ui,
-                            kind,
-                            &folder.name,
-                            folder.unread,
-                            selected,
-                            collapsed,
-                        )
-                        .clicked()
                         {
-                            clicked_folder = Some(folder.path.clone());
-                        }
-                    }
-                    ui.add_space(8.0);
-                } else {
-                    ui.add_space(4.0);
-                }
-
-                if has_staks {
-                    let open = self.staks_section_open;
-                    let header = nav_accordion_header(
-                        ui,
-                        "Staks",
-                        egui_phosphor::regular::STACK,
-                        open,
-                        mute,
-                        collapsed,
-                        None,
-                    );
-                    if header.toggle {
-                        if open {
-                            self.staks_section_open = false;
-                        } else {
-                            self.staks_section_open = true;
-                            self.folders_section_open = false;
-                            self.labels_section_open = false;
-                        }
-                    }
-                    ui.add_space(2.0);
-                    if self.staks_section_open {
-                        let staks: Vec<_> = self.staks_cache.clone();
-                        for stak in &staks {
-                            let selected = selected_stak.as_deref() == Some(stak.id.as_str());
-                            let brand = self.brand_texture(ui.ctx(), &stak.id);
-                            if icons::stak_nav_button(
+                            let open = self.folders_section_open;
+                            let header = nav_accordion_header(
                                 ui,
-                                &stak.label,
-                                0,
-                                selected,
+                                "Folders",
+                                egui_phosphor::regular::FOLDER,
+                                open,
+                                mute,
                                 collapsed,
-                                brand.as_ref(),
-                            )
-                            .clicked()
-                            {
-                                clicked_stak = Some(stak.id.clone());
+                                if collapsed {
+                                    None
+                                } else {
+                                    Some(FolderHeaderActions {
+                                        manage_tip: "Manage folders & labels",
+                                    })
+                                },
+                            );
+                            if header.toggle {
+                                if open {
+                                    self.folders_section_open = false;
+                                } else {
+                                    self.folders_section_open = true;
+                                    self.staks_section_open = false;
+                                    self.people_section_open = false;
+                                }
                             }
+                            if header.manage {
+                                open_folders_settings = true;
+                            }
+                            ui.add_space(2.0);
                         }
-                        ui.add_space(8.0);
-                    } else {
-                        ui.add_space(4.0);
-                    }
-                }
 
-                if has_people {
-                    let open = self.people_section_open;
-                    let header = nav_accordion_header(
-                        ui,
-                        "People",
-                        egui_phosphor::regular::USER,
-                        open,
-                        mute,
-                        collapsed,
-                        None,
-                    );
-                    if header.toggle {
-                        if open {
-                            self.people_section_open = false;
+                        if self.folders_section_open {
+                            for folder in &system_folders {
+                                let selected = folder.path == selected_folder;
+                                let kind = FolderIcon::from_folder(&folder.path, &folder.name);
+                                if icons::folder_nav_button(
+                                    ui,
+                                    kind,
+                                    &folder.name,
+                                    folder.unread,
+                                    selected,
+                                    collapsed,
+                                )
+                                .clicked()
+                                {
+                                    clicked_folder = Some(folder.path.clone());
+                                }
+                            }
+                            ui.add_space(8.0);
                         } else {
-                            self.people_section_open = true;
-                            self.folders_section_open = false;
-                            self.labels_section_open = false;
+                            ui.add_space(4.0);
                         }
-                    }
-                    ui.add_space(2.0);
-                    if self.people_section_open {
-                        for person in &self.people_cache {
-                            let selected = selected_person.as_deref() == Some(person.addr.as_str());
-                            let label = crate::people::display_name(person).to_string();
-                            if icons::stak_nav_button(
+
+                        if has_staks {
+                            let open = self.staks_section_open;
+                            let header = nav_accordion_header(
                                 ui,
-                                &label,
-                                person.unread,
-                                selected,
+                                "Staks",
+                                egui_phosphor::regular::STACK,
+                                open,
+                                mute,
                                 collapsed,
                                 None,
-                            )
-                            .on_hover_text(&person.addr)
-                            .clicked()
-                            {
-                                clicked_person = Some(person.addr.clone());
+                            );
+                            if header.toggle {
+                                if open {
+                                    self.staks_section_open = false;
+                                } else {
+                                    self.staks_section_open = true;
+                                    self.folders_section_open = false;
+                                    self.labels_section_open = false;
+                                }
+                            }
+                            ui.add_space(2.0);
+                            if self.staks_section_open {
+                                let staks: Vec<_> = self.staks_cache.clone();
+                                for stak in &staks {
+                                    let selected =
+                                        selected_stak.as_deref() == Some(stak.id.as_str());
+                                    let brand = self.brand_texture(ui.ctx(), &stak.id);
+                                    if icons::stak_nav_button(
+                                        ui,
+                                        &stak.label,
+                                        0,
+                                        selected,
+                                        collapsed,
+                                        brand.as_ref(),
+                                    )
+                                    .clicked()
+                                    {
+                                        clicked_stak = Some(stak.id.clone());
+                                    }
+                                }
+                                ui.add_space(8.0);
+                            } else {
+                                ui.add_space(4.0);
                             }
                         }
-                        ui.add_space(8.0);
-                    } else {
-                        ui.add_space(4.0);
-                    }
-                }
 
-                if has_labels {
-                    let open = self.labels_section_open;
-                    let header = nav_accordion_header(
-                        ui,
-                        "Labels",
-                        egui_phosphor::regular::TAG,
-                        open,
-                        mute,
-                        collapsed,
-                        if collapsed {
-                            None
-                        } else {
-                            Some(FolderHeaderActions {
-                                manage_tip: "Manage folders & labels",
-                            })
-                        },
-                    );
-                    if header.toggle {
-                        if open {
-                            self.labels_section_open = false;
-                        } else {
-                            self.labels_section_open = true;
-                            self.staks_section_open = false;
-                            self.people_section_open = false;
+                        if has_people {
+                            let open = self.people_section_open;
+                            let header = nav_accordion_header(
+                                ui,
+                                "People",
+                                egui_phosphor::regular::USER,
+                                open,
+                                mute,
+                                collapsed,
+                                None,
+                            );
+                            if header.toggle {
+                                if open {
+                                    self.people_section_open = false;
+                                } else {
+                                    self.people_section_open = true;
+                                    self.folders_section_open = false;
+                                    self.labels_section_open = false;
+                                }
+                            }
+                            ui.add_space(2.0);
+                            if self.people_section_open {
+                                for person in &self.people_cache {
+                                    let selected =
+                                        selected_person.as_deref() == Some(person.addr.as_str());
+                                    let label = crate::people::display_name(person).to_string();
+                                    if icons::stak_nav_button(
+                                        ui,
+                                        &label,
+                                        person.unread,
+                                        selected,
+                                        collapsed,
+                                        None,
+                                    )
+                                    .on_hover_text(&person.addr)
+                                    .clicked()
+                                    {
+                                        clicked_person = Some(person.addr.clone());
+                                    }
+                                }
+                                ui.add_space(8.0);
+                            } else {
+                                ui.add_space(4.0);
+                            }
                         }
-                    }
-                    if header.manage {
-                        open_folders_settings = true;
-                    }
-                    ui.add_space(2.0);
-                    if self.labels_section_open {
-                        paint_label_tree(
-                            ui,
-                            &label_tree,
-                            &selected_folder,
-                            collapsed,
-                            &self.label_expanded,
-                            0,
-                            "",
-                            &mut clicked_folder,
-                            &mut toggle_label_path,
-                        );
-                    }
-                }
-            });
+
+                        if has_labels {
+                            let open = self.labels_section_open;
+                            let header = nav_accordion_header(
+                                ui,
+                                "Labels",
+                                egui_phosphor::regular::TAG,
+                                open,
+                                mute,
+                                collapsed,
+                                if collapsed {
+                                    None
+                                } else {
+                                    Some(FolderHeaderActions {
+                                        manage_tip: "Manage folders & labels",
+                                    })
+                                },
+                            );
+                            if header.toggle {
+                                if open {
+                                    self.labels_section_open = false;
+                                } else {
+                                    self.labels_section_open = true;
+                                    self.staks_section_open = false;
+                                    self.people_section_open = false;
+                                }
+                            }
+                            if header.manage {
+                                open_folders_settings = true;
+                            }
+                            ui.add_space(2.0);
+                            if self.labels_section_open {
+                                paint_label_tree(
+                                    ui,
+                                    &label_tree,
+                                    &selected_folder,
+                                    collapsed,
+                                    &self.label_expanded,
+                                    0,
+                                    "",
+                                    &mut clicked_folder,
+                                    &mut toggle_label_path,
+                                );
+                            }
+                        }
+                    });
+            },
+        );
 
         // Tools strip — same paper as Accounts; flush left, rounded on the right.
         layout::nav_paper_band(
@@ -1153,13 +1163,16 @@ impl MailboxApp {
                             .size(12.0)
                             .color(theme::unread_row_ink(ui.ctx()))
                     };
+                    // Real semibold face — egui `.strong()` is color-only and is overridden by `.color()`.
                     let subject = if seen {
                         RichText::new(&subject_s)
                             .small()
+                            .family(theme::semibold_family())
                             .color(theme::mute(ui.ctx()))
                     } else {
                         RichText::new(&subject_s)
                             .small()
+                            .family(theme::semibold_family())
                             .color(theme::unread(ui.ctx()))
                     };
                     let date_color = if seen {
@@ -2950,14 +2963,9 @@ impl MailboxApp {
             };
             side.frame(layout::panel_frame(
                 if desk_show_options {
-                    // Tighter vertical pad so default Options fits without scrolling;
-                    // ScrollArea only engages when the Task textarea is stretched.
-                    egui::Margin {
-                        left: 14.0,
-                        right: 14.0,
-                        top: 8.0,
-                        bottom: 8.0,
-                    }
+                    // Options card uses the same outer gutters as the mail body card
+                    // (see content_card below) so heights match.
+                    egui::Margin::ZERO
                 } else {
                     egui::Margin::symmetric(12.0, 12.0)
                 },
@@ -2966,7 +2974,21 @@ impl MailboxApp {
             .show(ctx, |ui| {
                 layout::begin_panel(ui, panel);
                 if desk_show_options {
-                    self.options_pane(ui);
+                    // Same top/bottom gutters as the reader card → equal height; no
+                    // accidental scrollbar on the default Options content.
+                    let options_pad = egui::Margin {
+                        left: 14.0,
+                        right: 14.0,
+                        top: 8.0,
+                        bottom: 8.0,
+                    };
+                    layout::content_card(theme::paper(ctx), card_gutter, options_pad).show(
+                        ui,
+                        |ui| {
+                            ui.set_min_height(ui.available_height());
+                            self.options_pane(ui);
+                        },
+                    );
                 } else {
                     self.calendar_pane(ui);
                 }

@@ -214,6 +214,7 @@ mod tests {
             smtp_tls: true,
             username: "demo@example.com".into(),
             auth: mailbox_core::MailAuthMethod::Password,
+            signature: String::new(),
         });
         cfg.save(&paths.config_file()).unwrap();
         let store = Store::open(&paths.db_file()).unwrap();
