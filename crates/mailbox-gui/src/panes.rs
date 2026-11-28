@@ -2145,12 +2145,16 @@ impl MailboxApp {
                         let mut action_hovered = false;
 
                         if (was_hot || name_r.hovered()) && !from_addr.is_empty() {
-                            let send_r = submit_icon_btn(ui, "Send", None);
+                            let send_r = crate::compose::submit_icon_btn(ui, "Send to ailiak.com");
                             send_clicked = send_r.clicked();
                             action_hovered |= send_r.hovered();
 
                             if !distinct_email {
-                                let copy_r = submit_icon_btn(ui, "Copy", Some(ph::COPY));
+                                let copy_r = crate::compose::btn_icon_accent(
+                                    ui,
+                                    "Copy to clipboard",
+                                    ph::COPY,
+                                );
                                 copy_clicked = copy_r.clicked();
                                 action_hovered |= copy_r.hovered();
                             }

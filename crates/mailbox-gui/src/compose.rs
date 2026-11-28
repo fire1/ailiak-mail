@@ -519,11 +519,11 @@ pub(crate) fn close_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
 
 /// Small send/submit button using `ph::PAPER_PLANE_TILT` by default.
 pub(crate) fn submit_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
-    submit_icon_btn_with_icon(ui, tip, ph::PAPER_PLANE_TILT)
+    btn_icon(ui, tip, ph::PAPER_PLANE_TILT)
 }
 
 /// Small send/submit button with a custom icon glyph.
-pub(crate) fn submit_icon_btn_with_icon(
+pub(crate) fn btn_icon_accent(
     ui: &mut Ui,
     tip: &str,
     icon: &'static str, // or match the exact type `paint_glyph` expects
