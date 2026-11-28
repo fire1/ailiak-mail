@@ -3496,7 +3496,7 @@ impl App for MailboxApp {
             crate::sounds::play_click(self.config.ui.sound_theme);
         }
 
-        // Compose paints inside the reader card (see reader_pane).
+        // Compose paints inside the mail body card (see mail_body_pane).
 
         // Compose editor webview (above egui). Hide mail reader while composing.
         let hide_mail = self.show_settings

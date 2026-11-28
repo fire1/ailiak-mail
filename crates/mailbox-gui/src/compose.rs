@@ -494,59 +494,50 @@ fn attach_button(ui: &mut Ui) -> egui::Response {
     hover_text_below(resp, "Attach files")
 }
 
-/// Discard / panel close (X) — single accent-tinted plate (no gray+stroke double layer).
-pub(crate) fn close_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
-    let accent = theme::accent(ui.ctx());
-    let size = Vec2::splat(28.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    // Reader card is always light paper — mix white ← accent for one clear plate.
-    let t = if resp.is_pointer_button_down_on() {
-        0.32
-    } else if resp.hovered() {
-        0.22
-    } else {
-        0.14
-    };
-    let fill = Color32::from_rgb(
-        ((255.0 * (1.0 - t)) + (f32::from(accent.r()) * t)) as u8,
-        ((255.0 * (1.0 - t)) + (f32::from(accent.g()) * t)) as u8,
-        ((255.0 * (1.0 - t)) + (f32::from(accent.b()) * t)) as u8,
-    );
-    ui.painter().rect_filled(rect, 6.0, fill);
-    paint_glyph(ui, rect.shrink(6.0), ph::X, accent);
-    resp.on_hover_text(tip)
+/// Icon button with an accent plate via opacity (works on light and dark).
+pub(crate) fn btn_icon_opc_acc(ui: &mut Ui, tip: &str, icon: &str) -> egui::Response {
+    btn_icon_opc_acc_rounded(ui, tip, icon, 6.0)
 }
 
-/// Small send/submit button using `ph::PAPER_PLANE_TILT` by default.
-pub(crate) fn submit_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
-    btn_icon(ui, tip, ph::PAPER_PLANE_TILT)
+/// Fully circular accent icon button (opacity plate).
+pub(crate) fn btn_icon_opc_acc_circle(ui: &mut Ui, tip: &str, icon: &str) -> egui::Response {
+    // Half the 28px side → full circle.
+    btn_icon_opc_acc_rounded(ui, tip, icon, 14.0)
 }
 
-/// Small send/submit button with a custom icon glyph.
-pub(crate) fn btn_icon_accent(
+fn btn_icon_opc_acc_rounded(
     ui: &mut Ui,
     tip: &str,
-    icon: &'static str, // or match the exact type `paint_glyph` expects
+    icon: &str,
+    rounding: f32,
 ) -> egui::Response {
     let accent = theme::accent(ui.ctx());
     let size = Vec2::splat(28.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    // Reader card is always light paper — mix white ← accent for one clear plate.
+    // No stroke — plate only on hover/press (idle stays fully transparent).
     let t = if resp.is_pointer_button_down_on() {
-        0.32
+        Some(0.32)
     } else if resp.hovered() {
-        0.22
+        Some(0.22)
     } else {
-        0.14
+        None
     };
-    let fill = Color32::from_rgb(
-        ((255.0 * (1.0 - t)) + (f32::from(accent.r()) * t)) as u8,
-        ((255.0 * (1.0 - t)) + (f32::from(accent.g()) * t)) as u8,
-        ((255.0 * (1.0 - t)) + (f32::from(accent.b()) * t)) as u8,
-    );
-    ui.painter().rect_filled(rect, 6.0, fill);
+    if let Some(t) = t {
+        ui.painter()
+            .rect_filled(rect, rounding, accent.linear_multiply(t));
+    }
     paint_glyph(ui, rect.shrink(6.0), icon, accent);
     resp.on_hover_text(tip)
+}
+
+/// Discard / panel close (X).
+pub(crate) fn close_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
+    btn_icon_opc_acc(ui, tip, ph::X)
+}
+
+/// Small send/submit button using `ph::PAPER_PLANE_TILT` by default.
+pub(crate) fn submit_icon_btn(ui: &mut Ui, tip: &str) -> egui::Response {
+    btn_icon_opc_acc(ui, tip, ph::PAPER_PLANE_TILT)
 }
 
 /// Accent Send control — plane glyph via Phosphor font (not Button label).

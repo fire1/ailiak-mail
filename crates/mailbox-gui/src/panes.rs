@@ -1427,7 +1427,7 @@ impl MailboxApp {
         ui.allocate_new_ui(UiBuilder::new().max_rect(top_rect), |ui| {
             ui.set_clip_rect(top_rect);
             ui.painter().rect_filled(top_rect, 0.0, paper);
-            self.paint_reader_subject(ui, &msg.envelope.subject, 15.0);
+            self.paint_mail_body_subject(ui, &msg.envelope.subject, 15.0);
             ui.label(
                 RichText::new(msg.display_from())
                     .small()
@@ -1637,8 +1637,8 @@ impl MailboxApp {
         }
     }
 
-    /// Subject line: collapse long titles; click to expand / collapse.
-    fn paint_reader_subject(&mut self, ui: &mut Ui, subject: &str, size: f32) {
+    /// Mail body subject: width-truncate by default; long titles click to wrap / collapse.
+    fn paint_mail_body_subject(&mut self, ui: &mut Ui, subject: &str, size: f32) {
         let subject = subject.trim();
         if subject.is_empty() {
             ui.label(
@@ -1650,32 +1650,23 @@ impl MailboxApp {
             return;
         }
 
-        const COLLAPSE_CHARS: usize = 64;
-        let char_n = subject.chars().count();
-        let can_collapse = char_n > COLLAPSE_CHARS;
-        let expanded = self.reader_subject_expanded || !can_collapse;
+        const EXPAND_CHARS: usize = 64;
+        let can_expand = subject.chars().count() > EXPAND_CHARS;
+        let expanded = self.reader_subject_expanded && can_expand;
 
-        let (shown, tip) = if expanded {
-            (
-                subject.to_string(),
-                if can_collapse {
-                    "Click to collapse subject"
-                } else {
-                    ""
-                },
-            )
+        let tip = if !can_expand {
+            ""
+        } else if expanded {
+            "Click to collapse subject"
         } else {
-            let head: String = subject
-                .chars()
-                .take(COLLAPSE_CHARS.saturating_sub(1))
-                .collect();
-            (format!("{head}…"), "Click to show full subject")
+            "Click to show full subject"
         };
 
-        let label = RichText::new(&shown)
+        let label = RichText::new(subject)
             .size(size)
             .strong()
             .color(theme::reader_ink());
+        // Collapsed: always width-truncate (narrow mail body when Options is open).
         let resp = if expanded {
             ui.add(egui::Label::new(label).wrap().sense(Sense::click()))
         } else {
@@ -1687,14 +1678,14 @@ impl MailboxApp {
             resp.on_hover_cursor(CursorIcon::PointingHand)
                 .on_hover_text(tip)
         };
-        if can_collapse && resp.clicked() {
+        if can_expand && resp.clicked() {
             self.reader_subject_expanded = !self.reader_subject_expanded;
         }
     }
 
-    /// Compact From line; expand for To / Cc / Date.
-    /// Privacy / tracking note sits on the right of the collapsed From row.
-    fn paint_reader_from_header(&mut self, ui: &mut Ui, msg: &mailbox_core::types::Message) {
+    /// Mail body From row: `from_line` left (truncate); privacy note right when collapsed.
+    /// Expand for To / Cc / Date.
+    fn paint_mail_body_from_row(&mut self, ui: &mut Ui, msg: &mailbox_core::types::Message) {
         use egui_phosphor::regular as ph;
 
         let mute = theme::reader_mute();
@@ -1720,6 +1711,8 @@ impl MailboxApp {
         } else {
             None
         };
+        let from_text = msg.display_from();
+        let row_h = ui.spacing().interact_size.y;
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -1734,12 +1727,47 @@ impl MailboxApp {
                     .frame(false),
                 )
                 .on_hover_text(tip);
+
+            // from_line left (truncate); privacy note reserved on the right — same
+            // pattern as mail-list name + date so Options-narrow cards do not overlap.
+            let note_w = if !expanded {
+                privacy_note.as_ref().map_or(0.0, |note| {
+                    let galley = ui.fonts(|f| {
+                        f.layout_no_wrap(
+                            note.clone(),
+                            egui::FontId::new(11.0, egui::FontFamily::Proportional),
+                            mute,
+                        )
+                    });
+                    let avail = ui.available_width();
+                    // Cap note so from_line keeps at least ~40% / 48px.
+                    galley
+                        .size()
+                        .x
+                        .min((avail * 0.55).max(0.0))
+                        .min((avail - 48.0).max(0.0))
+                })
+            } else {
+                0.0
+            };
+            let from_w = (ui.available_width() - note_w).max(40.0);
+
             let from_resp = ui
-                .add(
-                    egui::Button::new(RichText::new(msg.display_from()).size(13.0).color(mute))
-                        .frame(false),
+                .allocate_ui_with_layout(
+                    egui::vec2(from_w, row_h),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&from_text).size(13.0).color(mute))
+                                .truncate()
+                                .sense(Sense::click()),
+                        )
+                    },
                 )
+                .inner
+                .on_hover_cursor(CursorIcon::PointingHand)
                 .on_hover_text(tip);
+
             if caret_resp.clicked() || from_resp.clicked() {
                 self.reader_headers_expanded = !expanded;
             }
@@ -1747,7 +1775,9 @@ impl MailboxApp {
             if !expanded {
                 if let Some(note) = privacy_note.as_ref() {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(note).small().color(mute));
+                        ui.add(
+                            egui::Label::new(RichText::new(note).small().color(mute)).truncate(),
+                        );
                     });
                 }
             }
@@ -1765,7 +1795,7 @@ impl MailboxApp {
                     ui.label(RichText::new(value).size(12.0).color(mute));
                 });
             };
-            meta(ui, "From", &msg.display_from());
+            meta(ui, "From", &from_text);
             if !msg.to.is_empty() {
                 meta(ui, "To", &msg.to.join(", "));
             }
@@ -1809,7 +1839,8 @@ impl MailboxApp {
         }
     }
 
-    pub(crate) fn reader_pane(&mut self, ui: &mut Ui) {
+    /// Central mail body card (left of Options when that panel is open).
+    pub(crate) fn mail_body_pane(&mut self, ui: &mut Ui) {
         // Post-send confirmation replaces the compose form until dismissed.
         if let Some(notice) = self.compose_sent.clone() {
             match crate::compose::show_compose_sent(ui, &notice) {
@@ -1842,8 +1873,8 @@ impl MailboxApp {
             return;
         };
 
-        // Reply / reply-all: split reader into clipped original + opaque dock
-        // so mail body can never paint through the composer. Only for the
+        // Reply / reply-all: split mail body into clipped original + opaque dock
+        // so content can never paint through the composer. Only for the
         // message that opened the reply — switching mails clears compose.
         let inline_reply = self.compose.as_ref().is_some_and(|c| {
             c.inline && c.is_reply() && c.reply_source_id.as_ref() == Some(&msg.envelope.id)
@@ -1853,9 +1884,9 @@ impl MailboxApp {
             return;
         }
 
-        self.paint_reader_subject(ui, &msg.envelope.subject, 18.0);
+        self.paint_mail_body_subject(ui, &msg.envelope.subject, 18.0);
         ui.add_space(6.0);
-        self.paint_reader_from_header(ui, &msg);
+        self.paint_mail_body_from_row(ui, &msg);
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(8.0);
@@ -2072,7 +2103,6 @@ impl MailboxApp {
         };
         let avatar = self.options_sender_avatar(ui.ctx(), &from_addr, &from_name);
         let ink = theme::ink(ui.ctx());
-        let accent = theme::accent(ui.ctx());
         let mut compose_to: Option<(String, String)> = None;
         let mut copy_email: Option<String> = None;
         let distinct_email = !from_addr.is_empty() && from_addr != display_name;
@@ -2119,21 +2149,21 @@ impl MailboxApp {
                     .ctx()
                     .data(|d| d.get_temp::<bool>(name_hot_id).unwrap_or(false));
                 let name_row = ui.allocate_ui_with_layout(
-                    egui::vec2(text_row_w, 22.0),
+                    egui::vec2(text_row_w, 28.0),
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let actions_w = if was_hot {
                             if distinct_email {
-                                22.0
+                                28.0
                             } else {
-                                40.0
+                                62.0
                             }
                         } else {
                             0.0
                         };
                         let name_r = ui.add_sized(
-                            egui::vec2((ui.available_width() - actions_w).max(24.0), 20.0),
+                            egui::vec2((ui.available_width() - actions_w).max(24.0), 28.0),
                             egui::Label::new(
                                 RichText::new(&display_name).strong().size(14.0).color(ink),
                             )
@@ -2150,7 +2180,7 @@ impl MailboxApp {
                             action_hovered |= send_r.hovered();
 
                             if !distinct_email {
-                                let copy_r = crate::compose::btn_icon_accent(
+                                let copy_r = crate::compose::btn_icon_opc_acc(
                                     ui,
                                     "Copy to clipboard",
                                     ph::COPY,
@@ -2191,13 +2221,13 @@ impl MailboxApp {
                     .ctx()
                     .data(|d| d.get_temp::<bool>(email_hot_id).unwrap_or(false));
                 let email_row = ui.allocate_ui_with_layout(
-                    egui::vec2(text_row_w, 18.0),
+                    egui::vec2(text_row_w, 28.0),
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        let actions_w = if was_hot { 20.0 } else { 0.0 };
+                        let actions_w = if was_hot { 28.0 } else { 0.0 };
                         let email_r = ui.add_sized(
-                            egui::vec2((ui.available_width() - actions_w).max(24.0), 16.0),
+                            egui::vec2((ui.available_width() - actions_w).max(24.0), 28.0),
                             egui::Label::new(RichText::new(&from_addr).small().color(mute))
                                 .truncate()
                                 .sense(Sense::click()),
@@ -2205,17 +2235,13 @@ impl MailboxApp {
                         let mut copy_clicked = false;
                         let mut icon_hovered = false;
                         if was_hot || email_r.hovered() {
-                            let (icon_rect, icon_r) =
-                                ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
-                            ui.painter().text(
-                                icon_rect.center(),
-                                egui::Align2::CENTER_CENTER,
+                            let copy_r = crate::compose::btn_icon_opc_acc(
+                                ui,
+                                "Copy to clipboard",
                                 ph::COPY,
-                                egui::FontId::new(12.0, theme::icon_family()),
-                                accent,
                             );
-                            copy_clicked = icon_r.clicked();
-                            icon_hovered = icon_r.hovered();
+                            copy_clicked = copy_r.clicked();
+                            icon_hovered = copy_r.hovered();
                             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                         }
                         (
@@ -2439,28 +2465,9 @@ impl MailboxApp {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if self.busy.ailiak {
-                    ui.add_enabled_ui(false, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Spinner::new().size(12.0));
-                            // ui.label(RichText::new("Submit").color(mute));
-                        });
-                    });
-                } else {
-                    let submit = ui
-                        .add(
-                            egui::Button::new(
-                                //    RichText::new("Submit").color(Color32::WHITE)
-                                RichText::new(ph::PAPER_PLANE_TILT)
-                                    .family(theme::icon_family())
-                                    .size(13.0)
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(theme::accent(ui.ctx())),
-                        )
-                        .on_hover_text("Submit to Ailiak.com");
-                    if submit.clicked() {
-                        self.submit_todo();
-                    }
+                    ui.add(egui::Spinner::new().size(14.0));
+                } else if crate::compose::submit_icon_btn(ui, "Submit to Ailiak.com").clicked() {
+                    self.submit_todo();
                 }
             });
         });
@@ -2611,7 +2618,7 @@ impl MailboxApp {
             return;
         }
 
-        // Mid column ~30% of window; reader (central) keeps ≥50%. Nav is smallest.
+        // Mid column ~30% of window; mail body (central) keeps ≥50%. Nav is smallest.
         // exact_width is owned by us — egui's SidePanel resize snaps content-driven widths.
         // Options mirrors mid-list width (equal columns); Calendar keeps a fixed desk width.
         let win_w = ctx.screen_rect().width();
@@ -2769,6 +2776,7 @@ impl MailboxApp {
             });
         }
 
+        // Mail body (central card — left of Options / Calendar when either is open).
         egui::CentralPanel::default()
             .frame(layout::panel_frame(egui::Margin::ZERO, panel))
             .show(ctx, |ui| {
@@ -2786,7 +2794,7 @@ impl MailboxApp {
                     egui::Margin::same(16.0)
                 };
                 layout::content_card(reader_card, card_gutter, reader_pad).show(ui, |ui| {
-                    // Reader card is always white paper; force light widgets so
+                    // Mail body card is always white paper; force light widgets so
                     // TextEdit / separators stay dark-on-light in a dark shell.
                     if ui.visuals().dark_mode {
                         ui.set_style((*ui.ctx().style_of(egui::Theme::Light)).clone());
@@ -2798,7 +2806,7 @@ impl MailboxApp {
                     } else {
                         ui.set_min_height(h);
                     }
-                    self.reader_pane(ui);
+                    self.mail_body_pane(ui);
                 });
                 layout::end_panel(ui);
             });
